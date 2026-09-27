@@ -2,6 +2,10 @@ import 'dotenv/config';
 import express, { type Request, type Response } from 'express';
 import { createHandlers } from '../src/server/handlers.js';
 import { database } from '../src/server/database.js';
+import { checkDatabaseHealth } from '../src/server/health.js';
+import { assertLocalRuntimeUsesLocalDatabase, resolveRuntimeDatabase } from '../src/server/config.js';
+
+assertLocalRuntimeUsesLocalDatabase(resolveRuntimeDatabase());
 
 const app = express();
 const handlers = createHandlers(database);
@@ -26,7 +30,10 @@ app.get('/api/products/:productId/images/:imageIndex', async (request, response)
   if (!result.data || !result.mimeType) return response.status(result.status).end();
   return response.status(result.status).type(result.mimeType).send(result.data);
 });
-app.get('/api/health', (_request, response) => response.status(200).json({ status: 'ok' }));
+app.get('/api/health', async (_request, response) => {
+  const report = await checkDatabaseHealth();
+  return response.status(report.status === 'ok' ? 200 : 503).json(report);
+});
 
 const port = Number(process.env.PORT ?? 3001);
 app.listen(port, '0.0.0.0', () => {

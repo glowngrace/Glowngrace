@@ -37,7 +37,15 @@ function sendNotFound(response: ServerResponse, message: string) {
 }
 
 function sendFunction(response: ServerResponse, pathname: string) {
-  if (pathname === '/api/health') return sendJson(response, 200, { status: 'ok' });
+  if (pathname === '/api/health') {
+    const payload = JSON.stringify({
+      status: 'ok',
+      environment: 'local',
+      database: { configured: true, reachable: true, missingTables: [], productCount: 0, latencyMs: 0, provider: 'local', host: 'localhost', ssl: 'disable' },
+    });
+    response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'content-length': Buffer.byteLength(payload) });
+    return response.end(payload);
+  }
   if (pathname === '/api/products') return sendJson(response, 200, { products: [] });
   return sendNotFound(response, `No preview function handles ${pathname}.`);
 }
