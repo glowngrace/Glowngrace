@@ -17,7 +17,12 @@
     "preview:dist": "tsx scripts/serve-dist.ts",
     "db:up": "docker compose up -d db",
     "db:down": "docker compose down",
-    "db:logs": "docker compose logs -f db"
+    "db:logs": "docker compose logs -f db",
+    "db:check": "tsx scripts/check-database.ts",
+    "db:migrate": "tsx scripts/migrate-database.ts local",
+    "db:migrate:local": "tsx scripts/migrate-database.ts local",
+    "db:migrate:production": "tsx scripts/migrate-database.ts production",
+    "db:sync": "tsx scripts/sync-production-to-local.ts"
   },
   "dependencies": {
     "dotenv": "^16.4.7",

@@ -10,17 +10,31 @@ A responsive React storefront and beauty-career platform inspired by `Design/glo
 - Vercel static hosting and Node.js serverless API functions, with a single-page-app rewrite for deep links
 - Vitest / Testing Library for UI and API unit tests; Playwright for browser E2E tests, including a production-build deployment suite
 
+## Two databases, one direction
+
+The app never talks to one database from both places. Local development always uses the local Docker PostgreSQL container; production always uses Neon. Data flows in a single direction: **production to local, never local to production.**
+
+| | Local | Production |
+| --- | --- | --- |
+| Database | PostgreSQL 16 in Docker Compose (`glow-grace-data` volume) | Neon PostgreSQL |
+| Connection string | `DATABASE_URL` in `.env` | Same value, set in the Vercel project environment |
+| Schema | `npm run db:migrate:local` | `npm run db:migrate:production` |
+| Data source of truth | A copy of production, refreshed by `npm run db:sync` | The real data |
+
+Because production is the source of truth, the local database is disposable. A product you add in the local admin console is local-only until it is created in production; `npm run db:sync` will delete it. Add and verify products on production, then refresh local.
+
 ## Local setup
 
 Requirements: Node.js 22+, npm, and Docker Desktop (or another Docker Compose runtime).
 
-1. Copy `.env.example` to `.env` and adjust the local database password if needed. `.env` is ignored by Git.
+1. Copy `.env.example` to `.env`, set the local database password, and paste the Neon pooled connection string into `PRODUCTION_DATABASE_URL`. `.env` is ignored by Git and holds every setting the project uses.
 2. Install packages with `npm install`.
 3. Start the local database with `npm run db:up`. Compose initializes it from `db/init.sql` and keeps data in the `glow-grace-data` volume.
-4. Start the API and Vite development server with `npm run dev`.
-5. Open `http://localhost:5173`.
+4. Confirm both databases with `npm run db:check`, then load the current production data with `npm run db:sync`.
+5. Start the API and Vite development server with `npm run dev`.
+6. Open `http://localhost:5173`.
 
-The starter storefront works without a database. Loading and saving administrator products, contact and newsletter submissions, and checkout require the local PostgreSQL container to be running. Check `http://localhost:3001/api/health` for API liveness. Stop the local database with `npm run db:down`; this keeps its named volume and data. To intentionally remove local database data, run `docker compose down -v`.
+The starter storefront works without a database. Loading and saving administrator products, contact and newsletter submissions, and checkout require the local PostgreSQL container to be running. `http://localhost:3001/api/health` reports database health, not just process liveness. Stop the local database with `npm run db:down`; this keeps its named volume and data. To intentionally remove local database data, run `docker compose down -v` and then `npm run db:sync` to rebuild it from production.
 
 ## Sign-in and portal previews
 
@@ -32,29 +46,94 @@ The administrator catalogue can add products to PostgreSQL; saved products also 
 
 ## Environment
 
-All application/deployment settings use these environment variable names. For local Docker development, `.env` supplies both Compose and the API:
+Every setting lives in `.env` at the project root; nothing is hard-coded and no secret is committed. `.env` is ignored by Git, and `.env.example` is the committed template. Copy the template and fill in the production connection string before running any database command.
 
 | Variable | Used by | Description |
 | --- | --- | --- |
-| `DATABASE_URL` | API | PostgreSQL connection string. Use the local Docker URL in `.env`; use Neon’s pooled connection string in Vercel. |
+| `DATABASE_URL` | API, sync | The **local** Docker connection string. It is also the name the Vercel project uses, where it must hold the **Neon** connection string. |
 | `POSTGRES_DB` | Docker Compose | Local database name. |
 | `POSTGRES_USER` | Docker Compose | Local database user. |
-| `POSTGRES_PASSWORD` | Docker Compose | Local database password; replace the example value for personal deployments. |
-| `POSTGRES_PORT` | Docker Compose | Host port for the local PostgreSQL container (default `5435`; change it in `.env` if the port is already in use). |
+| `POSTGRES_PASSWORD` | Docker Compose | Local database password; replace the example value. |
+| `POSTGRES_PORT` | Docker Compose | Host port for the local container (default `5435`; change it in `.env` if the port is in use). |
+| `PRODUCTION_DATABASE_URL` | Sync, migrate, check | The **production** Neon pooled connection string. Read-only source for `npm run db:sync` and target for `npm run db:migrate:production`. |
+| `LOCAL_DATABASE_SSL` | API | TLS for the local container. Defaults to `disable`; the local image does not serve TLS. |
+| `DATABASE_SSL` | API | TLS for the production Neon connection. Defaults to `require` when the connection string does not set `sslmode`. Accepts `disable`, `require`, or `verify-full`. |
+| `DATABASE_POOL_MAX` | API | Pool size per function instance. Default `1`. |
+| `DATABASE_IDLE_TIMEOUT_MS` | API | Default `10000`. |
+| `DATABASE_CONNECT_TIMEOUT_MS` | API | Default `8000`, deliberately below the 10 s function budget so a bad connection fails with a real error instead of a hard timeout. |
+| `DATABASE_STATEMENT_TIMEOUT_MS` | API | Default `0` (off). Set a value to abort long-running queries. |
+| `ALLOW_REMOTE_DATABASE` | Local API | Default `false`. While `false`, the local API server refuses to start if `DATABASE_URL` points at anything other than the local container, so local work can never read or write production by accident. |
 | `PORT` | Local API | Express API port (defaults to `3001` if omitted). |
 | `VITE_API_BASE_URL` | Vite | Browser-visible API prefix; keep this as `/api`. Never put secrets in a `VITE_` variable. |
 
-For production, connect the Vercel project to Neon and add `DATABASE_URL` to the Vercel project's **Settings → Environment Variables** for the Production environment (and Preview if desired). Use the Neon connection string with SSL enabled; keep the password in Vercel, not in source control or a browser variable. The serverless endpoints are `/api/contact`, `/api/newsletter`, `/api/checkout`, and `/api/products`; uploaded product images are served from `/api/products/:productId/images/:imageIndex`. Vercel injects project environment variables at runtime; local `.env` values are not deployed.
+### How the API picks a connection string
 
-If using the Vercel CLI locally, link the project with `vercel link` and import the desired Vercel environment with `vercel env pull .env`. This replaces the local `.env`; restore the Docker `DATABASE_URL` before running local form submissions.
+`src/server/config.ts` is the single place that reads configuration. The API tries these names in order and uses the first one that is set: `DATABASE_URL`, `NEON_DATABASE_URL`, `DATABASE_URL_UNPOOLED`, `POSTGRES_URL`, `POSTGRES_PRISMA_URL`. The later names are the ones Neon and the Vercel Neon integration inject automatically, so the API connects whether you set `DATABASE_URL` by hand or link Neon from the Vercel dashboard.
+
+`PRODUCTION_DATABASE_URL` is deliberately **not** in that list. It is only read by the local scripts, which is what guarantees the sync can never mistake the local database for production.
+
+### Production setup on Vercel
+
+The production API needs two things: the Neon connection string and an applied schema.
+
+1. Create or pick the Neon project and copy its **pooled** connection string.
+2. Set it in the Vercel project under **Settings → Environment Variables** as `DATABASE_URL`, for the **Production** environment (and Preview if you want preview deployments to work). Keep the password in Vercel, not in source control or a browser variable.
+3. Apply the schema to Neon once, from your machine: `npm run db:migrate:production`.
+4. Confirm it works: `curl https://your-app.vercel.app/api/health` should return `"status": "ok"`.
+
+If you already linked Neon through the Vercel integration, step 2 is unnecessary — the injected variables are in the list above.
+
+## Database health
+
+`/api/health` reports whether the deployed API can reach its database. It never returns a password, and the host is masked.
+
+```sh
+curl -s https://glowngrace-tau.vercel.app/api/health
+```
+
+| `status` | Meaning | Fix |
+| --- | --- | --- |
+| `ok` (HTTP 200) | Connected and every table exists. | Nothing. |
+| `degraded` (HTTP 503) | Connected, but tables are missing. `missingTables` lists them. | `npm run db:migrate:production` |
+| `error` (HTTP 503) | Not connected, or no connection string is configured. `reason` explains which. | Set `DATABASE_URL` in Vercel, then redeploy. |
+
+The same check runs locally and covers both databases at once:
+
+```sh
+npm run db:check              # local and production
+npm run db:check production   # production only
+```
+
+It exits non-zero when either database is unhealthy, so it can be used as a deployment gate.
+
+## Schema and data commands
+
+```sh
+npm run db:up                  # start the local container
+npm run db:check               # report health of both databases
+npm run db:migrate:local       # apply the schema to the local container
+npm run db:migrate:production  # apply the schema to Neon
+npm run db:sync                # copy production data into the local container
+```
+
+`db/migrate:*` is safe to re-run. Every statement in `db/init.sql` and `db/migrations/*.sql` is `IF NOT EXISTS` or `IF EXISTS`, so the files apply cleanly to a fresh database, an existing one, and one that is already up to date.
+
+`npm run db:sync` is the only command that copies rows, and it is deliberately one-way:
+
+- It **reads** `PRODUCTION_DATABASE_URL` and **writes** `DATABASE_URL`.
+- It refuses to start unless the target is a local host, and refuses if both strings point at the same database. There is no code path that writes to production.
+- It applies `db/init.sql` to the local database, truncates the local tables, copies every row across in batches, and then realigns local identity sequences so the next locally created product gets the correct ID.
+- `--dry-run` reports production row counts without writing. `--schema-only` applies the schema and copies nothing. `--skip-images` copies the catalogue without the binary `product_images` rows.
+
+Always run it before starting local work if you need to reproduce a production bug.
 
 ## Database
 
-`db/init.sql` creates the contact-request, newsletter-subscriber, product, product-image, order, and order-item tables. Docker runs it when creating a fresh data volume. For an existing database, apply `db/migrations/002_orders.sql`, `db/migrations/003_products.sql`, and `db/migrations/004_product_image_dimensions.sql` before deploying code that depends on those tables. Docker's PostgreSQL entrypoint does not rerun initialization scripts on an already-initialized volume.
+`db/init.sql` creates the contact-request, newsletter-subscriber, product, product-image, order, and order-item tables. Docker runs it when creating a fresh data volume, and `npm run db:migrate:local` and `npm run db:migrate:production` apply it plus `db/migrations/002_orders.sql`, `db/migrations/003_products.sql`, and `db/migrations/004_product_image_dimensions.sql` to an existing database. Docker's PostgreSQL entrypoint does not rerun initialization scripts on an already-initialized volume, so use the migrate commands after changing the schema. **A database that has never been migrated returns `degraded` from `/api/health` and the admin catalogue cannot load** — this is the single most common cause of "The catalogue could not be loaded."
 
 Checkout validates the customer's delivery/contact details and product IDs on the server, looks up all prices from the product catalogue, calculates 5% GST and delivery charges, and atomically saves the order and its line items. Delivery costs are free for standard, ₹49 for express, and ₹99 for same-day delivery. Cash on delivery is the only enabled payment option; UPI, cards, and net banking are visibly marked as coming soon because no payment provider is configured. Do not collect or store payment-card details. The order confirmation includes its order number and COD total; confirmation details are kept in the browser's current navigation state rather than exposed through a public order-lookup endpoint.
 
-The application opens a lazy, small (`max: 1`) PostgreSQL pool, which suits Vercel's short-lived function instances and works with both Neon and the local Docker database.
+The application opens a lazy, small (`max: 1`) PostgreSQL pool, which suits Vercel's short-lived function instances and works with both Neon and the local Docker database. TLS is decided per environment: off for the local container, on for Neon. When a query fails, the error names the variable, the masked host, the SSL mode, and the PostgreSQL error code, so the Vercel function log identifies the cause without printing the password.
 
 ## Quality checks
 
@@ -72,7 +151,7 @@ Playwright runs Chromium in desktop and mobile emulation. Install its browser on
 
 ## Deploy to Vercel
 
-Import this repository into Vercel, keep the Vite framework/build defaults from `vercel.json`, and set `DATABASE_URL` in the Vercel project environment. The browser app is served from `dist`; the `api/` TypeScript files run as Vercel Node.js functions. Do not commit `.env` or deploy local database credentials.
+Import this repository into Vercel, keep the Vite framework/build defaults from `vercel.json`, and set `DATABASE_URL` in the Vercel project environment to the same Neon pooled connection string that `PRODUCTION_DATABASE_URL` holds in your local `.env`. If Neon is linked through the Vercel integration you can skip that and let the injected variables satisfy the API. Then run `npm run db:migrate:production` once and verify with `/api/health`; see [Production setup on Vercel](#production-setup-on-vercel). The browser app is served from `dist`; the `api/` TypeScript files run as Vercel Node.js functions. Do not commit `.env` or deploy local database credentials.
 
 The storefront is a single-page app, so `vercel.json` rewrites every non-API path to `/index.html`. Without that rewrite, Vercel looks for a file that matches each URL, and deep links or refreshes such as `/shop`, `/product/4`, or `/admin` return Vercel's "404 NOT_FOUND" page instead of the app. Two details keep this safe: the rewrite source `/:path((?!api/).*)` excludes `/api/*`, and Vercel checks the filesystem before applying rewrites, so built assets and images under `/assets` and `/images` are still served as files rather than the HTML shell. Keep `cleanUrls` off; with `cleanUrls: true` the rewrite destination must be written without the `.html` extension.
 

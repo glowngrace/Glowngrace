@@ -52,11 +52,12 @@ describe('Vercel deployment routing', () => {
   });
 
   it('never rewrites API requests to the single-page app', () => {
-    for (const route of ['/api/products', '/api/contact', '/api/newsletter', '/api/checkout', '/api/products/9/images/0']) {
+    for (const route of ['/api/products', '/api/contact', '/api/newsletter', '/api/checkout', '/api/health', '/api/products/9/images/0']) {
       expect(router.resolveRequest(route).kind, route).toBe('function');
     }
     expect(router.resolveRequest('/api/products').target).toContain(join('api', 'products.ts'));
     expect(router.resolveRequest('/api/products/9/images/0').target).toContain('[imageIndex].ts');
+    expect(router.resolveRequest('/api/health').target).toContain(join('api', 'health.ts'));
     expect(router.resolveRequest('/api/unknown-endpoint')).toEqual({ kind: 'not-found', target: '/api/unknown-endpoint' });
   });
 

@@ -62,6 +62,11 @@ test('API requests still reach the API layer and are never rewritten to the sing
   expect(products.headers()['content-type']).toContain('application/json');
   expect(await products.json()).toEqual({ products: [] });
 
+  const health = await request.get('/api/health');
+  expect(health.status()).toBe(200);
+  expect(health.headers()['cache-control']).toContain('no-store');
+  expect(await health.json()).toMatchObject({ status: 'ok', database: { configured: true, reachable: true } });
+
   for (const path of ['/api/contact', '/api/newsletter', '/api/checkout', '/api/products/9/images/0', '/api/not-a-function']) {
     const response = await request.get(path);
     expect(response.headers()['content-type'], path).toContain('application/json');
