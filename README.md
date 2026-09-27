@@ -7,8 +7,8 @@ A responsive React storefront and beauty-career platform inspired by `Design/glo
 - React 19, TypeScript, Vite, and React Router
 - PostgreSQL locally in Docker Compose; Neon PostgreSQL for production
 - Parameterized `pg` queries and Zod validation in the API
-- Vercel static hosting and Node.js serverless API functions
-- Vitest / Testing Library for UI and API unit tests; Playwright for browser E2E tests
+- Vercel static hosting and Node.js serverless API functions, with a single-page-app rewrite for deep links
+- Vitest / Testing Library for UI and API unit tests; Playwright for browser E2E tests, including a production-build deployment suite
 
 ## Local setup
 
@@ -63,10 +63,17 @@ npm run lint
 npm run build
 npm run test
 npm run test:e2e
+npm run test:e2e:dist
 ```
 
 Playwright runs Chromium in desktop and mobile emulation. Install its browser once with `npx playwright install chromium`. The E2E server starts automatically; browser tests cover storefront navigation, product and wishlist interactions, checkout delivery/tax calculations and failure recovery, portal access, administrator product/image creation, contact submission, and responsive layouts. API unit tests cover validation and server-calculated persistence without requiring a live database. To verify saved products or real local orders, apply the migrations if needed, start Docker and the app, and create a test product or place a COD test order.
 
+`npm run test:e2e` runs the storefront suite against the Vite development server. `npm run test:e2e:dist` builds the app, serves `dist` with the same routing rules as the deployment, and runs `e2e/deployment.spec.ts` against it, so a broken production route fails the build rather than reaching users. It asserts that every storefront route deep links to the built app, that a refresh keeps working, that the app's own not-found page is served instead of the hosting 404 page, that no page request returns 4xx or 5xx, that API requests still reach the API layer, and that path traversal cannot read files outside the build output. The routing rules themselves are unit tested in `src/lib/vercel-routing.test.ts`, which fails if `vercel.json` loses its rewrite or starts sending `/api` requests to the app.
+
 ## Deploy to Vercel
 
-Import this repository into Vercel, keep the Vite framework/build defaults from `vercel.json`, and set `DATABASE_URL` in the Vercel project environment. Run `npm run build` before deploying. The browser app is served from `dist`; the `api/` TypeScript files run as Vercel Node.js functions. Do not commit `.env` or deploy local database credentials.
+Import this repository into Vercel, keep the Vite framework/build defaults from `vercel.json`, and set `DATABASE_URL` in the Vercel project environment. The browser app is served from `dist`; the `api/` TypeScript files run as Vercel Node.js functions. Do not commit `.env` or deploy local database credentials.
+
+The storefront is a single-page app, so `vercel.json` rewrites every non-API path to `/index.html`. Without that rewrite, Vercel looks for a file that matches each URL, and deep links or refreshes such as `/shop`, `/product/4`, or `/admin` return Vercel's "404 NOT_FOUND" page instead of the app. Two details keep this safe: the rewrite source `/:path((?!api/).*)` excludes `/api/*`, and Vercel checks the filesystem before applying rewrites, so built assets and images under `/assets` and `/images` are still served as files rather than the HTML shell. Keep `cleanUrls` off; with `cleanUrls: true` the rewrite destination must be written without the `.html` extension.
+
+To review a production build locally, run `npm run preview:dist` after `npm run build`. It serves `dist` through the deployment routing rules, so deep links, assets, and API paths behave like they do on Vercel. Its API responses are stand-in JSON, so use `npm run dev` for real form submissions, saved products, and orders.

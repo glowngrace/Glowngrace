@@ -13,6 +13,8 @@
     "test": "vitest run",
     "test:ui": "vitest run src",
     "test:e2e": "playwright test",
+    "test:e2e:dist": "playwright test --config playwright.dist.config.ts",
+    "preview:dist": "tsx scripts/serve-dist.ts",
     "db:up": "docker compose up -d db",
     "db:down": "docker compose down",
     "db:logs": "docker compose logs -f db"
