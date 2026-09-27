@@ -37,14 +37,14 @@ describe('storefront interface', () => {
     );
 
     const navigation = screen.getByRole('navigation', { name: 'Dashboard sections' });
-    fireEvent.click(within(navigation).getByRole('button', { name: 'Catalogue & inventory' }));
-    fireEvent.click(screen.getByRole('button', { name: '+ Add a product' }));
+    fireEvent.click(within(navigation).getByRole('button', { name: /^Products/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add a product' }));
     expect(screen.getByRole('heading', { name: 'Add a product' })).toBeVisible();
     expect(screen.getByLabelText('Product name')).toBeVisible();
     expect(screen.queryByRole('heading', { name: 'Get in Touch' })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-    expect(screen.getByRole('heading', { name: 'Catalogue & inventory' })).toBeVisible();
+    fireEvent.click(within(screen.getByRole('form', { name: 'Add a product' })).getByRole('button', { name: 'Cancel' }));
+    expect(screen.getByRole('heading', { name: 'Products' })).toBeVisible();
   });
 
   it('saves an uploaded product to the catalogue', async () => {
@@ -77,7 +77,7 @@ describe('storefront interface', () => {
     );
 
     const navigation = screen.getByRole('navigation', { name: 'Dashboard sections' });
-    fireEvent.click(within(navigation).getByRole('button', { name: 'Add a product' }));
+    fireEvent.click(within(navigation).getByRole('button', { name: 'Add product' }));
     fireEvent.change(screen.getByLabelText('Product name'), { target: { value: 'Test product' } });
     fireEvent.change(screen.getByLabelText('Category'), { target: { value: 'Makeup' } });
     fireEvent.change(screen.getByLabelText('Price (₹)'), { target: { value: '100' } });

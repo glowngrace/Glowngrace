@@ -199,16 +199,20 @@ test('portal routes require the matching demo role', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
   await expect(page.locator('.admin-brand')).toHaveCount(1);
   const navigation = page.getByRole('navigation', { name: 'Dashboard sections' });
-  const partnersTab = navigation.getByRole('button', { name: 'Partner salons' });
-  if (test.info().project.name === 'mobile-chromium') {
-    await partnersTab.evaluate((element) => element.scrollIntoView({ inline: 'center', block: 'nearest' }));
-  }
-  await partnersTab.click();
-  await expect(page.getByRole('heading', { name: 'Partner salons' })).toBeVisible();
-  await navigation.getByRole('button', { name: 'Job vacancies' }).click();
-  await expect(page.getByRole('heading', { name: 'Job vacancies' })).toBeVisible();
-  await navigation.getByRole('button', { name: 'Customers' }).click();
-  await expect(page.getByRole('heading', { name: 'Customers' })).toBeVisible();
+  const openSidebar = async () => {
+    if (test.info().project.name === 'mobile-chromium') {
+      await page.getByRole('button', { name: 'Toggle navigation' }).click();
+      await expect(navigation).toBeVisible();
+    }
+  };
+  const chooseSection = async (label: RegExp, heading: string) => {
+    await openSidebar();
+    await navigation.getByRole('button', { name: label }).click();
+    await expect(page.getByRole('heading', { name: heading })).toBeVisible();
+  };
+  await chooseSection(/^Partner salons/, 'Partner salons');
+  await chooseSection(/^Job vacancies/, 'Job vacancies');
+  await chooseSection(/^Customers/, 'Customers');
 });
 
 test('admin uploads a product image and saves a product to the catalogue', async ({ page }) => {
@@ -240,8 +244,12 @@ test('admin uploads a product image and saves a product to the catalogue', async
   await page.getByRole('button', { name: 'Sign in to your account' }).click();
 
   const navigation = page.getByRole('navigation', { name: 'Dashboard sections' });
-  await navigation.getByRole('button', { name: 'Catalogue & inventory' }).click();
-  await page.getByRole('button', { name: '+ Add a product' }).click();
+  if (test.info().project.name === 'mobile-chromium') {
+    await page.getByRole('button', { name: 'Toggle navigation' }).click();
+    await expect(navigation).toBeVisible();
+  }
+  await navigation.getByRole('button', { name: /^Products/ }).click();
+  await page.getByRole('button', { name: 'Add a product' }).click();
   await expect(page).toHaveURL('/admin');
   await expect(page.getByRole('heading', { name: 'Add a product' })).toBeVisible();
   await expect(page.getByLabel('Product name')).toBeVisible();
@@ -251,7 +259,7 @@ test('admin uploads a product image and saves a product to the catalogue', async
   await page.getByLabel('Price (₹)', { exact: true }).fill('100');
   await page.getByLabel('Original price (₹)', { exact: true }).fill('120');
   await page.getByLabel('Stock quantity').fill('5');
-  await page.getByLabel('Description').fill('Product form E2E upload.');
+  await page.getByLabel('Description', { exact: true }).fill('Product form E2E upload.');
   const pngBytes = await page.evaluate(async () => {
     const canvas = document.createElement('canvas');
     canvas.width = 800;
@@ -261,7 +269,7 @@ test('admin uploads a product image and saves a product to the catalogue', async
     });
     return Array.from(new Uint8Array(await blob.arrayBuffer()));
   });
-  await page.locator('.admin-image-drop-zone').evaluate((dropZone, bytes) => {
+  await page.locator('.admin-drop').evaluate((dropZone, bytes) => {
     const transfer = new DataTransfer();
     transfer.items.add(new File([Uint8Array.from(bytes)], 'dragged-product.png', { type: 'image/png' }));
     dropZone.dispatchEvent(new DragEvent('drop', { bubbles: true, dataTransfer: transfer }));
@@ -276,7 +284,7 @@ test('admin uploads a product image and saves a product to the catalogue', async
   });
   await expect(page.getByRole('img', { name: 'Preview of e2e-product.png' })).toBeVisible();
   await page.getByRole('button', { name: 'Save product' }).click();
-  await expect(page.getByRole('heading', { name: 'Catalogue & inventory' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Products' })).toBeVisible();
   await expect(page.getByText('E2E Preview Product')).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
