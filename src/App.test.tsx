@@ -1,13 +1,16 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useState } from 'react';
-import { MemoryRouter } from 'react-router-dom';
-import { describe, expect, it } from 'vitest';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import userEvent from '@testing-library/user-event';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CartProvider } from './components/Cart';
 import { Header } from './components/Layout';
 import { ProductGrid } from './components/ProductCard';
+import { ProductCatalogProvider } from './components/ProductCatalog';
 import { products } from './data/catalog';
 import { signInDemo } from './auth/demo-auth';
 import { AdminPortal } from './pages/PortalPages';
+import { ProductPage } from './pages/Pages';
 
 function FavoriteCardHarness() {
   const [favorites, setFavorites] = useState<number[]>([]);
@@ -23,6 +26,8 @@ function FavoriteCardHarness() {
 }
 
 describe('storefront interface', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
   it('opens the admin add-product form without redirecting and returns to inventory on cancel', () => {
     signInDemo('admin@glowngrace.in', 'demo123');
     render(
@@ -42,11 +47,32 @@ describe('storefront interface', () => {
     expect(screen.getByRole('heading', { name: 'Catalogue & inventory' })).toBeVisible();
   });
 
-  it('shows the preview-only notice when the admin product form is submitted', () => {
+  it('saves an uploaded product to the catalogue', async () => {
+    const user = userEvent.setup();
+    const createdProduct = {
+      id: 9,
+      name: 'Test product',
+      category: 'Makeup',
+      price: 100,
+      mrp: 120,
+      stock: 5,
+      rating: 0,
+      reviews: 0,
+      image: '/api/products/9/images/0',
+      images: ['/api/products/9/images/0'],
+      description: 'A test product description.',
+    };
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => ({
+      ok: true,
+      json: async () => init?.method === 'POST' ? { product: createdProduct } : { products: [] },
+    }) as Response);
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('createImageBitmap', async () => ({ width: 800, height: 600, close: () => undefined }));
+
     signInDemo('admin@glowngrace.in', 'demo123');
     render(
       <MemoryRouter>
-        <AdminPortal />
+        <ProductCatalogProvider><AdminPortal /></ProductCatalogProvider>
       </MemoryRouter>,
     );
 
@@ -57,11 +83,65 @@ describe('storefront interface', () => {
     fireEvent.change(screen.getByLabelText('Price (₹)'), { target: { value: '100' } });
     fireEvent.change(screen.getByLabelText('Original price (₹)'), { target: { value: '120' } });
     fireEvent.change(screen.getByLabelText('Stock quantity'), { target: { value: '5' } });
-    fireEvent.change(screen.getByLabelText('Image filename'), { target: { value: 'test-product.jpg' } });
+    await user.upload(screen.getByLabelText('Product images'), new File(['image'], 'test-product.png', { type: 'image/png' }));
     fireEvent.change(screen.getByLabelText('Description'), { target: { value: 'A test product description.' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Preview product' }));
+    fireEvent.submit(screen.getByRole('button', { name: 'Save product' }).closest('form')!);
 
-    expect(screen.getByRole('status')).toHaveTextContent('Product creation is not connected to a catalogue service yet.');
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/products', expect.objectContaining({ method: 'POST' })));
+    expect(await screen.findByText('Test product')).toBeVisible();
+    const request = JSON.parse(String(fetchMock.mock.calls.find((call) => call[1]?.method === 'POST')?.[1]?.body)) as {
+      images: Array<{ filename: string; mimeType: string; data: string; width: number; height: number }>;
+    };
+    expect(request.images).toHaveLength(1);
+    expect(request.images[0]).toMatchObject({ filename: 'test-product.png', mimeType: 'image/png', width: 800, height: 600 });
+    expect(request.images[0].data).toBeTruthy();
+  });
+
+  it('shows the product detail layout with expandable description, image zoom, and quantity', async () => {
+    const user = userEvent.setup();
+    const description = 'A thoughtful beauty-house favourite. '.repeat(16);
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ products: [{
+        id: 901,
+        name: 'Product detail test',
+        category: 'Skincare',
+        price: 500,
+        mrp: 650,
+        stock: 8,
+        rating: 4.6,
+        reviews: 12,
+        image: 'p_serum.jpg',
+        images: ['/images/p_serum.jpg'],
+        description,
+      }] }),
+    }) as Response));
+
+    render(
+      <MemoryRouter initialEntries={['/product/901']}>
+        <ProductCatalogProvider>
+          <CartProvider>
+            <Header />
+            <Routes><Route path="/product/:productId" element={<ProductPage favorites={[]} toggleFavorite={() => undefined} />} /></Routes>
+          </CartProvider>
+        </ProductCatalogProvider>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByRole('heading', { name: 'Product detail test' })).toBeVisible();
+    const readMore = await screen.findByRole('button', { name: 'Read more' });
+    expect(readMore).toHaveAttribute('aria-expanded', 'false');
+    await user.click(readMore);
+    expect(screen.getByRole('button', { name: 'Read less' })).toHaveAttribute('aria-expanded', 'true');
+    await user.click(screen.getByRole('button', { name: 'Increase quantity' }));
+    await user.click(screen.getByRole('button', { name: 'Add to bag · ₹500' }));
+    const bag = screen.getByRole('dialog', { name: /your bag/i });
+    expect(bag).toHaveTextContent('₹1,000');
+    await user.click(within(bag).getByRole('button', { name: 'Close your bag' }));
+    await user.click(screen.getByRole('button', { name: 'View larger image of Product detail test' }));
+    expect(screen.getByRole('dialog', { name: 'Product image: Product detail test' })).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Close enlarged image' }));
+    expect(screen.queryByRole('dialog', { name: 'Product image: Product detail test' })).not.toBeInTheDocument();
   });
 
   it('renders accessible site navigation and the full product catalogue', () => {

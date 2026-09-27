@@ -2,7 +2,8 @@ import { useState, type FormEvent } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useCart } from '../components/CartContext';
 import { deliveryOptions, checkoutTaxRate, formatRupees } from '../data/checkout';
-import { products } from '../data/catalog';
+import { productImageUrl } from '../data/catalog';
+import { useProductCatalog } from '../components/ProductCatalogContext';
 import { placeCheckoutOrder } from '../lib/api';
 
 type OrderConfirmation = {
@@ -34,6 +35,7 @@ function CheckoutSummary({
   total: number;
 }) {
   const cart = useCart();
+  const { products } = useProductCatalog();
   const orderLines = products.filter((product) => cart.lines.some((line) => line.productId === product.id));
   return (
     <aside className="checkout-summary">
@@ -44,7 +46,7 @@ function CheckoutSummary({
           const line = cart.lines.find((item) => item.productId === product.id);
           return (
             <div className="checkout-summary-item" key={product.id}>
-              <img src={`/images/${product.image}`} alt="" />
+              <img src={productImageUrl(product.image)} alt="" />
               <span><strong>{product.name}</strong><small>Qty {line?.quantity}</small></span>
               <b>{formatRupees(product.price * (line?.quantity ?? 0))}</b>
             </div>
@@ -62,6 +64,7 @@ function CheckoutSummary({
 
 export function CheckoutPage() {
   const { lines, clear } = useCart();
+  const { products } = useProductCatalog();
   const navigate = useNavigate();
   const subtotal = lines.reduce((sum, line) => {
     const product = products.find((item) => item.id === line.productId);

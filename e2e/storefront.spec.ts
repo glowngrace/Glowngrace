@@ -26,7 +26,40 @@ test('product page, wishlist, and bag interactions work end to end', async ({ pa
   await bag.getByRole('button', { name: 'Close your bag' }).click();
   const wishlistButton = page.getByRole('button', { name: 'Save to your wishlist' });
   await wishlistButton.click();
-  await expect(page.getByRole('button', { name: '♥ Saved to your wishlist' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('button', { name: 'Remove from your wishlist' })).toHaveAttribute('aria-pressed', 'true');
+});
+
+test('product details expand long copy, zoom the gallery, and add the selected quantity', async ({ page }) => {
+  await page.route('**/api/products', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ products: [{
+      id: 901,
+      name: 'Product detail reference',
+      category: 'Skincare',
+      price: 500,
+      mrp: 650,
+      stock: 8,
+      rating: 4.6,
+      reviews: 12,
+      image: '/images/p_serum.jpg',
+      images: ['/images/p_serum.jpg'],
+      description: 'A thoughtful beauty-house favourite. '.repeat(16),
+    }] }),
+  }));
+  await page.goto('/product/901');
+  await expect(page.getByRole('heading', { name: 'Product detail reference' })).toBeVisible();
+  await page.getByRole('button', { name: 'Read more' }).click();
+  await expect(page.getByRole('button', { name: 'Read less' })).toHaveAttribute('aria-expanded', 'true');
+  await page.getByRole('button', { name: 'Increase quantity' }).click();
+  await page.getByRole('button', { name: 'Add to bag · ₹500' }).click();
+  const bag = page.getByRole('dialog', { name: /your bag/i });
+  await expect(bag).toContainText('₹1,000');
+  await bag.getByRole('button', { name: 'Close your bag' }).click();
+  await page.getByRole('button', { name: 'View larger image of Product detail reference' }).click();
+  await expect(page.getByRole('dialog', { name: 'Product image: Product detail reference' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog', { name: 'Product image: Product detail reference' })).toHaveCount(0);
 });
 
 test('checkout calculates delivery and GST, confirms the order, and clears the saved bag', async ({ page }) => {
@@ -163,8 +196,8 @@ test('portal routes require the matching demo role', async ({ page }) => {
   await page.getByText('Explore a demo account').click();
   await page.getByRole('button', { name: /Administrator Platform overview/i }).click();
   await page.getByRole('button', { name: 'Sign in to your account' }).click();
-  await expect(page.getByRole('heading', { name: 'Business overview' })).toBeVisible();
-  await expect(page.locator('.portal-brand')).toHaveCount(1);
+  await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
+  await expect(page.locator('.admin-brand')).toHaveCount(1);
   const navigation = page.getByRole('navigation', { name: 'Dashboard sections' });
   const partnersTab = navigation.getByRole('button', { name: 'Partner salons' });
   if (test.info().project.name === 'mobile-chromium') {
@@ -172,9 +205,35 @@ test('portal routes require the matching demo role', async ({ page }) => {
   }
   await partnersTab.click();
   await expect(page.getByRole('heading', { name: 'Partner salons' })).toBeVisible();
+  await navigation.getByRole('button', { name: 'Job vacancies' }).click();
+  await expect(page.getByRole('heading', { name: 'Job vacancies' })).toBeVisible();
+  await navigation.getByRole('button', { name: 'Customers' }).click();
+  await expect(page.getByRole('heading', { name: 'Customers' })).toBeVisible();
 });
 
-test('admin can open the add-product form without being redirected to contact', async ({ page }) => {
+test('admin uploads a product image and saves a product to the catalogue', async ({ page }) => {
+  await page.route('**/api/products', async (route) => {
+    if (route.request().method() === 'GET') {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ products: [] }) });
+      return;
+    }
+    const payload = route.request().postDataJSON() as { name: string; category: string; price: number; mrp: number; stock: number; description: string; images: Array<{ width: number; height: number }> };
+    expect(payload.images).toHaveLength(1);
+    await route.fulfill({
+      status: 201,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        product: {
+          ...payload,
+          id: 9,
+          rating: 0,
+          reviews: 0,
+          image: '/api/products/9/images/0',
+          images: ['/api/products/9/images/0'],
+        },
+      }),
+    });
+  });
   await page.goto('/login');
   await page.getByText('Explore a demo account').click();
   await page.getByRole('button', { name: /Administrator Platform overview/i }).click();
@@ -192,13 +251,33 @@ test('admin can open the add-product form without being redirected to contact', 
   await page.getByLabel('Price (₹)', { exact: true }).fill('100');
   await page.getByLabel('Original price (₹)', { exact: true }).fill('120');
   await page.getByLabel('Stock quantity').fill('5');
-  await page.getByLabel('Image filename').fill('preview-product.jpg');
-  await page.getByLabel('Description').fill('Product form E2E preview.');
-  await page.getByRole('button', { name: 'Preview product' }).click();
-  await expect(page.getByRole('status')).toContainText('Product creation is not connected to a catalogue service yet.');
-
-  await page.getByRole('button', { name: 'Cancel' }).click();
+  await page.getByLabel('Description').fill('Product form E2E upload.');
+  const pngBytes = await page.evaluate(async () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 800;
+    canvas.height = 600;
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob((value) => value ? resolve(value) : reject(new Error('Could not create test image.')), 'image/png');
+    });
+    return Array.from(new Uint8Array(await blob.arrayBuffer()));
+  });
+  await page.locator('.admin-image-drop-zone').evaluate((dropZone, bytes) => {
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([Uint8Array.from(bytes)], 'dragged-product.png', { type: 'image/png' }));
+    dropZone.dispatchEvent(new DragEvent('drop', { bubbles: true, dataTransfer: transfer }));
+  }, pngBytes);
+  await expect(page.getByRole('img', { name: 'Preview of dragged-product.png' })).toBeVisible();
+  await page.getByRole('button', { name: 'Remove dragged-product.png' }).click();
+  await expect(page.getByRole('img', { name: 'Preview of dragged-product.png' })).toHaveCount(0);
+  await page.getByLabel('Product images').setInputFiles({
+    name: 'e2e-product.png',
+    mimeType: 'image/png',
+    buffer: Buffer.from(pngBytes),
+  });
+  await expect(page.getByRole('img', { name: 'Preview of e2e-product.png' })).toBeVisible();
+  await page.getByRole('button', { name: 'Save product' }).click();
   await expect(page.getByRole('heading', { name: 'Catalogue & inventory' })).toBeVisible();
+  await expect(page.getByText('E2E Preview Product')).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 

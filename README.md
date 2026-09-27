@@ -20,7 +20,7 @@ Requirements: Node.js 22+, npm, and Docker Desktop (or another Docker Compose ru
 4. Start the API and Vite development server with `npm run dev`.
 5. Open `http://localhost:5173`.
 
-The storefront and catalogue work without a database. Contact, newsletter, and checkout submissions require the local PostgreSQL container to be running. Check `http://localhost:3001/api/health` for API liveness. Stop the local database with `npm run db:down`; this keeps its named volume and data. To intentionally remove local database data, run `docker compose down -v`.
+The starter storefront works without a database. Loading and saving administrator products, contact and newsletter submissions, and checkout require the local PostgreSQL container to be running. Check `http://localhost:3001/api/health` for API liveness. Stop the local database with `npm run db:down`; this keeps its named volume and data. To intentionally remove local database data, run `docker compose down -v`.
 
 ## Sign-in and portal previews
 
@@ -28,7 +28,7 @@ Choose **Sign in** in the header and open **Explore a demo account** to fill in 
 
 These sample accounts and dashboards are front-end previews only. Their role selection is stored in local browser storage, without password hashing, server-side authorization, or a production authentication provider. Do not use these demo credentials or portal previews to protect real customer or business data; production authentication and server-side role authorization must be added before making protected portals available publicly.
 
-The administrator catalogue includes an **Add a product** preview form. Submitting it displays a demo notice; it does not create or persist catalogue records because product management is not connected to a backend yet.
+The administrator catalogue can add products to PostgreSQL; saved products also appear in the storefront, product pages, bag, and checkout. Add-product images support 1–10 JPEG, PNG, or WebP files, each up to **1200 × 1200 px** and **300 KB**. Images can be selected or drag-and-dropped, previewed, and removed before saving. Demo sign-in is still client-side only: do not expose product management or other admin APIs publicly until server-side authentication and authorization are added.
 
 ## Environment
 
@@ -44,13 +44,13 @@ All application/deployment settings use these environment variable names. For lo
 | `PORT` | Local API | Express API port (defaults to `3001` if omitted). |
 | `VITE_API_BASE_URL` | Vite | Browser-visible API prefix; keep this as `/api`. Never put secrets in a `VITE_` variable. |
 
-For production, connect the Vercel project to Neon and add `DATABASE_URL` to the Vercel project's **Settings → Environment Variables** for the Production environment (and Preview if desired). Use the Neon connection string with SSL enabled; keep the password in Vercel, not in source control or a browser variable. The serverless endpoints are `/api/contact`, `/api/newsletter`, and `/api/checkout`. Vercel injects project environment variables at runtime; local `.env` values are not deployed.
+For production, connect the Vercel project to Neon and add `DATABASE_URL` to the Vercel project's **Settings → Environment Variables** for the Production environment (and Preview if desired). Use the Neon connection string with SSL enabled; keep the password in Vercel, not in source control or a browser variable. The serverless endpoints are `/api/contact`, `/api/newsletter`, `/api/checkout`, and `/api/products`; uploaded product images are served from `/api/products/:productId/images/:imageIndex`. Vercel injects project environment variables at runtime; local `.env` values are not deployed.
 
 If using the Vercel CLI locally, link the project with `vercel link` and import the desired Vercel environment with `vercel env pull .env`. This replaces the local `.env`; restore the Docker `DATABASE_URL` before running local form submissions.
 
 ## Database
 
-`db/init.sql` creates the contact-request, newsletter-subscriber, order, and order-item tables. Docker runs it when creating a fresh data volume. To add checkout tables to a database created before checkout was added, apply `db/migrations/002_orders.sql` to the local Docker database and Neon production database before deploying code that depends on them. Docker's PostgreSQL entrypoint does not rerun initialization scripts on an already-initialized volume.
+`db/init.sql` creates the contact-request, newsletter-subscriber, product, product-image, order, and order-item tables. Docker runs it when creating a fresh data volume. For an existing database, apply `db/migrations/002_orders.sql`, `db/migrations/003_products.sql`, and `db/migrations/004_product_image_dimensions.sql` before deploying code that depends on those tables. Docker's PostgreSQL entrypoint does not rerun initialization scripts on an already-initialized volume.
 
 Checkout validates the customer's delivery/contact details and product IDs on the server, looks up all prices from the product catalogue, calculates 5% GST and delivery charges, and atomically saves the order and its line items. Delivery costs are free for standard, ₹49 for express, and ₹99 for same-day delivery. Cash on delivery is the only enabled payment option; UPI, cards, and net banking are visibly marked as coming soon because no payment provider is configured. Do not collect or store payment-card details. The order confirmation includes its order number and COD total; confirmation details are kept in the browser's current navigation state rather than exposed through a public order-lookup endpoint.
 
@@ -65,7 +65,7 @@ npm run test
 npm run test:e2e
 ```
 
-Playwright runs Chromium in desktop and mobile emulation. Install its browser once with `npx playwright install chromium`. The E2E server starts automatically; browser tests cover storefront navigation, product and wishlist interactions, checkout delivery/tax calculations and failure recovery, portal access, the administrator add-product preview flow, contact submission, and responsive layouts. API unit tests cover validation and server-calculated atomic persistence without requiring a live database. To verify real local orders, apply the migration if needed, start Docker and the app, and place a COD test order.
+Playwright runs Chromium in desktop and mobile emulation. Install its browser once with `npx playwright install chromium`. The E2E server starts automatically; browser tests cover storefront navigation, product and wishlist interactions, checkout delivery/tax calculations and failure recovery, portal access, administrator product/image creation, contact submission, and responsive layouts. API unit tests cover validation and server-calculated persistence without requiring a live database. To verify saved products or real local orders, apply the migrations if needed, start Docker and the app, and create a test product or place a COD test order.
 
 ## Deploy to Vercel
 

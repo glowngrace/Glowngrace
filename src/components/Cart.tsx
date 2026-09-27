@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { products } from '../data/catalog';
+import { productImageUrl } from '../data/catalog';
 import { CartContext, type CartLine, type CartValue, useCart } from './CartContext';
+import { useProductCatalog } from './ProductCatalogContext';
 const CART_STORAGE_KEY = 'glow-grace-cart';
 const money = (amount: number) => `₹${amount.toLocaleString('en-IN')}`;
 
@@ -12,7 +13,8 @@ function loadCart(): CartLine[] {
     return value.filter(
       (line): line is CartLine =>
         typeof line?.productId === 'number' &&
-        products.some((product) => product.id === line.productId) &&
+        Number.isInteger(line.productId) &&
+        line.productId > 0 &&
         Number.isInteger(line.quantity) &&
         line.quantity > 0 &&
         line.quantity <= 99,
@@ -23,6 +25,7 @@ function loadCart(): CartLine[] {
 }
 
 export function CartProvider({ children }: { children: ReactNode }) {
+  const { products } = useProductCatalog();
   const [lines, setLines] = useState<CartLine[]>(loadCart);
   const [isOpen, setIsOpen] = useState(false);
 
@@ -41,14 +44,15 @@ export function CartProvider({ children }: { children: ReactNode }) {
       isOpen,
       open: () => setIsOpen(true),
       close: () => setIsOpen(false),
-      add: (product) => {
+      add: (product, quantity = 1) => {
+        const amount = Number.isInteger(quantity) && quantity > 0 ? Math.min(99, quantity) : 1;
         setLines((current) => {
           const existing = current.find((line) => line.productId === product.id);
           return existing
             ? current.map((line) =>
-                line.productId === product.id ? { ...line, quantity: Math.min(99, line.quantity + 1) } : line,
+                line.productId === product.id ? { ...line, quantity: Math.min(99, line.quantity + amount) } : line,
               )
-            : [...current, { productId: product.id, quantity: 1 }];
+            : [...current, { productId: product.id, quantity: amount }];
         });
         setIsOpen(true);
       },
@@ -66,13 +70,14 @@ export function CartProvider({ children }: { children: ReactNode }) {
       count,
       total,
     };
-  }, [isOpen, lines]);
+  }, [isOpen, lines, products]);
 
   return <CartContext.Provider value={value}>{children}</CartContext.Provider>;
 }
 
 export function CartDrawer() {
   const { lines, isOpen, close, remove, changeQuantity, count, total } = useCart();
+  const { products } = useProductCatalog();
   if (!isOpen) return null;
 
   return (
@@ -94,7 +99,7 @@ export function CartDrawer() {
                 return (
                   <article className="cart-line" key={product.id}>
                     <Link to={`/product/${product.id}`} onClick={close} className="cart-image">
-                      <img src={`/images/${product.image}`} alt="" />
+                      <img src={productImageUrl(product.image)} alt="" />
                     </Link>
                     <div className="cart-line-info">
                       <Link to={`/product/${product.id}`} onClick={close}>{product.name}</Link>

@@ -2,12 +2,16 @@ export type Product = {
   id: number;
   name: string;
   category: string;
+  brand?: string;
+  sku?: string;
   price: number;
   mrp: number;
+  stock?: number;
   rating: number;
   reviews: number;
   badge?: string;
   image: string;
+  images?: string[];
   description: string;
 };
 
@@ -107,6 +111,10 @@ export const products: Product[] = [
     description: 'A thoughtful edit of glow essentials, beautifully gathered for a little everyday ritual.',
   },
 ];
+
+export function productImageUrl(image: string) {
+  return image.startsWith('/') ? image : `/images/${image}`;
+}
 
 export const categories = [
   { name: 'Makeup', image: 'cat_makeup.jpg', note: 'Colour, confidence & a little radiance' },
