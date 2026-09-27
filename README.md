@@ -1,6 +1,6 @@
 # Glow & Grace
 
-A responsive React storefront and beauty-career platform inspired by `Design/glow-and-grace-elegant 1.html`. The working app includes a product catalogue, category filters, product pages, a persistent bag and wishlist, sign-in and candidate/partner/admin demo portals, partner salons, career listings, contact requests, and newsletter signups. The typography uses the reference's Cormorant Garamond / Jost font pairing, 16 px base size, and matching heading and navigation scale.
+A responsive React storefront and beauty-career platform built to `Design/glow-and-grace-elegant 1.html`, with an administrator console built to `Design/glow-and-grace-admin.html`. The working app includes a product catalogue, category filters, product pages, a persistent bag and wishlist, sign-in and candidate/partner/admin demo portals, partner salons, career listings, contact requests, and newsletter signups. The typography uses the reference's Cormorant Garamond / Jost font pairing, 16 px base size, and matching heading and navigation scale.
 
 ## Stack
 
@@ -38,11 +38,20 @@ The starter storefront works without a database. Loading and saving administrato
 
 ## Sign-in and portal previews
 
-Choose **Sign in** in the header and open **Explore a demo account** to fill in one of the sample profiles. Each preview account uses the password `demo123`: `customer@glowngrace.in`, `candidate@glowngrace.in`, `partner@glowngrace.in`, or `admin@glowngrace.in`. Candidate, partner, and administrator previews have working in-page dashboard tabs; the customer preview opens the shop. Saved wishlist items persist in the browser.
+Choose **Sign in** in the header and open **Explore a demo account** to fill in one of the sample profiles. Each preview account uses the password `demo123`: `customer@glowngrace.in`, `candidate@glowngrace.in`, `partner@glowngrace.in`, or `admin@glowngrace.in`. The candidate and partner previews open dashboards with working in-page tabs; the administrator preview opens the admin console at `/admin`; the customer preview opens the shop. Saved wishlist items persist in the browser.
 
 These sample accounts and dashboards are front-end previews only. Their role selection is stored in local browser storage, without password hashing, server-side authorization, or a production authentication provider. Do not use these demo credentials or portal previews to protect real customer or business data; production authentication and server-side role authorization must be added before making protected portals available publicly.
 
-The administrator catalogue can add products to PostgreSQL; saved products also appear in the storefront, product pages, bag, and checkout. Add-product images support 1–10 JPEG, PNG, or WebP files, each up to **1200 × 1200 px** and **300 KB**. Images can be selected or drag-and-dropped, previewed, and removed before saving. Demo sign-in is still client-side only: do not expose product management or other admin APIs publicly until server-side authentication and authorization are added.
+## Administrator console
+
+`/admin` is a single-page console built to `Design/glow-and-grace-admin.html`: a dark grouped sidebar, a topbar with search and quick-create, and twelve sections — Dashboard, Orders, Products, Add product, Job vacancies, Post a vacancy, Candidates, Partner salons, Customers, Reviews, Add a review, and Settings. It shares the demo-auth `/login` route; there is no separate administrator login.
+
+- The sidebar collapses to an off-canvas drawer below 1000 px, opened with the **Toggle navigation** button in the topbar.
+- Search, status filter chips, table sorting-free row actions, detail modals, CSV export, toasts, and the settings forms are all client-side.
+- **Product creation is real.** `createCatalogueProduct` posts to `POST /api/products` and the saved product appears in the console, the storefront, product pages, the bag, and checkout.
+- Every other section uses local demo state. Orders, jobs, candidates, partners, customers, and reviews are seeded for layout review, and the API exposes no update or delete endpoints, so the row actions explain what is not persisted instead of pretending to save.
+
+Add-product images support 1–10 JPEG, PNG, or WebP files, each up to **1200 × 1200 px** and **300 KB**. Images can be chosen, drag-and-dropped, picked from the in-app library, previewed, and removed before saving. Demo sign-in is still client-side only: do not expose product management or other admin APIs publicly until server-side authentication and authorization are added.
 
 ## Environment
 
@@ -145,7 +154,7 @@ npm run test:e2e
 npm run test:e2e:dist
 ```
 
-Playwright runs Chromium in desktop and mobile emulation. Install its browser once with `npx playwright install chromium`. The E2E server starts automatically; browser tests cover storefront navigation, product and wishlist interactions, checkout delivery/tax calculations and failure recovery, portal access, administrator product/image creation, contact submission, and responsive layouts. API unit tests cover validation and server-calculated persistence without requiring a live database. To verify saved products or real local orders, apply the migrations if needed, start Docker and the app, and create a test product or place a COD test order.
+Playwright runs Chromium in desktop and mobile emulation. Install its browser once with `npx playwright install chromium`. The E2E server starts automatically; browser tests cover storefront navigation, product and wishlist interactions, checkout delivery/tax calculations and failure recovery, portal access, administrator section navigation and product/image creation, contact submission, and responsive layouts. API unit tests cover validation and server-calculated persistence without requiring a live database. To verify saved products or real local orders, apply the migrations if needed, start Docker and the app, and create a test product or place a COD test order.
 
 `npm run test:e2e` runs the storefront suite against the Vite development server. `npm run test:e2e:dist` builds the app, serves `dist` with the same routing rules as the deployment, and runs `e2e/deployment.spec.ts` against it, so a broken production route fails the build rather than reaching users. It asserts that every storefront route deep links to the built app, that a refresh keeps working, that the app's own not-found page is served instead of the hosting 404 page, that no page request returns 4xx or 5xx, that API requests still reach the API layer, and that path traversal cannot read files outside the build output. The routing rules themselves are unit tested in `src/lib/vercel-routing.test.ts`, which fails if `vercel.json` loses its rewrite or starts sending `/api` requests to the app.
 

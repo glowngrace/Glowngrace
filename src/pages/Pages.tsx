@@ -97,14 +97,39 @@ export function HomePage({ favorites, toggleFavorite }: PageProps) {
         </div>
       </section>
 
-      <section className="section careers-feature">
-        <div className="careers-photo"><img src="/images/careers.jpg" alt="Beauty professionals learning their craft" loading="lazy" /></div>
-        <div className="careers-copy">
-          <span className="eyebrow">A career with room to bloom</span><span className="gold-rule" />
-          <h2>Your talent deserves<br />a beautiful next step.</h2>
-          <p>Real openings. Fair pay. A little help getting there — and someone in your corner once you do.</p>
-          <div className="careers-points"><span><b>01</b> Meet verified employers</span><span><b>02</b> Build your skills with us</span><span><b>03</b> Grow with support</span></div>
-          <Link className="button button-dark" to="/careers">Explore beauty careers</Link>
+      <section className="section">
+        <div className="page-container">
+          <SectionHeading eyebrow="Beauty career services" title="Parlour placement &amp; consultancy" copy="Connecting skilled beauty professionals with the finest parlours across Lucknow." />
+          <div className="service-grid">
+            <article className="service-card"><span>01</span><h3>Job placement</h3><p>We match certified beauticians, stylists and makeup artists with verified salons actively hiring in Lucknow.</p></article>
+            <article className="service-card"><span>02</span><h3>Skill training</h3><p>Professional courses in makeup, hairstyling, skincare and nail art — taught by working industry artists.</p></article>
+            <article className="service-card"><span>03</span><h3>Hire talent</h3><p>Salon owners post vacancies and access our vetted pool of trained, background-verified professionals.</p></article>
+          </div>
+          <div className="step-grid">
+            <div className="step-card"><b>1</b><h3>Register</h3><p>Create your profile and share your skills.</p></div>
+            <div className="step-card"><b>2</b><h3>Get matched</h3><p>We connect you with suitable openings.</p></div>
+            <div className="step-card"><b>3</b><h3>Interview</h3><p>Attend interviews with our partner salons.</p></div>
+            <div className="step-card"><b>4</b><h3>Get hired</h3><p>Start your dream job with ongoing support.</p></div>
+          </div>
+        </div>
+      </section>
+
+      <section className="section section-soft">
+        <div className="page-container">
+          <div className="section-heading heading-with-link">
+            <div><span className="eyebrow">Latest openings</span><span className="gold-rule" /><h2>Current beauty job vacancies</h2><p>Fresh listings from partner parlours, checked with the employer.</p></div>
+            <Link className="underlined-link" to="/careers">See all openings <span>↗</span></Link>
+          </div>
+          <div className="job-list">
+            {jobs.slice(0, 4).map((job) => (
+              <article className="job-card" key={job.title}>
+                <div className="job-symbol">✦</div>
+                <div className="job-main"><span className="eyebrow">{job.salon} · {job.kind}</span><h2>{job.title}</h2><p>{job.location} <span>·</span> {job.experience}</p></div>
+                <div className="job-pay"><strong>{job.salary}</strong><span>per month</span></div>
+                <Link className="button button-dark" to={`/contact?topic=${encodeURIComponent(`Apply for ${job.title}`)}`}>I’m interested</Link>
+              </article>
+            ))}
+          </div>
         </div>
       </section>
 
