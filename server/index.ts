@@ -6,7 +6,7 @@ import { database } from '../src/server/database.js';
 const app = express();
 const handlers = createHandlers(database);
 app.disable('x-powered-by');
-app.use(express.json({ limit: '16kb' }));
+app.use(express.json({ limit: '4.5mb' }));
 
 function respond(
   handler: (method: string | undefined, body: unknown) => Promise<{ status: number; body: object }>,
@@ -20,6 +20,12 @@ function respond(
 app.all('/api/contact', respond(handlers.contact));
 app.all('/api/newsletter', respond(handlers.newsletter));
 app.all('/api/checkout', respond(handlers.checkout));
+app.all('/api/products', respond(handlers.products));
+app.get('/api/products/:productId/images/:imageIndex', async (request, response) => {
+  const result = await handlers.productImage(Number(request.params.productId), Number(request.params.imageIndex));
+  if (!result.data || !result.mimeType) return response.status(result.status).end();
+  return response.status(result.status).type(result.mimeType).send(result.data);
+});
 app.get('/api/health', (_request, response) => response.status(200).json({ status: 'ok' }));
 
 const port = Number(process.env.PORT ?? 3001);

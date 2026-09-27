@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { getDemoAccount, signOutDemo, type DemoRole } from '../auth/demo-auth';
-import { products } from '../data/catalog';
+import { productImageUrl } from '../data/catalog';
+import { useProductCatalog } from '../components/ProductCatalogContext';
+import { AdminPortal as AdminConsole } from './AdminConsole';
 
 type PortalTab = { id: string; label: string };
 
@@ -17,15 +19,6 @@ const partnerTabs: PortalTab[] = [
   { id: 'orders', label: 'Wholesale orders' },
   { id: 'salon', label: 'Salon details' },
 ];
-const adminTabs: PortalTab[] = [
-  { id: 'overview', label: 'Business overview' },
-  { id: 'orders', label: 'All orders' },
-  { id: 'products', label: 'Catalogue & inventory' },
-  { id: 'add-product', label: 'Add a product' },
-  { id: 'candidates', label: 'Candidate pipeline' },
-  { id: 'partners', label: 'Partner salons' },
-];
-
 function MetricCard({ label, value, note }: { label: string; value: string; note: string }) {
   return <article className="portal-metric"><span>{label}</span><strong>{value}</strong><small>{note}</small></article>;
 }
@@ -144,10 +137,11 @@ export function PartnerPortal() {
 }
 
 export function AdminPortal() {
-  return <ProtectedPortal role="admin" name="Business overview" subheading="Glow & Grace administration" tabs={adminTabs} initialTab="overview" />;
+  return <AdminConsole />;
 }
 
 export function WishlistPage({ favorites, toggleFavorite }: { favorites: number[]; toggleFavorite: (productId: number) => void }) {
+  const { products } = useProductCatalog();
   const savedProducts = products.filter((product) => favorites.includes(product.id));
   return (
     <section className="section">
@@ -157,7 +151,7 @@ export function WishlistPage({ favorites, toggleFavorite }: { favorites: number[
         <span className="gold-rule" />
         {favorites.length === 0
           ? <><p>Your saved beauty edit is waiting to take shape.</p><Link className="button button-dark" to="/shop">Explore the collection</Link></>
-          : <div className="portal-saved-products">{savedProducts.map((product) => <article className="wishlist-card" key={product.id}><Link to={`/product/${product.id}`}><img src={`/images/${product.image}`} alt={product.name} /><span>{product.category}</span><h2>{product.name}</h2></Link><p>₹{product.price.toLocaleString('en-IN')}</p><button type="button" onClick={() => toggleFavorite(product.id)}>Remove from wishlist</button></article>)}</div>}
+          : <div className="portal-saved-products">{savedProducts.map((product) => <article className="wishlist-card" key={product.id}><Link to={`/product/${product.id}`}><img src={productImageUrl(product.image)} alt={product.name} /><span>{product.category}</span><h2>{product.name}</h2></Link><p>₹{product.price.toLocaleString('en-IN')}</p><button type="button" onClick={() => toggleFavorite(product.id)}>Remove from wishlist</button></article>)}</div>}
       </div>
     </section>
   );

@@ -7,7 +7,7 @@ export type CartValue = {
   isOpen: boolean;
   open: () => void;
   close: () => void;
-  add: (product: Product) => void;
+  add: (product: Product, quantity?: number) => void;
   remove: (productId: number) => void;
   changeQuantity: (productId: number, quantity: number) => void;
   clear: () => void;

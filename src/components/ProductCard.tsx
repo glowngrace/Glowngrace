@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom';
-import type { Product } from '../data/catalog';
+import { productImageUrl, type Product } from '../data/catalog';
 import { useCart } from './CartContext';
 
 type ProductCardProps = {
@@ -17,7 +17,7 @@ export function ProductCard({ product, isFavorite, toggleFavorite }: ProductCard
     <article className="product-card">
       <div className="product-image-wrap">
         <Link className="product-image" to={`/product/${product.id}`} aria-label={`View ${product.name}`}>
-          <img src={`/images/${product.image}`} alt={product.name} loading="lazy" />
+          <img src={productImageUrl(product.image)} alt={product.name} loading="lazy" />
         </Link>
         {product.badge && <span className="product-badge">{product.badge}</span>}
         <button

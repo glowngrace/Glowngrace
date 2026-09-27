@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { BrowserRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { CartProvider } from './components/Cart';
+import { ProductCatalogProvider } from './components/ProductCatalog';
 import { Footer, Header } from './components/Layout';
 import {
   AboutPage,
@@ -79,7 +80,7 @@ function AppRoutes() {
 export default function App() {
   return (
     <BrowserRouter>
-      <CartProvider><AppRoutes /></CartProvider>
+      <ProductCatalogProvider><CartProvider><AppRoutes /></CartProvider></ProductCatalogProvider>
     </BrowserRouter>
   );
 }

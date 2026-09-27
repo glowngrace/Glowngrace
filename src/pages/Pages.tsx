@@ -1,8 +1,9 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
-import { categories, jobs, partners, products } from '../data/catalog';
+import { categories, jobs, partners, productImageUrl } from '../data/catalog';
 import { submitContactRequest } from '../lib/api';
 import { useCart } from '../components/CartContext';
+import { useProductCatalog } from '../components/ProductCatalogContext';
 import { ProductGrid } from '../components/ProductCard';
 
 type PageProps = { favorites: number[]; toggleFavorite: (productId: number) => void };
@@ -20,6 +21,7 @@ function SectionHeading({ eyebrow, title, copy }: { eyebrow: string; title: stri
 }
 
 export function HomePage({ favorites, toggleFavorite }: PageProps) {
+  const { products } = useProductCatalog();
   return (
     <>
       <section className="hero">
@@ -127,6 +129,7 @@ export function HomePage({ favorites, toggleFavorite }: PageProps) {
 }
 
 export function ShopPage({ favorites, toggleFavorite }: PageProps) {
+  const { products } = useProductCatalog();
   const [searchParams, setSearchParams] = useSearchParams();
   const selected = searchParams.get('category') ?? 'All';
   const filters = ['All', ...categories.map((category) => category.name)];
@@ -155,11 +158,42 @@ function PageBanner({ eyebrow, title, copy }: { eyebrow: string; title: string; 
 }
 
 export function ProductPage({ favorites, toggleFavorite }: PageProps) {
+  const { products, loading } = useProductCatalog();
   const { productId } = useParams();
   const product = products.find((item) => item.id === Number(productId));
   const { add } = useCart();
   const [image, setImage] = useState(product?.image ?? '');
+  const [quantity, setQuantity] = useState(1);
+  const [descriptionExpanded, setDescriptionExpanded] = useState(false);
+  const [hasMoreDescription, setHasMoreDescription] = useState(false);
+  const [isImageExpanded, setIsImageExpanded] = useState(false);
+  const descriptionRef = useRef<HTMLParagraphElement>(null);
+  useEffect(() => {
+    setImage(product?.image ?? '');
+    setQuantity(1);
+    setDescriptionExpanded(false);
+    setIsImageExpanded(false);
+  }, [product?.id, product?.image]);
+  useEffect(() => {
+    const description = descriptionRef.current;
+    if (!description || descriptionExpanded) return;
+    const measure = () => setHasMoreDescription(
+      description.scrollHeight > description.clientHeight + 1 || description.textContent!.length > 180,
+    );
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, [descriptionExpanded, product?.description]);
+  useEffect(() => {
+    if (!isImageExpanded) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setIsImageExpanded(false);
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [isImageExpanded]);
   if (!product) {
+    if (loading) return <section className="section"><div className="page-container empty-state"><p role="status">Loading this beauty-house favourite…</p></div></section>;
     return <section className="section"><div className="page-container empty-state"><span className="eyebrow">A little detour</span><h1>That beauty has gone missing.</h1><Link className="button button-dark" to="/shop">Back to the collection</Link></div></section>;
   }
   const related = products.filter((item) => item.category === product.category && item.id !== product.id).slice(0, 4);
@@ -168,10 +202,48 @@ export function ProductPage({ favorites, toggleFavorite }: PageProps) {
     <>
       <section className="section product-detail-section">
         <div className="page-container product-detail">
-          <div className="product-gallery"><div className="product-feature-image"><img src={`/images/${image}`} alt={product.name} /></div><div className="gallery-thumbnails">{[product.image, ...(product.category === 'Makeup' ? ['cat_makeup.jpg', 'p_glow_kit.jpg'] : [product.image])].filter((file, index, list) => list.indexOf(file) === index).map((file) => <button type="button" key={file} aria-label={`View ${file}`} aria-pressed={image === file} onClick={() => setImage(file)}><img src={`/images/${file}`} alt="" /></button>)}</div></div>
-          <div className="product-detail-copy"><Link to="/shop" className="back-link">← Back to the collection</Link><span className="eyebrow">{product.category} · Glow &amp; Grace edit</span><h1>{product.name}</h1><div className="detail-rating"><span className="rating">★ {product.rating.toFixed(1)}</span><span>{product.reviews} thoughtful reviews</span></div><div className="detail-price"><strong>{money(product.price)}</strong><del>{money(product.mrp)}</del><span>You save {money(product.mrp - product.price)}</span></div><p className="detail-description">{product.description}</p><div className="detail-note"><span>✦</span><p>Selected with care for Indian skin, seasons and celebrations. Always authentic, always considered.</p></div><button className="button button-dark button-full" type="button" onClick={() => add(product)}>Add to bag · {money(product.price)}</button><button className="wishlist-link" type="button" aria-pressed={favorites.includes(product.id)} onClick={() => toggleFavorite(product.id)}>{favorites.includes(product.id) ? '♥ Saved to your wishlist' : '♡ Save to your wishlist'}</button><div className="delivery-note"><strong>A little note on delivery</strong><span>Complimentary delivery across Lucknow. Need a recommendation? <Link to="/contact">We’re happy to help.</Link></span></div></div>
+          <div className="product-gallery">
+            <button className="product-feature-image" type="button" aria-label={`View larger image of ${product.name}`} onClick={() => setIsImageExpanded(true)}><img src={productImageUrl(image || product.image)} alt={product.name} /></button>
+            <div className="gallery-thumbnails">{(product.images?.length ? product.images : [product.image, ...(product.category === 'Makeup' ? ['cat_makeup.jpg', 'p_glow_kit.jpg'] : [])]).filter((file, index, list) => list.indexOf(file) === index).map((file) => <button type="button" key={file} aria-label={`View ${file}`} aria-pressed={(image || product.image) === file} onClick={() => setImage(file)}><img src={productImageUrl(file)} alt="" /></button>)}</div>
+          </div>
+          <div className="product-detail-copy">
+            <nav className="product-breadcrumb" aria-label="Breadcrumb"><Link to="/">Home</Link><span>/</span><Link to="/shop">Shop</Link><span>/</span><span>{product.category}</span></nav>
+            <h1>{product.name}</h1>
+            <div className="detail-rating"><span className="detail-stars" aria-label={`${product.rating.toFixed(1)} out of 5 stars`}>{Array.from({ length: 5 }, (_value, index) => <span key={index} aria-hidden="true" className={index < Math.round(product.rating) ? 'is-filled' : ''}>★</span>)}</span><span>{product.rating.toFixed(1)} · {product.reviews} reviews</span></div>
+            <div className="detail-price"><strong>{money(product.price)}</strong>{product.mrp > product.price && <del>{money(product.mrp)}</del>}</div>
+            <p ref={descriptionRef} className={`detail-description${descriptionExpanded ? '' : ' is-collapsed'}`}>{product.description}</p>
+            {hasMoreDescription && <button className="description-toggle" type="button" aria-expanded={descriptionExpanded} onClick={() => setDescriptionExpanded((expanded) => !expanded)}>{descriptionExpanded ? 'Read less' : 'Read more'}</button>}
+            <div className="product-detail-actions">
+              <div className="product-quantity" aria-label="Quantity">
+                <button type="button" aria-label="Decrease quantity" disabled={quantity <= 1} onClick={() => setQuantity((current) => Math.max(1, current - 1))}>−</button>
+                <span aria-live="polite">{quantity}</span>
+                <button type="button" aria-label="Increase quantity" disabled={quantity >= 99} onClick={() => setQuantity((current) => Math.min(99, current + 1))}>+</button>
+              </div>
+              <button className="button button-dark" type="button" onClick={() => add(product, quantity)}>Add to bag · {money(product.price)}</button>
+              <button className="button button-light detail-wishlist" type="button" aria-pressed={favorites.includes(product.id)} aria-label={favorites.includes(product.id) ? 'Remove from your wishlist' : 'Save to your wishlist'} onClick={() => toggleFavorite(product.id)}>{favorites.includes(product.id) ? '♥' : '♡'}</button>
+            </div>
+            <div className="product-accordions">
+              <details>
+                <summary>Description <span aria-hidden="true">+</span></summary>
+                <p>{product.description}</p>
+              </details>
+              <details>
+                <summary>How to use <span aria-hidden="true">+</span></summary>
+                <p>Follow the directions on the product packaging. If you have questions about how this product fits your routine, <Link to="/contact">ask our team</Link>.</p>
+              </details>
+              <details>
+                <summary>Shipping &amp; returns <span aria-hidden="true">+</span></summary>
+                <p>Choose from the available delivery options at checkout. Cash on delivery is available for eligible orders. For help with an order or return, <Link to="/contact">contact our team</Link>.</p>
+              </details>
+            </div>
+            <div className="delivery-note"><strong>A little note on delivery</strong><span>Need a recommendation? <Link to="/contact">We’re happy to help.</Link></span></div>
+          </div>
         </div>
       </section>
+      {isImageExpanded && <div className="product-lightbox" role="dialog" aria-modal="true" aria-label={`Product image: ${product.name}`} onMouseDown={(event) => { if (event.target === event.currentTarget) setIsImageExpanded(false); }}>
+        <button className="product-lightbox-close" type="button" aria-label="Close enlarged image" onClick={() => setIsImageExpanded(false)}>×</button>
+        <img src={productImageUrl(image || product.image)} alt={product.name} />
+      </div>}
       {related.length > 0 && <section className="section section-soft"><div className="page-container"><SectionHeading eyebrow="Complete the ritual" title="You may love these, too" /><ProductGrid items={related} favorites={favorites} toggleFavorite={toggleFavorite} /></div></section>}
     </>
   );

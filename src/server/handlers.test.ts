@@ -58,9 +58,14 @@ describe('checkout handler', () => {
     expect((await handler('GET', checkoutPayload)).status).toBe(405);
     expect((await handler('POST', { ...checkoutPayload, postalCode: '000000' })).status).toBe(400);
     expect((await handler('POST', { ...checkoutPayload, paymentMethod: 'upi' })).status).toBe(400);
-    expect((await handler('POST', { ...checkoutPayload, items: [{ productId: 9999, quantity: 1 }] })).status).toBe(400);
     expect((await handler('POST', { ...checkoutPayload, items: [{ productId: 4, quantity: 1 }, { productId: 4, quantity: 1 }] })).status).toBe(400);
     expect(query).not.toHaveBeenCalled();
+
+    expect((await handler('POST', { ...checkoutPayload, items: [{ productId: 9999, quantity: 1 }] })).status).toBe(400);
+    expect(query).toHaveBeenCalledWith(
+      'SELECT id, name, price FROM products WHERE id = ANY($1::integer[])',
+      [[9999]],
+    );
   });
 
   it('does not report success if the database cannot confirm the saved order', async () => {
@@ -73,5 +78,147 @@ describe('checkout handler', () => {
     } finally {
       consoleError.mockRestore();
     }
+  });
+
+  it('uses database-backed products and prices during checkout', async () => {
+    const { database, query } = makeDatabase(async (sql, values) => sql.includes('SELECT id, name, price')
+      ? { rows: [{ id: 9, name: 'New catalogue serum', price: 500 }], rowCount: 1 }
+      : { rows: [{ order_number: values[0], total_paise: 109900, item_count: 1 }], rowCount: 1 });
+    const result = await createHandlers(database).checkout('POST', {
+      ...checkoutPayload,
+      items: [{ productId: 9, quantity: 2 }],
+    });
+
+    expect(result).toMatchObject({ status: 201, body: { total: 1099 } });
+    expect(query).toHaveBeenCalledTimes(2);
+    const savedItems = JSON.parse(String(query.mock.calls[1][1][15])) as Array<Record<string, unknown>>;
+    expect(savedItems).toEqual([{
+      product_id: 9,
+      product_name: 'New catalogue serum',
+      unit_price_paise: 50000,
+      quantity: 2,
+    }]);
+  });
+});
+
+describe('products API handler', () => {
+  const image = Buffer.alloc(24);
+  image.set([137, 80, 78, 71, 13, 10, 26, 10]);
+  image.write('IHDR', 12, 'ascii');
+  image.writeUInt32BE(1200, 16);
+  image.writeUInt32BE(1200, 20);
+  const productPayload = {
+    name: 'Test glow serum',
+    category: 'Skincare',
+    brand: 'Glow & Grace',
+    sku: 'GG-SERUM-TEST',
+    price: 500,
+    mrp: 700,
+    stock: 8,
+    description: 'A carefully made product description.',
+    images: [{
+      filename: 'serum.png',
+      mimeType: 'image/png',
+      data: image.toString('base64'),
+      width: 1200,
+      height: 1200,
+    }],
+  };
+
+  it('creates a catalogue product and persists its uploaded image', async () => {
+    const { database, query } = makeDatabase(async () => ({
+      rows: [{
+        id: 9,
+        name: 'Test glow serum',
+        category: 'Skincare',
+        brand: 'Glow & Grace',
+        sku: 'GG-SERUM-TEST',
+        price: 500,
+        mrp: 700,
+        stock: 8,
+        rating: '0',
+        reviews: 0,
+        image: 'serum.png',
+        description: 'A carefully made product description.',
+        images: ['/api/products/9/images/0'],
+      }],
+      rowCount: 1,
+    }));
+    const result = await createHandlers(database).products('POST', productPayload);
+
+    expect(result).toMatchObject({
+      status: 201,
+      body: { product: { id: 9, image: '/api/products/9/images/0', images: ['/api/products/9/images/0'], stock: 8 } },
+    });
+    expect(query).toHaveBeenCalledTimes(1);
+    const [sql, values] = query.mock.calls[0];
+    expect(sql).toContain('INSERT INTO product_images');
+    expect(sql).toContain("decode(image.data, 'base64')");
+    expect(values[7]).toBe('serum.png');
+    expect(JSON.parse(String(values[9]))).toMatchObject([{ filename: 'serum.png', position: 0 }]);
+  });
+
+  it('accepts up to 10 images at any dimensions within the maximum', async () => {
+    const smallImage = Buffer.from(image);
+    smallImage.writeUInt32BE(800, 16);
+    smallImage.writeUInt32BE(600, 20);
+    const images = Array.from({ length: 10 }, (_value, index) => ({
+      ...productPayload.images[0],
+      filename: `serum-${index}.png`,
+      data: smallImage.toString('base64'),
+      width: 800,
+      height: 600,
+    }));
+    const { database, query } = makeDatabase(async () => ({
+      rows: [{
+        id: 10,
+        name: 'Test glow serum',
+        category: 'Skincare',
+        price: 500,
+        mrp: 700,
+        stock: 8,
+        rating: '0',
+        reviews: 0,
+        image: 'serum-0.png',
+        description: 'A carefully made product description.',
+        images: Array.from({ length: 10 }, (_value, index) => `/api/products/10/images/${index}`),
+      }],
+      rowCount: 1,
+    }));
+
+    const result = await createHandlers(database).products('POST', { ...productPayload, images });
+    expect(result).toMatchObject({ status: 201, body: { product: { images: expect.arrayContaining(['/api/products/10/images/9']) } } });
+    const savedImages = JSON.parse(String(query.mock.calls[0][1][9])) as Array<{ position: number; width: number; height: number }>;
+    expect(savedImages).toHaveLength(10);
+    expect(savedImages[0]).toMatchObject({ position: 0, width: 800, height: 600 });
+    expect(savedImages[9]).toMatchObject({ position: 9 });
+  });
+
+  it('rejects unsupported image counts, dimensions and payloads without writing', async () => {
+    const { database, query } = makeDatabase();
+    const handler = createHandlers(database).products;
+    expect((await handler('POST', { ...productPayload, images: [] })).status).toBe(400);
+    expect((await handler('POST', { ...productPayload, images: Array(11).fill(productPayload.images[0]) })).status).toBe(400);
+    expect((await handler('POST', { ...productPayload, images: [{ ...productPayload.images[0], width: 1600 }] })).status).toBe(400);
+    expect((await handler('POST', { ...productPayload, images: [{ ...productPayload.images[0], data: 'not-base64' }] })).status).toBe(400);
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('lists saved products and serves only existing validated image positions', async () => {
+    const { database, query } = makeDatabase(async (sql) => ({
+      rows: sql.includes('SELECT mime_type, image_data')
+        ? [{ mime_type: 'image/png', image_data: image }]
+        : [{ id: 9, name: 'Test glow serum', category: 'Skincare', price: 500, mrp: 700, stock: 8, rating: '0', reviews: 0, image: 'serum.png', description: 'Test product.', images: ['/api/products/9/images/0'] }],
+      rowCount: 1,
+    }));
+    const handler = createHandlers(database);
+
+    expect(await handler.products('GET', undefined)).toMatchObject({
+      status: 200,
+      body: { products: [{ id: 9, images: ['/api/products/9/images/0'] }] },
+    });
+    expect(await handler.productImage(9, 0)).toEqual({ status: 200, mimeType: 'image/png', data: image });
+    expect(await handler.productImage(9, 10)).toEqual({ status: 404 });
+    expect(query).toHaveBeenCalledTimes(2);
   });
 });
