@@ -9,6 +9,7 @@ import {
   type Row,
 } from './admin/collections.js';
 import { hashPassword, newSessionToken, passwordPolicy, sessionExpiry, verifyPassword } from './admin/passwords.js';
+import { isMissingSchema, schemaNotMigrated } from './schema.js';
 import {
   candidateSeeds,
   customerSeeds,
@@ -21,7 +22,7 @@ import {
   sitePageSeeds,
   type DemoDatasetKey,
 } from './admin/seeds.js';
-import type { Database } from './handlers.js';
+import type { Database, QueryResult } from './handlers.js';
 
 export type AdminRequest = {
   method: string;
@@ -350,6 +351,9 @@ export function createAdminHandlers(database: Database) {
   const ensureSeeded = () => {
     seeded ??= seedAdminData(database).catch((error: unknown) => {
       console.error('Unable to seed admin data', error);
+      // A rejected promise must not stay cached, or every later request would
+      // replay a failure that a freshly applied migration has already fixed.
+      seeded = undefined;
       throw error;
     });
     return seeded;
@@ -465,7 +469,16 @@ export function createAdminHandlers(database: Database) {
   }
 
   async function listPages() {
-    const result = await database.query('SELECT slug, label, path, visible, position FROM site_pages ORDER BY position, slug', []);
+    // site_pages arrives with db/migrations/005_admin_console.sql. A database
+    // without it still has a storefront: it just has no saved visibility, so
+    // every page falls back to the bundled list and is shown.
+    let result: QueryResult;
+    try {
+      result = await database.query('SELECT slug, label, path, visible, position FROM site_pages ORDER BY position, slug', []);
+    } catch (error) {
+      if (!isMissingSchema(error)) throw error;
+      return sitePageSeeds.map((page) => ({ ...page, visible: true }));
+    }
     return result.rows.map((row) => ({
       slug: String(row.slug),
       label: String(row.label),
@@ -573,7 +586,27 @@ export function createAdminHandlers(database: Database) {
     return `${collection.referencePrefix}-${(Number.isFinite(numeric) ? numeric : 1000) + 1}`;
   }
 
+  /**
+   * Every console route answers with a response. A failure that escapes as a
+   * rejected promise is not survivable: the Express server and the Vercel
+   * function both have to answer something, and a database that is merely
+   * behind the deployment has to say which migration is missing rather than
+   * report a server error the operator cannot act on.
+   */
   async function handle(request: AdminRequest): Promise<AdminResult> {
+    try {
+      return await dispatch(request);
+    } catch (error) {
+      if (isMissingSchema(error)) {
+        console.error('The admin console needs migrations 005-007', error);
+        return schemaNotMigrated(error, { path: `/${request.segments.join('/')}` });
+      }
+      console.error(`The admin console could not handle /${request.segments.join('/')}`, error);
+      return fail(500, 'server_error', 'The console could not complete that request. Please try again shortly.');
+    }
+  }
+
+  async function dispatch(request: AdminRequest): Promise<AdminResult> {
     const [resource, ...rest] = request.segments;
     const method = request.method.toUpperCase();
     const id = rest[0];

@@ -1,0 +1,31 @@
+# A disposable PostgreSQL that mirrors the production Neon schema.
+#
+# Unlike docker-compose.yml this container keeps nothing: /var/lib/postgresql/data
+# is a tmpfs, so `npm run db:mirror:down` destroys the database and every row in
+# it. That is the point - it is a throwaway reproduction target, not a database
+# to keep data in, and it never needs the local volume or a second .env file.
+#
+# Point the app at it with:
+#   DATABASE_URL=postgresql://glow_grace:glow_grace_mirror@localhost:5436/glow_grace
+# The server refuses to start against a non-local host, and this is a local host,
+# so no override is needed.
+
+name: glow-grace-mirror
+
+services:
+  mirror-db:
+    image: postgres:16-alpine
+    container_name: glow-grace-mirror-db
+    environment:
+      POSTGRES_DB: ${MIRROR_POSTGRES_DB:-glow_grace}
+      POSTGRES_USER: ${MIRROR_POSTGRES_USER:-glow_grace}
+      POSTGRES_PASSWORD: ${MIRROR_POSTGRES_PASSWORD:-glow_grace_mirror}
+    ports:
+      - "${MIRROR_POSTGRES_PORT:-5436}:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${MIRROR_POSTGRES_USER:-glow_grace} -d ${MIRROR_POSTGRES_DB:-glow_grace}"]
+      interval: 2s
+      timeout: 5s
+      retries: 30

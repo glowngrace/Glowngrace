@@ -30,6 +30,7 @@ function fakeClient(overrides: Record<string, unknown> = {}) {
   return {
     query: vi.fn(async (text: string) => {
       if (text.includes('to_regclass')) return { rows: [{ ...allTables(), name: 'neondb', ...overrides }], rowCount: 1 };
+      if (text.includes('information_schema.columns')) return { rows: [{ published: true, featured: true }], rowCount: 1 };
       return { rows: [{ total: '4' }], rowCount: 1 };
     }),
     connect: vi.fn(async () => undefined),
@@ -90,6 +91,22 @@ describe('database health report', () => {
     ]);
     expect(report.database.reason).toMatch(/Apply db\/init\.sql/);
     expect(report.database.productCount).toBeNull();
+  });
+
+  it('reports the columns the catalogue query needs when every table is present', async () => {
+    state.client = fakeClient({
+      query: vi.fn(async (text: string) => {
+        if (text.includes('to_regclass')) return { rows: [{ ...allTables(), name: 'neondb' }], rowCount: 1 };
+        if (text.includes('information_schema.columns')) return { rows: [{ published: false, featured: false }], rowCount: 1 };
+        return { rows: [{ total: '4' }], rowCount: 1 };
+      }),
+    });
+    const report = await checkDatabaseHealth({ DATABASE_URL: localUrl, LOCAL_DATABASE_SSL: 'disable' });
+
+    expect(report.status).toBe('ok');
+    expect(report.database.missingTables).toEqual([]);
+    expect(report.database.missingProductColumns).toEqual(['published', 'featured']);
+    expect(report.database.reason).toMatch(/db\/migrations\/005_admin_console\.sql/);
   });
 
   it('reports an unreachable database with the driver error code', async () => {
