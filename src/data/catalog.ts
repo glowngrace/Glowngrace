@@ -13,6 +13,8 @@ export type Product = {
   image: string;
   images?: string[];
   description: string;
+  published?: boolean;
+  featured?: boolean;
 };
 
 export const products: Product[] = [

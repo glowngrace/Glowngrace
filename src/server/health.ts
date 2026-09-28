@@ -1,5 +1,6 @@
 import { Client } from 'pg';
 import {
+  adminTables,
   DatabaseConfigError,
   clientConfig,
   maskHost,
@@ -11,7 +12,7 @@ import {
 } from './config.js';
 
 function tablePresenceSql() {
-  return requiredTables
+  return [...requiredTables, ...adminTables]
     .map((table) => `to_regclass('public.${table}') IS NOT NULL AS ${table}`)
     .join(', ');
 }
@@ -29,6 +30,7 @@ export async function checkDatabaseHealth(env: Environment = process.env): Promi
         configured: false,
         reachable: false,
         missingTables: [...requiredTables],
+        missingAdminTables: [...adminTables],
         reason: error instanceof DatabaseConfigError ? error.message : 'The database configuration could not be read.',
       },
     };
@@ -43,6 +45,7 @@ export async function checkDatabaseHealth(env: Environment = process.env): Promi
     );
     const row = presence.rows[0] ?? {};
     const missingTables = requiredTables.filter((table) => row[table] !== true);
+    const missingAdminTables = adminTables.filter((table) => row[table] !== true);
     let productCount: number | null = null;
     if (!missingTables.includes('products')) {
       const counted = await client.query<{ total: string }>('SELECT count(*)::text AS total FROM products');
@@ -62,11 +65,14 @@ export async function checkDatabaseHealth(env: Environment = process.env): Promi
         ssl: resolved.ssl,
         reachable: true,
         missingTables,
+        missingAdminTables,
         productCount,
         latencyMs: Date.now() - startedAt,
         reason: missingTables.length > 0
           ? `Connected, but these tables are missing. Apply db/init.sql to this database: ${missingTables.join(', ')}.`
-          : undefined,
+          : missingAdminTables.length > 0
+            ? `Connected and serving the storefront. The admin console still needs: ${missingAdminTables.join(', ')}.`
+            : undefined,
       },
     };
   } catch (error) {
@@ -86,6 +92,7 @@ export async function checkDatabaseHealth(env: Environment = process.env): Promi
         ssl: resolved.ssl,
         reachable: false,
         missingTables: [...requiredTables],
+        missingAdminTables: [...adminTables],
         reason: `${cause?.message ?? 'The connection failed.'}${code}`,
       },
     };

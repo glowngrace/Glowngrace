@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { BrowserRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { CartProvider } from './components/Cart';
 import { ProductCatalogProvider } from './components/ProductCatalog';
+import { PageGate, StorefrontPagesProvider } from './components/StorefrontPages';
 import { Footer, Header } from './components/Layout';
 import {
   AboutPage,
@@ -55,15 +56,15 @@ function AppRoutes() {
       {!isAdminPage && <Header />}
       <main id="main-content">
         <Routes>
-          <Route path="/" element={<HomePage {...pageProps} />} />
-          <Route path="/shop" element={<ShopPage {...pageProps} />} />
+          <Route path="/" element={<PageGate path="/"><HomePage {...pageProps} /></PageGate>} />
+          <Route path="/shop" element={<PageGate path="/shop"><ShopPage {...pageProps} /></PageGate>} />
           <Route path="/product/:productId" element={<ProductPage {...pageProps} />} />
           <Route path="/checkout" element={<CheckoutPage />} />
           <Route path="/order-confirmation" element={<OrderConfirmationPage />} />
-          <Route path="/partners" element={<PartnersPage />} />
-          <Route path="/careers" element={<CareersPage />} />
-          <Route path="/about" element={<AboutPage />} />
-          <Route path="/contact" element={<ContactPage />} />
+          <Route path="/partners" element={<PageGate path="/partners"><PartnersPage /></PageGate>} />
+          <Route path="/careers" element={<PageGate path="/careers"><CareersPage /></PageGate>} />
+          <Route path="/about" element={<PageGate path="/about"><AboutPage /></PageGate>} />
+          <Route path="/contact" element={<PageGate path="/contact"><ContactPage /></PageGate>} />
           <Route path="/login" element={<LoginPage />} />
           <Route path="/wishlist" element={<WishlistPage {...pageProps} />} />
           <Route path="/candidate" element={<CandidatePortal />} />
@@ -80,7 +81,9 @@ function AppRoutes() {
 export default function App() {
   return (
     <BrowserRouter>
-      <ProductCatalogProvider><CartProvider><AppRoutes /></CartProvider></ProductCatalogProvider>
+      <StorefrontPagesProvider>
+        <ProductCatalogProvider><CartProvider><AppRoutes /></CartProvider></ProductCatalogProvider>
+      </StorefrontPagesProvider>
     </BrowserRouter>
   );
 }

@@ -39,7 +39,7 @@ function describeFailure(resolved: ResolvedDatabase, error: unknown) {
 }
 
 export const database: Database = {
-  async query(text, values) {
+  async query(text, values = []) {
     const active = getPool();
     try {
       const result = await active.pool.query(text, values);

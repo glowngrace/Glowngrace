@@ -1,12 +1,14 @@
 import { useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { demoAccounts, signInDemo } from '../auth/demo-auth';
+import { adminApi, AdminApiError } from '../lib/admin-api';
 
 export function LoginPage() {
   const navigate = useNavigate();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
   function selectDemoAccount(accountEmail: string) {
     setEmail(accountEmail);
@@ -14,8 +16,21 @@ export function LoginPage() {
     setError('');
   }
 
-  function submit(event: FormEvent<HTMLFormElement>) {
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setError('');
+    const isAdmin = demoAccounts.some((account) => account.role === 'admin' && account.email === email.trim().toLowerCase());
+    if (isAdmin) {
+      setSubmitting(true);
+      try {
+        await adminApi.signIn(email.trim(), password);
+      } catch (signInError) {
+        setSubmitting(false);
+        setError(signInError instanceof AdminApiError ? signInError.message : 'The admin console could not be reached. Please try again.');
+        return;
+      }
+      setSubmitting(false);
+    }
     const account = signInDemo(email, password);
     if (!account) {
       setError('Those details did not match a demo account. Please try a sample account below.');
@@ -56,7 +71,7 @@ export function LoginPage() {
             <label htmlFor="login-password">Password</label>
             <input id="login-password" type="password" autoComplete="current-password" placeholder="Your password" value={password} onChange={(event) => setPassword(event.target.value)} required />
             {error && <p className="login-error" role="alert">{error}</p>}
-            <button className="button button-dark button-full" type="submit">Sign in to your account</button>
+            <button className="button button-dark button-full" type="submit" disabled={submitting}>{submitting ? 'Signing in…' : 'Sign in to your account'}</button>
           </form>
           <p className="login-footnote">Just looking around? <Link to="/shop">Discover the collection</Link></p>
           <Link className="login-back-link" to="/">← Back to Glow &amp; Grace</Link>

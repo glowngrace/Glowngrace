@@ -1,18 +1,12 @@
-import { useMemo, useState, type FormEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { getDemoAccount, signOutDemo } from '../auth/demo-auth';
-import { useProductCatalog } from '../components/ProductCatalogContext';
+import { getAdminToken } from '../lib/admin-api';
 import { productImageUrl, type Product } from '../data/catalog';
 import {
   jobAreas,
   money,
   seedAlerts,
-  seedCandidates,
-  seedCustomers,
-  seedJobs,
-  seedOrders,
-  seedPartners,
-  seedReviews,
   stockStatus,
   type AdminSection,
   type IconName,
@@ -36,11 +30,23 @@ import {
   Toast,
   Toggle,
 } from './admin/AdminUi';
+import { AdminStoreProvider, useAdminStore, type CollectionKey, type ReviewRecord, type JobRecord } from './admin/AdminStore';
+import { BulkUpload } from './admin/BulkUpload';
 import { DashboardPage } from './admin/DashboardPage';
 import { ProductFormPage } from './admin/ProductFormPage';
 import { SettingsPage } from './admin/SettingsPage';
 
 type NavItem = { id: AdminSection; label: string; icon: IconName; count?: number };
+
+type EditState =
+  | { kind: 'product'; id: number }
+  | { kind: 'job'; id: string }
+  | { kind: 'candidate'; id: string }
+  | { kind: 'partner'; id: string }
+  | { kind: 'customer'; id: string }
+  | { kind: 'review'; id: string }
+  | { kind: 'remove'; collection: CollectionKey | 'products' | 'orders'; id: string; label: string }
+  | null;
 
 const primaryNav: NavItem[] = [
   { id: 'dashboard', label: 'Dashboard', icon: 'dash' },
@@ -68,6 +74,7 @@ const sectionLabels: Record<AdminSection, string> = {
   orders: 'Orders',
   products: 'Products',
   'add-product': 'Add product',
+  'edit-product': 'Edit product',
   jobs: 'Job vacancies',
   'add-job': 'Post a vacancy',
   candidates: 'Candidates',
@@ -86,14 +93,15 @@ type ModalState =
   | { kind: 'partner'; id: string }
   | { kind: 'customer'; id: string }
   | { kind: 'review'; id: string }
-  | { kind: 'remove-product'; id: number }
   | null;
 
-const defaultStock = [84, 36, 21, 42, 18, 8, 14, 6, 24, 11];
 const unitSpread = [184, 152, 121, 98, 74, 61, 47, 33, 22, 15];
 
-function stockFor(product: Product, index: number) {
-  return product.stock ?? defaultStock[index % defaultStock.length] ?? 0;
+function formatDay(value: string | null | undefined) {
+  if (!value) return '—';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
 }
 
 function exportRows(filename: string, rows: Array<Array<string | number>>) {
@@ -111,9 +119,39 @@ function DetailRow({ label, children }: { label: string; children: ReactNode }) 
 }
 
 export function AdminPortal() {
+  return (
+    <AdminStoreProvider>
+      <AdminConsole />
+    </AdminStoreProvider>
+  );
+}
+
+function AdminConsole() {
   const navigate = useNavigate();
   const account = getDemoAccount();
-  const { products: catalogueProducts, error: catalogueError, addProduct } = useProductCatalog();
+  const store = useAdminStore();
+  const {
+    account: signedIn,
+    products,
+    orders,
+    jobs,
+    candidates,
+    partners,
+    customers,
+    reviews,
+    loading,
+    error: storeError,
+    notice,
+    reload,
+    saveProduct,
+    setProductPublished,
+    removeProduct,
+    saveOrder,
+    removeOrder,
+    saveRecord,
+    removeRecord,
+    signOut: apiSignOut,
+  } = store;
 
   const [section, setSection] = useState<AdminSection>('dashboard');
   const [search, setSearch] = useState('');
@@ -123,18 +161,11 @@ export function AdminPortal() {
   const [alertsOpen, setAlertsOpen] = useState(false);
   const [toast, setToast] = useState('');
   const [modal, setModal] = useState<ModalState>(null);
+  const [editing, setEditing] = useState<EditState>(null);
 
-  const [orders, setOrders] = useState(seedOrders);
-  const [jobs, setJobs] = useState(seedJobs);
-  const [partners, setPartners] = useState(seedPartners);
-  const [reviews, setReviews] = useState(seedReviews);
-  const [drafts, setDrafts] = useState<number[]>([]);
-  const customers = seedCustomers;
-
-  const products = useMemo(
-    () => catalogueProducts.map((product, index) => ({ ...product, stock: stockFor(product, index) })),
-    [catalogueProducts],
-  );
+  useEffect(() => {
+    if (notice) setToast(notice);
+  }, [notice]);
 
   const dashboardRows = useMemo(
     () => products.map((product, index) => {
@@ -171,10 +202,11 @@ export function AdminPortal() {
     setQuickOpen(false);
   }
 
-  function logout() {
+  const logout = useCallback(async () => {
+    await apiSignOut();
     signOutDemo();
     navigate('/');
-  }
+  }, [apiSignOut, navigate]);
 
   const matches = (text: string) => text.toLowerCase().includes(search.toLowerCase().trim());
   const byChip = <T,>(rows: T[], chip: (row: T) => string) => rows.filter((row) => (filter === 'All' || chip(row) === filter));
@@ -184,7 +216,7 @@ export function AdminPortal() {
     count: item.id === 'orders' ? orders.length
       : item.id === 'products' ? products.length
         : item.id === 'jobs' ? jobs.filter((job) => job.status === 'Open').length
-          : item.id === 'candidates' ? seedCandidates.length
+          : item.id === 'candidates' ? candidates.length
             : item.id === 'partners' ? partners.length
               : item.id === 'customers' ? customers.length
                 : item.id === 'reviews' ? reviews.length
@@ -206,11 +238,11 @@ export function AdminPortal() {
           <DetailRow label="Placed">{order.date}</DetailRow>
           <DetailRow label="Total"><strong>{money(order.total)}</strong></DetailRow>
           <DetailRow label="Payment">Cash on delivery / UPI</DetailRow>
-          <DetailRow label="Delivery address">12/4 Park Road, Hazratganj, Lucknow 226001</DetailRow>
+          <DetailRow label="Delivery address">{order.address}, {order.locality}, {order.city} {order.postalCode}</DetailRow>
         </dl>
         <div className="admin-order-flow">
-          {['Placed', 'Processing', 'Shipped', 'Delivered'].map((step) => (
-            <span key={step} className={order.status === step || (order.status === 'Packed' && step === 'Processing') ? 'is-done' : ''}>{step}</span>
+          {['Placed', 'Processing', 'Packed', 'Shipped', 'Delivered'].map((step) => (
+            <span key={step} className={order.status === step ? 'is-done' : ''}>{step}</span>
           ))}
         </div>
       </>
@@ -232,7 +264,7 @@ export function AdminPortal() {
             <h3>{product.name}</h3>
             <div className="admin-product-rating"><Stars rating={product.rating} /><span>{product.rating.toFixed(1)} · {product.reviews} reviews</span></div>
             <p className="admin-detail-price">{money(product.price)}{product.mrp > product.price && <del>{money(product.mrp)}</del>}</p>
-            <Pill label={drafts.includes(product.id) ? 'Draft' : stockStatus(product.stock)} />
+            <Pill label={product.published === false ? 'Hidden' : stockStatus(product.stock ?? 0)} />
             <p className="admin-detail-copy">{product.description}</p>
           </div>
         </div>
@@ -241,6 +273,7 @@ export function AdminPortal() {
           <DetailRow label="Brand">{product.brand || 'Not set'}</DetailRow>
           <DetailRow label="Stock">{product.stock} units</DetailRow>
           <DetailRow label="Badge">{product.badge || 'None'}</DetailRow>
+          <DetailRow label="Visible in store">{product.published === false ? 'No' : 'Yes'}</DetailRow>
         </dl>
       </>
     );
@@ -262,14 +295,16 @@ export function AdminPortal() {
           <DetailRow label="Employment">{job.type}</DetailRow>
           <DetailRow label="Salary">{job.salary}</DetailRow>
           <DetailRow label="Applicants"><strong>{job.applications}</strong></DetailRow>
+          <DetailRow label="Experience">{job.experience || 'Not specified'}</DetailRow>
+          <DetailRow label="Skills">{job.skills || 'Not listed'}</DetailRow>
+          <DetailRow label="Description">{job.description || 'No description yet.'}</DetailRow>
         </dl>
-        <p className="admin-muted">Placements listings are preview data in this console. Publishing is handled by the partner salon.</p>
       </>
     );
   }
 
   function renderCandidateDetail(candidateId: string) {
-    const candidate = seedCandidates.find((entry) => entry.id === candidateId);
+    const candidate = candidates.find((entry) => entry.id === candidateId);
     if (!candidate) return null;
     return (
       <>
@@ -283,6 +318,8 @@ export function AdminPortal() {
           <DetailRow label="Experience">{candidate.experience}</DetailRow>
           <DetailRow label="Rating"><Stars rating={candidate.rating} /></DetailRow>
           <DetailRow label="Stage">{candidate.stage}</DetailRow>
+          <DetailRow label="Email">{candidate.email}</DetailRow>
+          <DetailRow label="Phone">{candidate.phone || 'Not given'}</DetailRow>
         </dl>
       </>
     );
@@ -300,10 +337,10 @@ export function AdminPortal() {
         </div>
         <dl className="admin-detail-list">
           <DetailRow label="Reference">{partner.id}</DetailRow>
-          <DetailRow label="Owner">{partner.owner}</DetailRow>
-          <DetailRow label="Phone">{partner.phone}</DetailRow>
-          <DetailRow label="Email">{partner.email}</DetailRow>
-          <DetailRow label="Partner since">{partner.since}</DetailRow>
+          <DetailRow label="Owner">{partner.owner || 'Not set'}</DetailRow>
+          <DetailRow label="Phone">{partner.phone || 'Not given'}</DetailRow>
+          <DetailRow label="Email">{partner.email || 'Not given'}</DetailRow>
+          <DetailRow label="Partner since">{formatDay(partner.since)}</DetailRow>
           <DetailRow label="Rating"><Stars rating={partner.rating} /></DetailRow>
           <DetailRow label="Open vacancies">{partner.vacancies}</DetailRow>
         </dl>
@@ -323,9 +360,10 @@ export function AdminPortal() {
         </div>
         <dl className="admin-detail-list">
           <DetailRow label="Reference">{customer.id}</DetailRow>
+          <DetailRow label="Phone">{customer.phone || 'Not given'}</DetailRow>
           <DetailRow label="Orders"><strong>{customer.orders}</strong></DetailRow>
           <DetailRow label="Lifetime value"><strong>{money(customer.spent)}</strong></DetailRow>
-          <DetailRow label="Last order">{customer.last}</DetailRow>
+          <DetailRow label="Last order">{formatDay(customer.lastOrderOn)}</DetailRow>
         </dl>
       </>
     );
@@ -338,34 +376,52 @@ export function AdminPortal() {
       <>
         <div className="admin-person">
           <Avatar src={review.avatar} name={review.author} round />
-          <div><h3>{review.author}</h3><p>{review.product}</p></div>
+          <div><h3>{review.author}</h3><p>{review.productName}</p></div>
           <Pill label={review.status} />
         </div>
         <blockquote className="admin-quote"><Stars rating={review.rating} /><p>“{review.text}”</p></blockquote>
         <dl className="admin-detail-list">
           <DetailRow label="Reference">{review.id}</DetailRow>
-          <DetailRow label="Reviewed on">{review.date}</DetailRow>
+          <DetailRow label="Reviewed on">{formatDay(review.reviewedOn)}</DetailRow>
           <DetailRow label="Status">{review.status}</DetailRow>
         </dl>
       </>
     );
   }
 
+  async function handleSaveRecord(key: CollectionKey, record: unknown, id?: string) {
+    const saved = await saveRecord(key, record, id);
+    return saved !== null;
+  }
+
   function renderJobForm() {
     return (
       <JobForm
-        onCancel={() => go('jobs')}
-        onSave={(job) => {
-          setJobs((current) => [job, ...current]);
-          notify(`${job.title} saved as a draft vacancy.`);
-          go('jobs');
+        areas={jobAreas}
+        onCancel={() => { setEditing(null); go('jobs'); }}
+        editing={editing?.kind === 'job' ? jobs.find((job) => job.id === editing.id) : undefined}
+        onSave={async (job) => {
+          const saved = await handleSaveRecord('jobs', job, editing?.kind === 'job' ? editing.id : undefined);
+          if (saved) { setEditing(null); go('jobs'); }
+          return saved;
         }}
       />
     );
   }
 
   function renderReviewForm() {
-    return <ReviewForm onCancel={() => go('reviews')} onSave={(review) => { setReviews((current) => [review, ...current]); notify('Review added to the moderation list.'); go('reviews'); }} />;
+    return (
+      <ReviewForm
+        products={products.map((product) => product.name)}
+        onCancel={() => { setEditing(null); go('reviews'); }}
+        editing={editing?.kind === 'review' ? reviews.find((review) => review.id === editing.id) : undefined}
+        onSave={async (review) => {
+          const saved = await handleSaveRecord('reviews', review, editing?.kind === 'review' ? editing.id : undefined);
+          if (saved) { setEditing(null); go('reviews'); }
+          return saved;
+        }}
+      />
+    );
   }
 
   function renderSection(): ReactNode {
@@ -424,11 +480,16 @@ export function AdminPortal() {
                         label={`Update ${order.id}`}
                         icon="pen"
                         onClick={() => {
-                          const flow = ['Processing', 'Packed', 'Shipped', 'Delivered'];
+                          const flow = ['Placed', 'Processing', 'Packed', 'Shipped', 'Delivered'];
                           const next = flow[Math.min(flow.indexOf(order.status) + 1, flow.length - 1)] ?? 'Delivered';
-                          setOrders((current) => current.map((entry) => (entry.id === order.id ? { ...entry, status: next } : entry)));
-                          notify(`${order.id} moved to ${next}.`);
+                          void saveOrder(order.id, { status: next });
                         }}
+                      />
+                      <IconButton
+                        label={`Remove ${order.id}`}
+                        icon="trash"
+                        danger
+                        onClick={() => setEditing({ kind: 'remove', collection: 'orders', id: order.id, label: order.id })}
                       />
                     </td>
                   </tr>
@@ -440,18 +501,24 @@ export function AdminPortal() {
     }
 
     if (section === 'products') {
-      const statusOf = (product: (typeof products)[number]) => (drafts.includes(product.id) ? 'Draft' : stockStatus(product.stock));
+      const statusOf = (product: Product) => (product.published === false ? 'Hidden' : stockStatus(product.stock ?? 0));
       const visible = byChip(products, statusOf).filter((product) => matches(`${product.name} ${product.category} ${product.sku ?? ''}`));
+      const hidden = products.length - products.filter((product) => product.published === false).length;
       return (
         <>
           <PageHead
             crumb="Products"
             title="Products"
-            sub={`${products.length} products in the catalogue.`}
-            actions={<button className="admin-btn admin-btn-dark" type="button" onClick={() => go('add-product')}><Icon name="plus" />Add a product</button>}
+            sub={`${products.length} products in the catalogue · ${hidden} visible to shoppers.`}
+            actions={
+              <>
+                <BulkUpload dataset="products" plural="products" />
+                <button className="admin-btn admin-btn-dark" type="button" onClick={() => go('add-product')}><Icon name="plus" />Add a product</button>
+              </>
+            }
           />
           <FilterBar
-            options={['All', 'Active', 'Low stock', 'Out of stock', 'Draft']}
+            options={['All', 'Active', 'Low stock', 'Out of stock', 'Hidden']}
             value={filter}
             onChange={setFilter}
             search={search}
@@ -477,15 +544,13 @@ export function AdminPortal() {
                     <td><Pill label={statusOf(product)} /></td>
                     <td className="admin-row-actions">
                       <IconButton label={`View ${product.name}`} icon="eye" onClick={() => setModal({ kind: 'product', id: product.id })} />
+                      <IconButton label={`Edit ${product.name}`} icon="pen" onClick={() => { setEditing({ kind: 'product', id: product.id }); go('edit-product'); }} />
                       <IconButton
-                        label={`Toggle draft for ${product.name}`}
-                        icon={drafts.includes(product.id) ? 'check' : 'hide'}
-                        onClick={() => {
-                          setDrafts((current) => (current.includes(product.id) ? current.filter((id) => id !== product.id) : [...current, product.id]));
-                          notify(drafts.includes(product.id) ? `${product.name} is live in the catalogue.` : `${product.name} moved to drafts.`);
-                        }}
+                        label={`${product.published === false ? 'Show' : 'Hide'} ${product.name}`}
+                        icon={product.published === false ? 'check' : 'hide'}
+                        onClick={() => void setProductPublished(product, product.published === false)}
                       />
-                      <IconButton label={`Remove ${product.name}`} icon="trash" danger onClick={() => setModal({ kind: 'remove-product', id: product.id })} />
+                      <IconButton label={`Remove ${product.name}`} icon="trash" danger onClick={() => setEditing({ kind: 'remove', collection: 'products', id: String(product.id), label: product.name })} />
                     </td>
                   </tr>
                 ))}
@@ -495,13 +560,23 @@ export function AdminPortal() {
       );
     }
 
-    if (section === 'add-product') {
+    if (section === 'add-product' || section === 'edit-product') {
+      const editingProduct = editing?.kind === 'product' ? products.find((product) => product.id === editing.id) : undefined;
+      if (section === 'edit-product' && !editingProduct) {
+        return <div className="admin-card"><p className="admin-muted">That product is no longer in the catalogue.</p></div>;
+      }
       return (
         <ProductFormPage
+          key={editingProduct?.id ?? 'new'}
           library={imageLibrary}
-          onCancel={() => go('products')}
+          editing={editingProduct}
+          onCancel={() => { setEditing(null); go('products'); }}
           onNotice={notify}
-          onSaved={(created) => { addProduct(created); notify('Product added to the catalogue.'); go('products'); }}
+          onSave={async (payload) => {
+            const saved = await saveProduct(payload, editingProduct?.id);
+            if (saved) { setEditing(null); go('products'); }
+            return saved !== null;
+          }}
         />
       );
     }
@@ -514,7 +589,12 @@ export function AdminPortal() {
             crumb="Job vacancies"
             title="Job vacancies"
             sub={`${jobs.filter((job) => job.status === 'Open').length} open roles in the beauty community.`}
-            actions={<button className="admin-btn admin-btn-dark" type="button" onClick={() => go('add-job')}><Icon name="plus" />Post a vacancy</button>}
+            actions={
+              <>
+                <BulkUpload dataset="jobs" plural="vacancies" />
+                <button className="admin-btn admin-btn-dark" type="button" onClick={() => { setEditing(null); go('add-job'); }}><Icon name="plus" />Post a vacancy</button>
+              </>
+            }
           />
           <FilterBar
             options={['All', 'Open', 'Draft', 'Paused', 'Closed']}
@@ -540,15 +620,13 @@ export function AdminPortal() {
                     <td><Pill label={job.status} /></td>
                     <td className="admin-row-actions">
                       <IconButton label={`View ${job.title}`} icon="eye" onClick={() => setModal({ kind: 'job', id: job.id })} />
+                      <IconButton label={`Edit ${job.title}`} icon="pen" onClick={() => { setEditing({ kind: 'job', id: job.id }); go('add-job'); }} />
                       <IconButton
-                        label={`Toggle ${job.title}`}
-                        icon="pen"
-                        onClick={() => {
-                          const next = job.status === 'Open' ? 'Paused' : 'Open';
-                          setJobs((current) => current.map((entry) => (entry.id === job.id ? { ...entry, status: next } : entry)));
-                          notify(`${job.title} is now ${next.toLowerCase()}.`);
-                        }}
+                        label={`${job.status === 'Open' ? 'Pause' : 'Open'} ${job.title}`}
+                        icon={job.status === 'Open' ? 'hide' : 'check'}
+                        onClick={() => void saveRecord('jobs', { status: job.status === 'Open' ? 'Paused' : 'Open' }, job.id)}
                       />
+                      <IconButton label={`Remove ${job.title}`} icon="trash" danger onClick={() => setEditing({ kind: 'remove', collection: 'jobs', id: job.id, label: job.title })} />
                     </td>
                   </tr>
                 ))}
@@ -559,10 +637,10 @@ export function AdminPortal() {
     }
 
     if (section === 'candidates') {
-      const visible = byChip(seedCandidates, (candidate) => candidate.stage).filter((candidate) => matches(`${candidate.name} ${candidate.role} ${candidate.city}`));
+      const visible = byChip(candidates, (candidate) => candidate.stage).filter((candidate) => matches(`${candidate.name} ${candidate.role} ${candidate.city} ${candidate.email}`));
       return (
         <>
-          <PageHead crumb="Candidates" title="Candidates" sub={`${seedCandidates.length} registered beauty professionals.`} />
+          <PageHead crumb="Candidates" title="Candidates" sub={`${candidates.length} registered beauty professionals.`} actions={<BulkUpload dataset="candidates" plural="candidates" />} />
           <FilterBar
             options={['All', 'New', 'Shortlisted', 'Interview']}
             value={filter}
@@ -590,6 +668,7 @@ export function AdminPortal() {
                     <td><Pill label={candidate.stage} /></td>
                     <td className="admin-row-actions">
                       <IconButton label={`View ${candidate.name}`} icon="eye" onClick={() => setModal({ kind: 'candidate', id: candidate.id })} />
+                      <IconButton label={`Remove ${candidate.name}`} icon="trash" danger onClick={() => setEditing({ kind: 'remove', collection: 'candidates', id: candidate.id, label: candidate.name })} />
                     </td>
                   </tr>
                 ))}
@@ -603,7 +682,7 @@ export function AdminPortal() {
       const visible = byChip(partners, (partner) => partner.status).filter((partner) => matches(`${partner.name} ${partner.area} ${partner.type}`));
       return (
         <>
-          <PageHead crumb="Partner salons" title="Partner salons" sub={`${partners.length} parlours in the local network.`} />
+          <PageHead crumb="Partner salons" title="Partner salons" sub={`${partners.length} parlours in the local network.`} actions={<BulkUpload dataset="partners" plural="parlours" />} />
           <FilterBar
             options={['All', 'Active', 'Pending', 'Paused']}
             value={filter}
@@ -632,14 +711,11 @@ export function AdminPortal() {
                     <td className="admin-row-actions">
                       <IconButton label={`View ${partner.name}`} icon="eye" onClick={() => setModal({ kind: 'partner', id: partner.id })} />
                       <IconButton
-                        label={`Approve ${partner.name}`}
-                        icon={partner.status === 'Active' ? 'pen' : 'check'}
-                        onClick={() => {
-                          const next = partner.status === 'Active' ? 'Paused' : 'Active';
-                          setPartners((current) => current.map((entry) => (entry.id === partner.id ? { ...entry, status: next } : entry)));
-                          notify(`${partner.name} is now ${next.toLowerCase()}.`);
-                        }}
+                        label={`${partner.status === 'Active' ? 'Pause' : 'Approve'} ${partner.name}`}
+                        icon={partner.status === 'Active' ? 'hide' : 'check'}
+                        onClick={() => void saveRecord('partners', { status: partner.status === 'Active' ? 'Paused' : 'Active' }, partner.id)}
                       />
+                      <IconButton label={`Remove ${partner.name}`} icon="trash" danger onClick={() => setEditing({ kind: 'remove', collection: 'partners', id: partner.id, label: partner.name })} />
                     </td>
                   </tr>
                 ))}
@@ -653,7 +729,7 @@ export function AdminPortal() {
       const visible = byChip(customers, (customer) => customer.tier).filter((customer) => matches(`${customer.name} ${customer.email}`));
       return (
         <>
-          <PageHead crumb="Customers" title="Customers" sub={`${customers.length} registered customers.`} />
+          <PageHead crumb="Customers" title="Customers" sub={`${customers.length} registered customers.`} actions={<BulkUpload dataset="customers" plural="customers" />} />
           <FilterBar
             options={['All', 'VIP', 'Loyal', 'New', 'At risk']}
             value={filter}
@@ -677,10 +753,11 @@ export function AdminPortal() {
                     <td>{customer.email}</td>
                     <td>{customer.orders}</td>
                     <td><strong>{money(customer.spent)}</strong></td>
-                    <td>{customer.last}</td>
+                    <td>{formatDay(customer.lastOrderOn)}</td>
                     <td><Pill label={customer.tier} /></td>
                     <td className="admin-row-actions">
                       <IconButton label={`View ${customer.name}`} icon="eye" onClick={() => setModal({ kind: 'customer', id: customer.id })} />
+                      <IconButton label={`Remove ${customer.name}`} icon="trash" danger onClick={() => setEditing({ kind: 'remove', collection: 'customers', id: customer.id, label: customer.name })} />
                     </td>
                   </tr>
                 ))}
@@ -691,14 +768,19 @@ export function AdminPortal() {
     }
 
     if (section === 'reviews') {
-      const visible = byChip(reviews, (review) => review.status).filter((review) => matches(`${review.author} ${review.product} ${review.text}`));
+      const visible = byChip(reviews, (review) => review.status).filter((review) => matches(`${review.author} ${review.productName} ${review.text}`));
       return (
         <>
           <PageHead
             crumb="Reviews"
             title="Reviews"
             sub={`${reviews.length} customer reviews · average ${(reviews.reduce((total, review) => total + review.rating, 0) / Math.max(reviews.length, 1)).toFixed(1)} stars.`}
-            actions={<button className="admin-btn admin-btn-dark" type="button" onClick={() => go('add-review')}><Icon name="plus" />Add a review</button>}
+            actions={
+              <>
+                <BulkUpload dataset="reviews" plural="reviews" />
+                <button className="admin-btn admin-btn-dark" type="button" onClick={() => { setEditing(null); go('add-review'); }}><Icon name="plus" />Add a review</button>
+              </>
+            }
           />
           <FilterBar
             options={['All', 'Active', 'Pending review', 'Hidden']}
@@ -719,20 +801,18 @@ export function AdminPortal() {
                       <span>{review.text}</span>
                     </td>
                     <td>{review.author}</td>
-                    <td>{review.product}</td>
-                    <td>{review.date}</td>
+                    <td>{review.productName}</td>
+                    <td>{formatDay(review.reviewedOn)}</td>
                     <td><Pill label={review.status} /></td>
                     <td className="admin-row-actions">
                       <IconButton label={`View review by ${review.author}`} icon="eye" onClick={() => setModal({ kind: 'review', id: review.id })} />
+                      <IconButton label={`Edit review by ${review.author}`} icon="pen" onClick={() => { setEditing({ kind: 'review', id: review.id }); go('add-review'); }} />
                       <IconButton
                         label={`${review.status === 'Hidden' ? 'Publish' : 'Hide'} review by ${review.author}`}
                         icon={review.status === 'Hidden' ? 'check' : 'hide'}
-                        onClick={() => {
-                          const next = review.status === 'Hidden' ? 'Active' : 'Hidden';
-                          setReviews((current) => current.map((entry) => (entry.id === review.id ? { ...entry, status: next } : entry)));
-                          notify(`Review by ${review.author} is now ${next.toLowerCase()}.`);
-                        }}
+                        onClick={() => void saveRecord('reviews', { status: review.status === 'Hidden' ? 'Active' : 'Hidden' }, review.id)}
                       />
+                      <IconButton label={`Remove review by ${review.author}`} icon="trash" danger onClick={() => setEditing({ kind: 'remove', collection: 'reviews', id: review.id, label: review.author })} />
                     </td>
                   </tr>
                 ))}
@@ -756,7 +836,6 @@ export function AdminPortal() {
       partner: 'Partner parlour',
       customer: 'Customer profile',
       review: 'Review moderation',
-      'remove-product': 'Remove this product?',
     }[modal.kind]
     : '';
 
@@ -768,16 +847,26 @@ export function AdminPortal() {
             : modal.kind === 'partner' ? renderPartnerDetail(modal.id)
               : modal.kind === 'customer' ? renderCustomerDetail(modal.id)
                 : modal.kind === 'review' ? renderReviewDetail(modal.id)
-                  : <p className="admin-muted">The catalogue API supports creating products, not deleting them. This item stays in the catalogue until the products API grows a delete endpoint.</p>
+                  : null
     : null;
 
-  if (account?.role !== 'admin') {
+  if (account?.role !== 'admin' || !getAdminToken()) {
     return (
       <section className="admin-locked">
         <span className="eyebrow">Administrator access</span>
         <h1>Sign in to continue.</h1>
-        <p>Sign in with the matching demo account to see this dashboard.</p>
+        <p>Sign in with the administrator demo account to open this dashboard.</p>
         <button className="button button-dark" type="button" onClick={() => navigate('/login')}>Go to sign in</button>
+      </section>
+    );
+  }
+
+  if (loading) {
+    return (
+      <section className="admin-locked">
+        <span className="eyebrow">Administrator access</span>
+        <h1>Loading your console…</h1>
+        <p>Fetching orders, catalogue, placements and team access.</p>
       </section>
     );
   }
@@ -818,9 +907,9 @@ export function AdminPortal() {
         <div className="admin-side-foot">
           <Link className="admin-storefront-link" to="/">View storefront <Icon name="arrow" /></Link>
           <div className="admin-me">
-            <Avatar src="/images/partner1.jpg" name={account.name} round />
-            <span className="admin-me-info"><strong>{account.name}</strong><small>Store Administrator</small></span>
-            <IconButton label="Sign out" icon="logout" onClick={logout} />
+            <Avatar src={signedIn?.avatar ?? '/images/partner1.jpg'} name={signedIn?.name ?? account.name} round />
+            <span className="admin-me-info"><strong>{signedIn?.name ?? account.name}</strong><small>{signedIn?.role ?? 'Store Administrator'}</small></span>
+            <IconButton label="Sign out" icon="logout" onClick={() => void logout()} />
           </div>
         </div>
       </aside>
@@ -894,12 +983,17 @@ export function AdminPortal() {
                 </ul>
               )}
             </div>
-            <button className="admin-topbar-avatar" type="button" aria-label="Sign out" onClick={logout}>GK</button>
+            <button className="admin-topbar-avatar" type="button" aria-label="Sign out" onClick={() => void logout()}>GK</button>
           </div>
         </header>
 
         <main className="admin-content" id="admin-content">
-          {catalogueError && <p className="admin-alert-inline" role="status">{catalogueError}</p>}
+          {storeError && (
+            <p className="admin-alert-inline" role="alert">
+              {storeError}{' '}
+              <button className="admin-text-btn" type="button" onClick={() => void reload()}>Try again</button>
+            </p>
+          )}
           {renderSection()}
         </main>
       </div>
@@ -909,11 +1003,30 @@ export function AdminPortal() {
       {modal && (
         <Modal title={modalTitle} onClose={() => setModal(null)}>
           {modalBody}
-          {modal.kind === 'remove-product' && (
-            <div className="admin-form-actions">
-              <button className="admin-btn admin-btn-light" type="button" onClick={() => setModal(null)}>Keep product</button>
-            </div>
-          )}
+        </Modal>
+      )}
+
+      {editing?.kind === 'remove' && (
+        <Modal title={`Remove ${editing.label}?`} onClose={() => setEditing(null)}>
+          <p className="admin-muted">
+            This deletes {editing.label} from the console for good. It cannot be undone, and a demo-data reset is the only way to bring the original sample row back.
+          </p>
+          <div className="admin-form-actions">
+            <button className="admin-btn admin-btn-light" type="button" onClick={() => setEditing(null)}>Keep it</button>
+            <button
+              className="admin-btn admin-btn-danger"
+              type="button"
+              onClick={() => {
+                const target = editing;
+                setEditing(null);
+                if (target.collection === 'products') void removeProduct(products.find((product) => String(product.id) === target.id) ?? { id: Number(target.id), name: target.label } as Product);
+                else if (target.collection === 'orders') void removeOrder(target.id);
+                else void removeRecord(target.collection, target.id);
+              }}
+            >
+              Delete permanently
+            </button>
+          </div>
         </Modal>
       )}
 
@@ -922,46 +1035,55 @@ export function AdminPortal() {
   );
 }
 
-type NewJob = {
-  id: string;
-  title: string;
-  partner: string;
-  area: string;
-  type: string;
-  salary: string;
-  applications: number;
-  status: string;
-};
-
-function JobForm({ onCancel, onSave }: { onCancel: () => void; onSave: (job: NewJob) => void }) {
-  const [skills, setSkills] = useState<string[]>([]);
-  const [accepting, setAccepting] = useState(false);
-  const [draft, setDraft] = useState({ title: '', partner: '', salary: '', type: 'Full-time' });
+function JobForm({
+  areas,
+  onCancel,
+  editing,
+  onSave,
+}: {
+  areas: readonly string[];
+  onCancel: () => void;
+  editing?: JobRecord;
+  onSave: (job: Record<string, unknown>) => Promise<boolean>;
+}) {
+  const [skills, setSkills] = useState<string[]>(() => (editing?.skills ? editing.skills.split(',').map((skill) => skill.trim()).filter(Boolean) : []));
+  const [accepting, setAccepting] = useState(editing ? editing.status === 'Open' : false);
+  const [saving, setSaving] = useState(false);
+  const [draft, setDraft] = useState({
+    title: editing?.title ?? '',
+    partner: editing?.partner ?? '',
+    salary: editing?.salary ?? '',
+    type: editing?.type ?? 'Full-time',
+    area: editing?.area ?? areas[0] ?? '',
+  });
 
   return (
     <>
       <PageHead
-        crumb="Post a vacancy"
-        title="Post a vacancy"
+        crumb={editing ? `Edit ${editing.id}` : 'Post a vacancy'}
+        title={editing ? `Edit ${editing.title}` : 'Post a vacancy'}
         sub="Create a placement listing for a partner parlour."
         actions={<button className="admin-btn admin-btn-light" type="button" onClick={onCancel}>Cancel</button>}
       />
       <form
         className="admin-product-layout"
-        onSubmit={(event) => {
+        onSubmit={async (event) => {
           event.preventDefault();
           const values = new FormData(event.currentTarget);
-          const title = draft.title.trim();
-          onSave({
-            id: `JOB-${4822 + Math.floor(Math.random() * 90)}`,
-            title,
+          setSaving(true);
+          const saved = await onSave({
+            title: draft.title.trim(),
             partner: draft.partner.trim(),
-            area: String(values.get('area') ?? ''),
+            area: draft.area,
             type: draft.type,
             salary: draft.salary.trim(),
-            applications: 0,
+            experience: String(values.get('experience') ?? '').trim(),
+            skills: skills.join(', '),
+            description: String(values.get('description') ?? '').trim(),
+            applications: editing?.applications ?? 0,
             status: accepting ? 'Open' : 'Draft',
           });
+          if (!saved) setSaving(false);
         }}
       >
         <div className="admin-product-main">
@@ -970,15 +1092,15 @@ function JobForm({ onCancel, onSave }: { onCancel: () => void; onSave: (job: New
             <div className="admin-grid-2">
               <label className="admin-field admin-span-2">Position title<input name="title" required placeholder="e.g. Senior Beautician" value={draft.title} onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))} /></label>
               <label className="admin-field">Parlour / salon<input name="partner" required placeholder="e.g. Blush Beauty Lounge" value={draft.partner} onChange={(event) => setDraft((current) => ({ ...current, partner: event.target.value }))} /></label>
-              <label className="admin-field">Location<select name="area" defaultValue={jobAreas[0]}>{jobAreas.map((area) => <option key={area}>{area}</option>)}</select></label>
+              <label className="admin-field">Location<select name="area" value={draft.area} onChange={(event) => setDraft((current) => ({ ...current, area: event.target.value }))}>{areas.map((area) => <option key={area}>{area}</option>)}</select></label>
               <label className="admin-field">Employment type<select name="type" value={draft.type} onChange={(event) => setDraft((current) => ({ ...current, type: event.target.value }))}><option>Full-time</option><option>Part-time</option><option>Contract</option><option>Internship</option></select></label>
               <label className="admin-field">Salary range<input name="salary" required placeholder="e.g. ₹18,000 – ₹25,000 / mo" value={draft.salary} onChange={(event) => setDraft((current) => ({ ...current, salary: event.target.value }))} /></label>
-              <label className="admin-field admin-span-2">Experience required<input name="experience" placeholder="e.g. 2+ years in a salon" /></label>
+              <label className="admin-field admin-span-2">Experience required<input name="experience" defaultValue={editing?.experience ?? ''} placeholder="e.g. 2+ years in a salon" /></label>
               <fieldset className="admin-field admin-span-2">
                 <legend>Skills</legend>
                 <TagInput tags={skills} onChange={setSkills} placeholder="e.g. Bridal makeup" />
               </fieldset>
-              <label className="admin-field admin-span-2">Description<textarea name="description" rows={5} required placeholder="What makes this role lovely?" /></label>
+              <label className="admin-field admin-span-2">Description<textarea name="description" rows={5} required defaultValue={editing?.description ?? ''} placeholder="What makes this role lovely?" /></label>
             </div>
           </Panel>
         </div>
@@ -1001,69 +1123,67 @@ function JobForm({ onCancel, onSave }: { onCancel: () => void; onSave: (job: New
             </div>
           </Panel>
           <div className="admin-form-actions">
-            <button className="admin-btn admin-btn-dark" type="submit">Save vacancy</button>
-            <button className="admin-btn admin-btn-ghost" type="button" onClick={onCancel}>Cancel</button>
+            <button className="admin-btn admin-btn-dark" type="submit" disabled={saving}>{saving ? 'Saving…' : editing ? 'Save changes' : 'Save vacancy'}</button>
+            <button className="admin-btn admin-btn-ghost" type="button" onClick={onCancel} disabled={saving}>Cancel</button>
           </div>
-          <p className="admin-alert-inline" role="note">Placements data in this console is a preview. Vacancies are published by the partner salon.</p>
         </aside>
       </form>
     </>
   );
 }
 
-type NewReview = {
-  id: string;
-  author: string;
-  avatar: string;
-  product: string;
-  rating: number;
-  text: string;
-  status: string;
-  date: string;
-};
-
-function ReviewForm({ onCancel, onSave }: { onCancel: () => void; onSave: (review: NewReview) => void }) {
-  const [rating, setRating] = useState(5);
-  const [published, setPublished] = useState(true);
-  const { products } = useProductCatalog();
+function ReviewForm({
+  products,
+  onCancel,
+  editing,
+  onSave,
+}: {
+  products: string[];
+  onCancel: () => void;
+  editing?: ReviewRecord;
+  onSave: (review: Record<string, unknown>) => Promise<boolean>;
+}) {
+  const [rating, setRating] = useState(editing?.rating ?? 5);
+  const [published, setPublished] = useState(editing ? editing.status === 'Active' : true);
+  const [saving, setSaving] = useState(false);
 
   return (
     <>
       <PageHead
-        crumb="Add a review"
-        title="Add a review"
+        crumb={editing ? `Edit ${editing.id}` : 'Add a review'}
+        title={editing ? `Edit review by ${editing.author}` : 'Add a review'}
         sub="Record a testimonial to publish on the storefront."
         actions={<button className="admin-btn admin-btn-light" type="button" onClick={onCancel}>Cancel</button>}
       />
       <form
         className="admin-product-layout"
-        onSubmit={(event: FormEvent<HTMLFormElement>) => {
+        onSubmit={async (event: FormEvent<HTMLFormElement>) => {
           event.preventDefault();
           const values = new FormData(event.currentTarget);
-          const author = String(values.get('author') ?? '').trim();
-          onSave({
-            id: `REV-${2215 + Math.floor(Math.random() * 40)}`,
-            author,
-            avatar: '/images/partner2.jpg',
-            product: String(values.get('product') ?? ''),
+          setSaving(true);
+          const saved = await onSave({
+            author: String(values.get('author') ?? '').trim(),
+            avatar: editing?.avatar ?? '',
+            productName: String(values.get('product') ?? ''),
             rating,
             text: String(values.get('quote') ?? '').trim(),
             status: published ? 'Active' : 'Pending review',
-            date: '26 Sep 2026',
+            reviewedOn: editing?.reviewedOn ?? new Date().toISOString().slice(0, 10),
           });
+          if (!saved) setSaving(false);
         }}
       >
         <div className="admin-product-main">
           <Panel>
             <PanelHead title="Testimonial" sub="Who said it and what they said" />
             <div className="admin-grid-2">
-              <label className="admin-field">Author name<input name="author" required placeholder="e.g. Priya Sharma" /></label>
-              <label className="admin-field">Product<select name="product" defaultValue="" required><option value="" disabled>Select a product</option>{products.map((product) => <option key={product.id}>{product.name}</option>)}</select></label>
+              <label className="admin-field">Author name<input name="author" required defaultValue={editing?.author ?? ''} placeholder="e.g. Priya Sharma" /></label>
+              <label className="admin-field">Product<select name="product" required defaultValue={editing?.productName ?? ''}><option value="" disabled>Select a product</option>{products.map((name) => <option key={name}>{name}</option>)}</select></label>
               <fieldset className="admin-field admin-span-2">
                 <legend>Rating</legend>
                 <StarInput value={rating} onChange={setRating} />
               </fieldset>
-              <label className="admin-field admin-span-2">Quote<textarea name="quote" rows={5} required placeholder="A warm, honest line about the product." /></label>
+              <label className="admin-field admin-span-2">Quote<textarea name="quote" rows={5} required defaultValue={editing?.text ?? ''} placeholder="A warm, honest line about the product." /></label>
             </div>
           </Panel>
         </div>
@@ -1084,8 +1204,8 @@ function ReviewForm({ onCancel, onSave }: { onCancel: () => void; onSave: (revie
             </div>
           </Panel>
           <div className="admin-form-actions">
-            <button className="admin-btn admin-btn-dark" type="submit">Save review</button>
-            <button className="admin-btn admin-btn-ghost" type="button" onClick={onCancel}>Cancel</button>
+            <button className="admin-btn admin-btn-dark" type="submit" disabled={saving}>{saving ? 'Saving…' : editing ? 'Save changes' : 'Save review'}</button>
+            <button className="admin-btn admin-btn-ghost" type="button" onClick={onCancel} disabled={saving}>Cancel</button>
           </div>
         </aside>
       </form>
