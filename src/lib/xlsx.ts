@@ -13,6 +13,7 @@ export type Spreadsheet = { name: string; rows: string[][] }[];
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+const COMPRESSION_FALLBACK_MS = 4000;
 
 const crcTable = (() => {
   const table = new Uint32Array(256);
@@ -36,28 +37,49 @@ function hasCompressionStreams() {
   return typeof DecompressionStream === 'function' && typeof CompressionStream === 'function';
 }
 
+/**
+ * Feeds `bytes` through a compression or decompression stream.
+ *
+ * The readable side has to be drained *concurrently* with the write. Browsers
+ * apply backpressure: the transform holds the write open until its output queue
+ * is consumed, so awaiting `writer.write()` before anybody reads `readable`
+ * deadlocks and the promise never settles. Draining first is what makes
+ * templates and uploads work in a real browser.
+ */
 async function pipeThrough(bytes: Uint8Array, transform: CompressionStream | DecompressionStream) {
-  const writer = (transform.writable as WritableStream<BufferSource>).getWriter();
-  await writer.write(bytes as BufferSource);
-  await writer.close();
   const reader = (transform.readable as ReadableStream<Uint8Array>).getReader();
-  const chunks: Uint8Array[] = [];
-  let length = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value) {
-      chunks.push(value);
-      length += value.length;
+  const drained = (async () => {
+    const chunks: Uint8Array[] = [];
+    let length = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        chunks.push(value);
+        length += value.length;
+      }
     }
+    const joined = new Uint8Array(length);
+    let offset = 0;
+    for (const chunk of chunks) {
+      joined.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return joined;
+  })();
+
+  try {
+    const writer = (transform.writable as WritableStream<BufferSource>).getWriter();
+    await writer.write(bytes as BufferSource);
+    await writer.close();
+  } catch (error) {
+    // A failed write still has to stop the reader, otherwise the drain below
+    // would wait forever on a stream nobody will ever close.
+    await reader.cancel(error).catch(() => undefined);
+    throw error;
   }
-  const joined = new Uint8Array(length);
-  let offset = 0;
-  for (const chunk of chunks) {
-    joined.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return joined;
+
+  return drained;
 }
 
 function deflate(bytes: Uint8Array) {
@@ -66,6 +88,27 @@ function deflate(bytes: Uint8Array) {
 
 function inflate(bytes: Uint8Array) {
   return pipeThrough(bytes, new DecompressionStream('deflate-raw'));
+}
+
+/**
+ * Compresses an archive member, falling back to a stored (uncompressed) member
+ * if the platform's compressor is slow to settle. A stored member is still a
+ * valid .xlsx, so a stalled stream degrades the file size instead of leaving
+ * the operator with no template at all.
+ */
+async function compressOrStore(bytes: Uint8Array) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), COMPRESSION_FALLBACK_MS);
+  });
+  try {
+    const compressed = await Promise.race([deflate(bytes), timeout]);
+    return compressed ? { method: 8, payload: compressed } : { method: 0, payload: bytes };
+  } catch {
+    return { method: 0, payload: bytes };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function dosDateTime(date: Date) {
@@ -84,9 +127,10 @@ async function zip(entries: Array<{ name: string; bytes: Uint8Array }>) {
   let offset = 0;
   for (const entry of entries) {
     const name = encoder.encode(entry.name);
-    let method = 8;
-    let payload: Uint8Array = await deflate(entry.bytes);
-    if (payload.length >= entry.bytes.length) {
+    const compressed = await compressOrStore(entry.bytes);
+    let method = compressed.method;
+    let payload: Uint8Array = compressed.payload;
+    if (method === 8 && payload.length >= entry.bytes.length) {
       method = 0;
       payload = entry.bytes;
     }
@@ -427,11 +471,27 @@ export function sheetToRecords(rows: string[][]) {
   return { headers, records };
 }
 
+/**
+ * Saves a generated file to the shopper's downloads folder.
+ *
+ * The anchor is attached to the document because some browsers ignore a click
+ * on a detached node, and the object URL is revoked on a later turn of the
+ * event loop: revoking it inline can tear the blob down before the download has
+ * started reading it, which is exactly how the template download used to fail
+ * with no error at all.
+ */
 export function downloadBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
   link.download = filename;
-  link.click();
-  URL.revokeObjectURL(url);
+  link.rel = 'noopener';
+  link.style.display = 'none';
+  document.body.appendChild(link);
+  try {
+    link.click();
+  } finally {
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  }
 }

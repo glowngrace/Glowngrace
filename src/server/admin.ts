@@ -20,6 +20,7 @@ import {
   partnerSeeds,
   reviewSeeds,
   sitePageSeeds,
+  switchablePageSlugs,
   type DemoDatasetKey,
 } from './admin/seeds.js';
 import type { Database, QueryResult } from './handlers.js';
@@ -468,6 +469,18 @@ export function createAdminHandlers(database: Database) {
     return settings;
   }
 
+  /**
+   * The pages the console may switch on and off.
+   *
+   * The storefront keeps receiving every row from `publicPages`, because the
+   * gates and navigation need to know the state of all of them. The console
+   * only ever sees the three editorial pages it is allowed to change.
+   */
+  async function listSwitchablePages() {
+    const all = await listPages();
+    return all.filter((page) => (switchablePageSlugs as readonly string[]).includes(page.slug));
+  }
+
   async function listPages() {
     // site_pages arrives with db/migrations/005_admin_console.sql. A database
     // without it still has a storefront: it just has no saved visibility, so
@@ -873,8 +886,11 @@ export function createAdminHandlers(database: Database) {
     }
 
     if (resource === 'pages') {
-      if (method === 'GET') return { status: 200, body: { pages: await listPages() } };
+      if (method === 'GET') return { status: 200, body: { pages: await listSwitchablePages() } };
       if (method === 'PATCH' || method === 'PUT') {
+        if (!(switchablePageSlugs as readonly string[]).includes(id ?? '')) {
+          return fail(400, 'page_not_switchable', 'Only the Partners, Shop and Careers pages can be shown or hidden.');
+        }
         const parsed = pageUpdateSchema.safeParse(request.body);
         if (!parsed.success) return fail(400, 'invalid_page', 'Choose whether this page stays visible.');
         const result = await database.query(

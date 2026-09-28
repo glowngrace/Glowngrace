@@ -137,20 +137,36 @@ describe('storefront page visibility', () => {
     expect((await admin.publicPages()).find((page) => page.slug === 'careers')?.visible).toBe(true);
   });
 
-  it('rejects a visibility change that names a page outside the storefront', async () => {
-    const { database } = makeDatabase(async (text) => {
+  it('rejects a visibility change for a page the console may not switch', async () => {
+    const { database, query } = makeDatabase(async (text) => {
       if (text.includes('UPDATE site_pages')) return { rows: [], rowCount: 0 };
       if (text.includes('FROM admin_sessions')) return { rows: [activeAdminRow], rowCount: 1 };
       return { rows: [], rowCount: 0 };
     });
-    const result = await createAdminHandlers(database).handle({
-      method: 'PATCH',
-      segments: ['pages', 'checkout'],
-      body: { visible: false },
-      token,
-    });
+    const admin = createAdminHandlers(database);
+    // Checkout is a real storefront page, but hiding it would strand shoppers
+    // mid-purchase, so the console refuses it before it reaches the database.
+    for (const slug of ['checkout', 'home', 'about', 'admin', 'wishlist']) {
+      const result = await admin.handle({ method: 'PATCH', segments: ['pages', slug], body: { visible: false }, token });
+      expect(result).toMatchObject({ status: 400, body: { error: 'page_not_switchable' } });
+    }
+    expect(query).not.toHaveBeenCalledWith(expect.stringContaining('UPDATE site_pages'), expect.anything());
+  });
 
-    expect(result).toMatchObject({ status: 404 });
+  it('only lists the three switchable pages to the console, but still serves every page to the storefront', async () => {
+    const { database } = makeDatabase(async (text) => {
+      if (text.includes('FROM site_pages')) return { rows: pageRows, rowCount: pageRows.length };
+      if (text.includes('FROM admin_sessions')) return { rows: [activeAdminRow], rowCount: 1 };
+      return { rows: [], rowCount: 0 };
+    });
+    const admin = createAdminHandlers(database);
+
+    const listed = await admin.handle({ method: 'GET', segments: ['pages'], token });
+    expect(listed.status).toBe(200);
+    expect((listed.body as { pages: Array<{ slug: string }> }).pages.map((page) => page.slug)).toEqual(['shop', 'careers']);
+
+    // The storefront gates and navigation still need the full list.
+    expect((await admin.publicPages()).map((page) => page.slug)).toEqual(['home', 'shop', 'careers']);
   });
 
   it('refuses a page change without an admin session', async () => {

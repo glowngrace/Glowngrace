@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react';
+import { Spinner } from '../../components/Loader';
 import { bulkTemplateByDataset, type BulkDatasetKey, type BulkTemplate } from '../../lib/bulk-templates';
 import { buildWorkbook, downloadBlob, readSpreadsheet, sheetToRecords } from '../../lib/xlsx';
 import { Icon } from './AdminUi';
@@ -27,22 +28,27 @@ function templateWorkbook(template: BulkTemplate) {
 export function BulkUpload({ dataset, plural }: { dataset: BulkDatasetKey; plural: string }) {
   const { importRows, setError } = useAdminStore();
   const [summary, setSummary] = useState('');
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<'template' | 'import' | null>(null);
   const input = useRef<HTMLInputElement>(null);
   const template = bulkTemplateByDataset.get(dataset) ?? (() => { throw new Error(`No bulk template for ${dataset}.`); })();
 
   async function downloadTemplate() {
+    setBusy('template');
+    setSummary('Preparing your template…');
     try {
       downloadBlob(await templateWorkbook(template), template.filename);
       setSummary(`${template.plural} template downloaded. Fill in the example row and upload it back.`);
     } catch (cause) {
+      setSummary('');
       setError(cause instanceof Error ? cause.message : 'The template could not be created.');
+    } finally {
+      setBusy(null);
     }
   }
 
   async function upload(file: File) {
-    setBusy(true);
-    setSummary('');
+    setBusy('import');
+    setSummary(`Reading ${file.name}…`);
     try {
       const [sheet] = await readSpreadsheet(file);
       if (!sheet) throw new Error('That workbook has no sheets to import.');
@@ -53,6 +59,7 @@ export function BulkUpload({ dataset, plural }: { dataset: BulkDatasetKey; plura
       if (missing.length > 0) throw new Error(`Missing columns: ${missing.join(', ')}. Download the template and copy your data into it.`);
       if (records.length === 0) throw new Error('No data rows were found below the column names.');
       if (unknown.length > 0) setError(`Ignored unknown columns: ${unknown.join(', ')}.`);
+      setSummary(`Importing ${records.length} row${records.length === 1 ? '' : 's'} from ${sheet.name}…`);
       await importRows(dataset, records.map((record) => {
         const row: Record<string, unknown> = {};
         for (const column of template.columns) row[column] = record[column] ?? '';
@@ -60,12 +67,15 @@ export function BulkUpload({ dataset, plural }: { dataset: BulkDatasetKey; plura
       }));
       setSummary(`${records.length} row${records.length === 1 ? '' : 's'} from ${sheet.name} sent for import.`);
     } catch (cause) {
+      setSummary('');
       setError(cause instanceof Error ? cause.message : 'That spreadsheet could not be read.');
     } finally {
-      setBusy(false);
+      setBusy(null);
       if (input.current) input.current.value = '';
     }
   }
+
+  const working = busy !== null;
 
   return (
     <div className="admin-bulk">
@@ -78,13 +88,27 @@ export function BulkUpload({ dataset, plural }: { dataset: BulkDatasetKey; plura
         aria-describedby={`bulk-${dataset}-note`}
         onChange={(event) => { const file = event.currentTarget.files?.[0]; if (file) void upload(file); }}
       />
-      <button className="admin-btn admin-btn-light" type="button" onClick={() => void downloadTemplate()} disabled={busy}>
-        <Icon name="download" />Template
+      <button
+        className="admin-btn admin-btn-light"
+        type="button"
+        data-testid={`bulk-template-${dataset}`}
+        onClick={() => void downloadTemplate()}
+        disabled={working}
+      >
+        {busy === 'template' ? <Spinner /> : <Icon name="download" />}
+        {busy === 'template' ? 'Preparing…' : 'Template'}
       </button>
-      <button className="admin-btn admin-btn-light" type="button" onClick={() => input.current?.click()} disabled={busy}>
-        <Icon name="upload" />{busy ? 'Importing…' : `Upload ${plural.toLowerCase()}`}
+      <button
+        className="admin-btn admin-btn-light"
+        type="button"
+        data-testid={`bulk-upload-${dataset}`}
+        onClick={() => input.current?.click()}
+        disabled={working}
+      >
+        {busy === 'import' ? <Spinner /> : <Icon name="upload" />}
+        {busy === 'import' ? 'Importing…' : `Upload ${plural.toLowerCase()}`}
       </button>
-      {summary && <span className="admin-bulk-note" id={`bulk-${dataset}-note`} role="status">{summary}</span>}
+      {summary && <span className="admin-bulk-note" id={`bulk-${dataset}-note`} role="status" aria-live="polite">{summary}</span>}
     </div>
   );
 }

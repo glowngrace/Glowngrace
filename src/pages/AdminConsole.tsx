@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { getDemoAccount, signOutDemo } from '../auth/demo-auth';
 import { getAdminToken } from '../lib/admin-api';
 import { productImageUrl, type Product } from '../data/catalog';
+import { Spinner } from '../components/Loader';
 import {
   jobAreas,
   money,
@@ -140,6 +141,7 @@ function AdminConsole() {
     customers,
     reviews,
     loading,
+    reloading,
     error: storeError,
     notice,
     reload,
@@ -863,10 +865,13 @@ function AdminConsole() {
 
   if (loading) {
     return (
-      <section className="admin-locked">
+      <section className="admin-locked" aria-busy="true">
         <span className="eyebrow">Administrator access</span>
-        <h1>Loading your console…</h1>
-        <p>Fetching orders, catalogue, placements and team access.</p>
+        <div className="admin-boot" role="status" aria-live="polite" data-testid="admin-loader">
+          <Spinner size="lg" />
+          <h1>Loading your console…</h1>
+          <p>Fetching orders, catalogue, placements and team access.</p>
+        </div>
       </section>
     );
   }
@@ -948,6 +953,11 @@ function AdminConsole() {
           </div>
 
           <div className="admin-topbar-actions">
+            {reloading && (
+              <span className="admin-topbar-loading" role="status" aria-live="polite" data-testid="admin-reloading">
+                <Spinner size="sm" />Syncing
+              </span>
+            )}
             <div className="admin-bell-wrap">
               <button
                 className="admin-topbar-icon"

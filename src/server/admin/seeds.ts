@@ -11,6 +11,19 @@ export const demoDatasets: Array<{ key: DemoDatasetKey; label: string; table: st
 
 export type SitePageSeed = { slug: string; label: string; path: string; position: number };
 
+/**
+ * The storefront pages the console is allowed to show or hide.
+ *
+ * Everything else in `site_pages` is a structural page: the shop, the product
+ * page and checkout are what makes a store a store, and sign-in, the portals
+ * and the order confirmation are reachable directly by link. Letting an
+ * operator hide those only produces a storefront that cannot be navigated or
+ * checked out, so the settings screen offers just the three editorial pages.
+ */
+export const switchablePageSlugs = ['partners', 'shop', 'careers'] as const;
+
+export type SwitchablePageSlug = (typeof switchablePageSlugs)[number];
+
 export const sitePageSeeds: SitePageSeed[] = [
   { slug: 'home', label: 'Home', path: '/', position: 1 },
   { slug: 'shop', label: 'Shop', path: '/shop', position: 2 },

@@ -72,6 +72,34 @@ Choose **Sign in** in the header and open **Explore a demo account** to fill in 
 
 These sample accounts and dashboards are front-end previews only. Their role selection is stored in local browser storage, without password hashing, server-side authorization, or a production authentication provider. Do not use these demo credentials or portal previews to protect real customer or business data; production authentication and server-side role authorization must be added before making protected portals available publicly.
 
+## Loading feedback
+
+`src/components/Loader.tsx` is the single loading primitive for the whole application, so a slow request always produces the same visible, announced feedback instead of a blank screen. Nothing renders a bespoke spinner.
+
+- `Loader` fills a region that is fetching its first payload, `PageLoader` fills a whole page, `Spinner` sits inside a button, and `Skeleton` / `TableSkeleton` keep a region's final shape while it loads.
+- `LoadingProvider` wraps the app and renders a thin route progress bar during navigation. It is mounted once in `src/App.tsx`.
+- The storefront page gate (`StorefrontPagesProvider`) shows a `PageLoader` until `GET /api/site/pages` resolves, and clears it on failure as well as success, so a failed request can never strand a spinner.
+- `AdminStore` distinguishes the first load from a background reload. The admin console shows a full loader while the first payload arrives and a small progress bar for later refreshes, which is what previously caused a reload loop on every settings change.
+- Every loader is a `role="status"` region with `aria-live="polite"` and `aria-busy="true"`, and the animations are disabled by the global `prefers-reduced-motion` rule.
+
+`e2e/regressions.spec.ts` holds the relevant request open and asserts the loader is visible, announced, and then removed, which is the failure the old implementation produced: an empty `#main-content` with no indication anything was happening.
+
+## Page visibility settings
+
+`GET /api/admin/pages` and `PATCH /api/admin/pages/:slug` are restricted server-side to the three pages that actually have a storefront visibility switch: **Partners**, **Shop**, and **Careers**. The list is declared once as `switchablePageSlugs` in `src/server/admin/seeds.ts`; structural pages such as About, Contact, and FAQ are rejected on update, because hiding them would leave the app with no route.
+
+`GET /api/site/pages`, which the storefront gate uses, still returns every page. The admin restriction applies to the admin surface only.
+
+## Bulk uploads and spreadsheets
+
+Bulk upload templates are generated in the browser by `src/lib/xlsx.ts` and downloads are triggered by `downloadBlob`.
+
+- **The workbook builder drains the compression stream before it waits on the write.** Browsers apply backpressure to `CompressionStream`: the promise returned by `write()` does not settle until the readable side is being drained. The original code wrote first and read afterwards, which Node tolerates (it buffers eagerly) but which deadlocked in Chrome, so no template ever downloaded. Both compression and decompression now start the read and the write together.
+- **Compression degrades, it does not fail.** If a compressor has not produced output within four seconds, the entry is written as a stored (uncompressed) ZIP member instead. The archive stays valid, so a slow device gets a larger file rather than no file.
+- **`downloadBlob` attaches its anchor to the document, clicks it, and revokes the object URL after 60 seconds.** Revoking inline tore the blob down before the browser read it; the anchor is removed from the DOM immediately after the click so it cannot accumulate.
+
+`src/lib/xlsx.test.ts` covers all three with fakes that model the browser backpressure rule, because Node's implementation cannot reproduce the deadlock. `e2e/regressions.spec.ts` additionally downloads a real template in Chromium and asserts the file starts with the `PK` ZIP header, which is the check that would have caught the original bug.
+
 ## Administrator console
 
 `/admin` is a single-page console built to `Design/glow-and-grace-admin.html`: a dark grouped sidebar, a topbar with search and quick-create, and twelve sections — Dashboard, Orders, Products, Add product, Job vacancies, Post a vacancy, Candidates, Partner salons, Customers, Reviews, Add a review, and Settings. It shares the demo-auth `/login` route; there is no separate administrator login.
@@ -203,6 +231,8 @@ npm run test:e2e:dist
 ```
 
 Playwright runs Chromium in desktop and mobile emulation. Install its browser once with `npx playwright install chromium`. The E2E server starts automatically; browser tests cover storefront navigation, product and wishlist interactions, checkout delivery/tax calculations and failure recovery, portal access, administrator section navigation and product/image creation, contact submission, and responsive layouts. API unit tests cover validation and server-calculated persistence without requiring a live database. To verify saved products or real local orders, apply the migrations if needed, start Docker and the app, and create a test product or place a COD test order.
+
+`e2e/regressions.spec.ts` covers the three regressions fixed in the loading, settings, and spreadsheet work described above: a held request must produce a visible and announced loader that then clears (including on failure), the Settings page must offer exactly three page switches and no structural pages, and the products template must download as a real ZIP archive whose button announces progress while the workbook is built. Every request in that file is stubbed, so the suite never touches the database.
 
 `src/server/schema-drift.test.ts` covers the deployment-ahead-of-database behaviour against a fake database that raises `42P01` and `42703`, so no live database is needed. To check it for real rather than against a mock, start `npm run db:mirror:up -- --through 004` and read `GET /api/products` (expect `200` with the products treated as published), `GET /api/site/pages` (expect `200` with the bundled page list) and `POST /api/admin/session` (expect `503` `schema_not_migrated`).
 
