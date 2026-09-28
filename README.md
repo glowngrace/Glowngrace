@@ -5,10 +5,11 @@ A responsive React storefront and beauty-career platform built to `Design/glow-a
 ## Stack
 
 - React 19, TypeScript, Vite, and React Router
-- PostgreSQL locally in Docker Compose; Neon PostgreSQL for production
+- PostgreSQL locally in Docker Compose; Neon PostgreSQL for production; a disposable Docker mirror of the production schema for reproducing database problems
 - Parameterized `pg` queries and Zod validation in the API
 - Vercel static hosting and Node.js serverless API functions, with a single-page-app rewrite for deep links
 - Vitest / Testing Library for UI and API unit tests; Playwright for browser E2E tests, including a production-build deployment suite
+- E2E | Playwright (@playwright/test) — headed/serial suite + UI runner |
 
 ## Two databases, one direction
 
@@ -23,6 +24,8 @@ The app never talks to one database from both places. Local development always u
 
 Because production is the source of truth, the local database is disposable. A product you add in the local admin console is local-only until it is created in production; `npm run db:sync` will delete it. Add and verify products on production, then refresh local.
 
+A **third** database exists for reproduction and holds no data at all: the disposable mirror described in [Reproducing a production database problem](#reproducing-a-production-database-problem).
+
 ## Local setup
 
 Requirements: Node.js 22+, npm, and Docker Desktop (or another Docker Compose runtime).
@@ -35,6 +38,33 @@ Requirements: Node.js 22+, npm, and Docker Desktop (or another Docker Compose ru
 6. Open `http://localhost:5173`.
 
 The starter storefront works without a database. Loading and saving administrator products, contact and newsletter submissions, and checkout require the local PostgreSQL container to be running. `http://localhost:3001/api/health` reports database health, not just process liveness. Stop the local database with `npm run db:down`; this keeps its named volume and data. To intentionally remove local database data, run `docker compose down -v` and then `npm run db:sync` to rebuild it from production.
+
+## Reproducing a production database problem
+
+When production misbehaves, the first instinct is to connect to Neon and look. `npm run db:sync` and `npm run db:check production` exist for that, but neither is appropriate while developing a fix: they read the live database, and a query written while debugging can write to it.
+
+The **disposable mirror** is a throwaway PostgreSQL that reproduces the production schema instead. It runs the same `postgres:16-alpine` image on port `5436`, its data directory is a `tmpfs` so nothing survives, and it is a local host, so the API's guard against remote databases accepts it without an override. It never touches `.env` and never reads `PRODUCTION_DATABASE_URL`.
+
+```sh
+npm run db:mirror:up      # start it and apply the full schema
+npm run db:mirror:down    # delete it and everything in it
+```
+
+Point the app at it instead of the local database:
+
+```sh
+DATABASE_URL=postgresql://glow_grace:glow_grace_mirror@localhost:5436/glow_grace npm run dev
+```
+
+The valuable part is `--through`, which stops the schema at a chosen migration:
+
+```sh
+npm run db:mirror:up -- --through 004
+```
+
+That produces exactly the database a deployment had before the console migrations existed — no `site_pages`, no `admin_users`, and no `products.published` — which is how the "the whole site returns 500" class of production bug is reproduced. `db/migrations/005_admin_console.sql` is the one that added `products.published`, so `--through 004` and `--through 005` behave very differently.
+
+Run `npm run db:mirror:up` again with a higher `--through` to apply the missing migrations to the running mirror; the API picks them up on its next request, with no restart.
 
 ## Sign-in and portal previews
 
@@ -75,6 +105,8 @@ Every setting lives in `.env` at the project root; nothing is hard-coded and no 
 | `PORT` | Local API | Express API port (defaults to `3001` if omitted). |
 | `VITE_API_BASE_URL` | Vite | Browser-visible API prefix; keep this as `/api`. Never put secrets in a `VITE_` variable. |
 
+The disposable mirror sets its own four variables in `scripts/mirror-database.ts` and `docker-compose.mirror.yml` (`MIRROR_POSTGRES_DB`, `MIRROR_POSTGRES_USER`, `MIRROR_POSTGRES_PASSWORD`, `MIRROR_POSTGRES_PORT`, default port `5436`). They are not read from `.env`, which is what keeps the mirror from ever being pointed at production.
+
 ### How the API picks a connection string
 
 `src/server/config.ts` is the single place that reads configuration. The API tries these names in order and uses the first one that is set: `DATABASE_URL`, `NEON_DATABASE_URL`, `DATABASE_URL_UNPOOLED`, `POSTGRES_URL`, `POSTGRES_PRISMA_URL`. The later names are the ones Neon and the Vercel Neon integration inject automatically, so the API connects whether you set `DATABASE_URL` by hand or link Neon from the Vercel dashboard.
@@ -88,9 +120,11 @@ The production API needs two things: the Neon connection string and an applied s
 1. Create or pick the Neon project and copy its **pooled** connection string.
 2. Set it in the Vercel project under **Settings → Environment Variables** as `DATABASE_URL`, for the **Production** environment (and Preview if you want preview deployments to work). Keep the password in Vercel, not in source control or a browser variable.
 3. Apply the schema to Neon once, from your machine: `npm run db:migrate:production`.
-4. Confirm it works: `curl https://your-app.vercel.app/api/health` should return `"status": "ok"`.
+4. Confirm it works: `curl https://your-app.vercel.app/api/health` should return `"status": "ok"` with empty `missingTables`, `missingProductColumns` and `missingAdminTables`.
 
-If you already linked Neon through the Vercel integration, step 2 is unnecessary — the injected variables are in the list above.
+If you already linked Neon through the Vercel Neon integration, step 2 is unnecessary — the injected variables are in the list above.
+
+**Run `npm run db:migrate:production` again after every migration you add.** Deploying code that reads a new column or table without applying the migration is what produces the drift described in [Database](#database); the API now degrades instead of going down, but only the migration actually enables the feature.
 
 ## Database health
 
@@ -103,8 +137,11 @@ curl -s https://glowngrace-tau.vercel.app/api/health
 | `status` | Meaning | Fix |
 | --- | --- | --- |
 | `ok` (HTTP 200) | Connected and every table exists. | Nothing. |
+| `ok` with `missingProductColumns` or `missingAdminTables` | The shop works, but the console cannot run. | `npm run db:migrate:production` |
 | `degraded` (HTTP 503) | Connected, but tables are missing. `missingTables` lists them. | `npm run db:migrate:production` |
 | `error` (HTTP 503) | Not connected, or no connection string is configured. `reason` explains which. | Set `DATABASE_URL` in Vercel, then redeploy. |
+
+`missingProductColumns` exists because migration `005_admin_console.sql` adds columns to the existing `products` table, so a database can be missing part of the schema while every table it reports is present. The storefront keeps serving in that state: `GET /api/products` falls back to the pre-`published` behaviour and every product is treated as published, and `GET /api/site/pages` falls back to the bundled page list. The console does not pretend to work — it returns `503` with `"error": "schema_not_migrated"` and the command to run.
 
 The same check runs locally and covers both databases at once:
 
@@ -123,9 +160,12 @@ npm run db:check               # report health of both databases
 npm run db:migrate:local       # apply the schema to the local container
 npm run db:migrate:production  # apply the schema to Neon
 npm run db:sync                # copy production data into the local container
+npm run db:mirror:up           # start a disposable mirror of the production schema
+npm run db:mirror:up -- --through 004   # stop that schema at migration 004
+npm run db:mirror:down         # delete the mirror and all of its data
 ```
 
-`db/migrate:*` is safe to re-run. Every statement in `db/init.sql` and `db/migrations/*.sql` is `IF NOT EXISTS` or `IF EXISTS`, so the files apply cleanly to a fresh database, an existing one, and one that is already up to date.
+`db/migrate:*` is safe to re-run. Every statement in `db/init.sql` and `db/migrations/*.sql` is `IF NOT EXISTS` or `IF EXISTS`, so the files apply cleanly to a fresh database, an existing one, and one that is already up to date. The mirror applies the same files, so `--through 00N` is exactly the schema a deployment had when `00N` was the newest migration.
 
 `npm run db:sync` is the only command that copies rows, and it is deliberately one-way:
 
@@ -138,7 +178,15 @@ Always run it before starting local work if you need to reproduce a production b
 
 ## Database
 
-`db/init.sql` creates the contact-request, newsletter-subscriber, product, product-image, order, and order-item tables. Docker runs it when creating a fresh data volume, and `npm run db:migrate:local` and `npm run db:migrate:production` apply it plus `db/migrations/002_orders.sql`, `db/migrations/003_products.sql`, and `db/migrations/004_product_image_dimensions.sql` to an existing database. Docker's PostgreSQL entrypoint does not rerun initialization scripts on an already-initialized volume, so use the migrate commands after changing the schema. **A database that has never been migrated returns `degraded` from `/api/health` and the admin catalogue cannot load** — this is the single most common cause of "The catalogue could not be loaded."
+`db/init.sql` creates the contact-request, newsletter-subscriber, product, product-image, order, and order-item tables. Docker runs it when creating a fresh data volume, and `npm run db:migrate:local` and `npm run db:migrate:production` apply it plus every file in `db/migrations/` to an existing database. `005_admin_console.sql` adds the publishing columns and the console tables, `006_store_settings.sql` the default store settings, and `007_admin_users.sql` the demo console accounts. Docker's PostgreSQL entrypoint does not rerun initialization scripts on an already-initialized volume, so use the migrate commands after changing the schema.
+
+**A deployment that is newer than its database is the single most common cause of "The catalogue could not be loaded."** Code that reads `products.published` fails with `42703` on a database where migration 005 was never applied, and code that reads `site_pages` or `admin_users` fails with `42P01`. `src/server/schema.ts` recognises both, and the API is written to survive them:
+
+- The storefront degrades. `GET /api/products` and `GET /api/site/pages` retry in the pre-migration shape — every product published, nothing featured, the bundled page list — so the shop keeps selling while the schema is behind.
+- The console does not degrade. Any `/api/admin/*` route returns `503` with `"error": "schema_not_migrated"`, the PostgreSQL code, and the command to run, instead of an anonymous `500`.
+- A failure is never allowed to escape a route as a rejected promise. Express 4 does not catch those, so one failed request used to end the API process and turn every following request into a `500` until the instance was replaced.
+
+Reproduce any of it with `npm run db:mirror:up -- --through 004` (see [Reproducing a production database problem](#reproducing-a-production-database-problem)). The fix is always `npm run db:migrate:production`.
 
 Checkout validates the customer's delivery/contact details and product IDs on the server, looks up all prices from the product catalogue, calculates 5% GST and delivery charges, and atomically saves the order and its line items. Delivery costs are free for standard, ₹49 for express, and ₹99 for same-day delivery. Cash on delivery is the only enabled payment option; UPI, cards, and net banking are visibly marked as coming soon because no payment provider is configured. Do not collect or store payment-card details. The order confirmation includes its order number and COD total; confirmation details are kept in the browser's current navigation state rather than exposed through a public order-lookup endpoint.
 
@@ -155,6 +203,8 @@ npm run test:e2e:dist
 ```
 
 Playwright runs Chromium in desktop and mobile emulation. Install its browser once with `npx playwright install chromium`. The E2E server starts automatically; browser tests cover storefront navigation, product and wishlist interactions, checkout delivery/tax calculations and failure recovery, portal access, administrator section navigation and product/image creation, contact submission, and responsive layouts. API unit tests cover validation and server-calculated persistence without requiring a live database. To verify saved products or real local orders, apply the migrations if needed, start Docker and the app, and create a test product or place a COD test order.
+
+`src/server/schema-drift.test.ts` covers the deployment-ahead-of-database behaviour against a fake database that raises `42P01` and `42703`, so no live database is needed. To check it for real rather than against a mock, start `npm run db:mirror:up -- --through 004` and read `GET /api/products` (expect `200` with the products treated as published), `GET /api/site/pages` (expect `200` with the bundled page list) and `POST /api/admin/session` (expect `503` `schema_not_migrated`).
 
 `npm run test:e2e` runs the storefront suite against the Vite development server. `npm run test:e2e:dist` builds the app, serves `dist` with the same routing rules as the deployment, and runs `e2e/deployment.spec.ts` against it, so a broken production route fails the build rather than reaching users. It asserts that every storefront route deep links to the built app, that a refresh keeps working, that the app's own not-found page is served instead of the hosting 404 page, that no page request returns 4xx or 5xx, that API requests still reach the API layer, and that path traversal cannot read files outside the build output. The routing rules themselves are unit tested in `src/lib/vercel-routing.test.ts`, which fails if `vercel.json` loses its rewrite or starts sending `/api` requests to the app.
 

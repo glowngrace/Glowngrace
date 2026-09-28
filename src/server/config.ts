@@ -90,6 +90,7 @@ export type HealthReport = {
     reachable: boolean;
     missingTables: string[];
     missingAdminTables?: string[];
+    missingProductColumns?: string[];
     productCount?: number | null;
     latencyMs?: number;
     reason?: string;

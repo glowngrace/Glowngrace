@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import { products, type Product } from '../data/catalog.js';
 import { checkoutTaxRate, deliveryOptions } from '../data/checkout.js';
+import { isMissingSchema } from './schema.js';
 
 export type QueryResult = { rows: Array<Record<string, unknown>>; rowCount: number | null };
 export type Database = {
@@ -90,6 +91,8 @@ export type ParsedProductImage = {
   position: number;
 };
 
+export type ValidatedProduct = z.infer<typeof productSchema>;
+
 export const productImageRules = {
   maxBytes: 307200,
   maxWidth: 1200,
@@ -165,33 +168,104 @@ function imageDimensions(data: Buffer, mimeType: string): { width: number; heigh
 export type ProductImageResult = { status: number; mimeType?: string; data?: Buffer };
 
 export function createHandlers(database: Database) {
+  /**
+   * `published` and `featured` arrive with db/migrations/005_admin_console.sql.
+   * A database that predates it has no such columns, so both the read and the
+   * write fall back to the pre-console shape - every product is published and
+   * nothing is featured - instead of failing the whole shop with a 500. Once
+   * the migration is applied the first shape succeeds again, so no restart or
+   * cache reset is needed to pick it up.
+   */
+  const publishingColumns = 'product.published, product.featured,';
+  const legacyPublishingColumns = 'TRUE AS published, FALSE AS featured,';
+  const publishedFilter = ' WHERE product.published';
+
+  async function listProducts(flags: string, filter: string): Promise<ApiResult> {
+    const result = await database.query(
+      `SELECT product.id, product.name, product.category, product.brand, product.sku, product.price,
+              product.mrp, product.stock, product.rating, product.reviews, product.badge,
+              product.image, product.description, ${flags}
+              COALESCE(
+                (SELECT json_agg('/api/products/' || product.id || '/images/' || image.position ORDER BY image.position)
+                 FROM product_images AS image WHERE image.product_id = product.id),
+                '[]'::json
+              ) AS images
+       FROM products AS product${filter} ORDER BY product.id`,
+      [],
+    );
+    // The storefront ships with a sample catalogue so a database that has never been
+    // stocked still renders. Once any product row exists the database owns the shop, so
+    // a published list that comes back empty means everything is hidden or removed.
+    const managed = await database.query('SELECT count(*) > 0 AS managed FROM products', []);
+    return {
+      status: 200,
+      body: { products: result.rows.map(mapProduct), catalogueManaged: managed.rows[0]?.managed === true },
+    };
+  }
+
+  async function saveProduct(
+    product: ValidatedProduct,
+    validImages: ParsedProductImage[],
+    publishing: boolean,
+  ): Promise<QueryResult> {
+    const flags = publishing ? ', published' : '';
+    const published = publishing ? ', TRUE' : '';
+    const returning = publishing ? ', published, featured' : '';
+    return database.query(
+      `WITH created_product AS (
+         INSERT INTO products (name, category, brand, sku, price, mrp, stock, image, description${flags})
+         VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6, $7, $8, $9${published})
+         RETURNING id, name, category, brand, sku, price, mrp, stock, rating, reviews, badge, image, description${returning}
+       ),
+       created_images AS (
+         INSERT INTO product_images (product_id, position, filename, mime_type, image_data, width, height)
+         SELECT created_product.id, image.position, image.filename, image.mime_type,
+                decode(image.data, 'base64'), image.width, image.height
+         FROM created_product
+         CROSS JOIN jsonb_to_recordset($10::jsonb) AS image(
+           position INTEGER, filename VARCHAR(180), mime_type VARCHAR(32),
+           data TEXT, width INTEGER, height INTEGER
+         )
+         RETURNING product_id, position
+       )
+       SELECT created_product.*,
+         COALESCE(
+           (SELECT json_agg('/api/products/' || created_product.id || '/images/' || created_images.position ORDER BY created_images.position)
+            FROM created_images WHERE created_images.product_id = created_product.id),
+           '[]'::json
+         ) AS images
+       FROM created_product`,
+      [
+        product.name, product.category, product.brand, product.sku, product.price, product.mrp,
+        product.stock, product.images[0].filename, product.description,
+        JSON.stringify(validImages.map((image) => ({
+          position: image.position,
+          filename: image.filename,
+          mime_type: image.mimeType,
+          data: image.data,
+          width: image.width,
+          height: image.height,
+        }))),
+      ],
+    );
+  }
+
   return {
     async products(method: string | undefined, body: unknown): Promise<ApiResult> {
       if (method === 'GET') {
         try {
-          const result = await database.query(
-            `SELECT product.id, product.name, product.category, product.brand, product.sku, product.price,
-                    product.mrp, product.stock, product.rating, product.reviews, product.badge,
-                    product.image, product.description, product.published, product.featured,
-                    COALESCE(
-                      (SELECT json_agg('/api/products/' || product.id || '/images/' || image.position ORDER BY image.position)
-                       FROM product_images AS image WHERE image.product_id = product.id),
-                      '[]'::json
-                    ) AS images
-             FROM products AS product WHERE product.published ORDER BY product.id`,
-            [],
-          );
-          // The storefront ships with a sample catalogue so a database that has never been
-          // stocked still renders. Once any product row exists the database owns the shop, so
-          // a published list that comes back empty means everything is hidden or removed.
-          const managed = await database.query('SELECT count(*) > 0 AS managed FROM products', []);
-          return {
-            status: 200,
-            body: { products: result.rows.map(mapProduct), catalogueManaged: managed.rows[0]?.managed === true },
-          };
+          return await listProducts(publishingColumns, publishedFilter);
         } catch (error) {
-          console.error('Unable to load catalogue products', error);
-          return { status: 500, body: { error: 'server_error', message: 'The catalogue could not be loaded. Please try again shortly.' } };
+          if (!isMissingSchema(error)) throw error;
+          try {
+            return await listProducts(legacyPublishingColumns, '');
+          } catch (fallbackError) {
+            console.error('Unable to load catalogue products', fallbackError);
+            return {
+              status: 500,
+              body: { error: 'server_error', message: 'The catalogue could not be loaded. Please try again shortly.' },
+            };
+          }
         }
       }
       if (method !== 'POST') return { status: 405, body: { error: 'method_not_allowed' } };
@@ -208,44 +282,13 @@ export function createHandlers(database: Database) {
       const primaryImage = product.images[0];
       if (!primaryImage) return { status: 400, body: { error: 'invalid_product_image', message: 'Upload at least one product image.' } };
       try {
-        const result = await database.query(
-          `WITH created_product AS (
-             INSERT INTO products (name, category, brand, sku, price, mrp, stock, image, description, published)
-             VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6, $7, $8, $9, TRUE)
-             RETURNING id, name, category, brand, sku, price, mrp, stock, rating, reviews, badge, image, description, published, featured
-           ),
-           created_images AS (
-             INSERT INTO product_images (product_id, position, filename, mime_type, image_data, width, height)
-             SELECT created_product.id, image.position, image.filename, image.mime_type,
-                    decode(image.data, 'base64'), image.width, image.height
-             FROM created_product
-             CROSS JOIN jsonb_to_recordset($10::jsonb) AS image(
-               position INTEGER, filename VARCHAR(180), mime_type VARCHAR(32),
-               data TEXT, width INTEGER, height INTEGER
-             )
-             RETURNING product_id, position
-           )
-           SELECT created_product.*,
-             COALESCE(
-               (SELECT json_agg('/api/products/' || created_product.id || '/images/' || created_images.position ORDER BY created_images.position)
-                FROM created_images WHERE created_images.product_id = created_product.id),
-               '[]'::json
-             ) AS images
-           FROM created_product`,
-          [
-            product.name, product.category, product.brand, product.sku, product.price, product.mrp,
-            product.stock, product.images[0].filename, product.description,
-            JSON.stringify(validImages.map((image) => ({
-              position: image.position,
-              filename: image.filename,
-              mime_type: image.mimeType,
-              data: image.data,
-              width: image.width,
-              height: image.height,
-            }))),
-          ],
-        );
-
+        let result: QueryResult;
+        try {
+          result = await saveProduct(product, validImages, true);
+        } catch (error) {
+          if (!isMissingSchema(error)) throw error;
+          result = await saveProduct(product, validImages, false);
+        }
         const savedProduct = result.rows[0];
         if (!savedProduct) throw new Error('The catalogue did not confirm the saved product.');
         return { status: 201, body: { product: mapProduct(savedProduct), message: 'Product added to the catalogue.' } };

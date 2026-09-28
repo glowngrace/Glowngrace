@@ -22,6 +22,8 @@
     "db:migrate": "tsx scripts/migrate-database.ts local",
     "db:migrate:local": "tsx scripts/migrate-database.ts local",
     "db:migrate:production": "tsx scripts/migrate-database.ts production",
+    "db:mirror:up": "tsx scripts/mirror-database.ts up",
+    "db:mirror:down": "tsx scripts/mirror-database.ts down",
     "db:sync": "tsx scripts/sync-production-to-local.ts"
   },
   "dependencies": {
