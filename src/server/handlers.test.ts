@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createHandlers, type Database, type QueryResult } from './handlers';
 
 function makeDatabase(queryImpl?: (text: string, values: unknown[]) => Promise<QueryResult>) {
-  const query = vi.fn(queryImpl ?? (async () => ({ rows: [], rowCount: 0 })));
+  const query = vi.fn(async (text: string, values: unknown[] = []) => (queryImpl ? queryImpl(text, values) : { rows: [], rowCount: 0 }));
   return { database: { query } satisfies Database, query };
 }
 
@@ -42,7 +42,7 @@ describe('checkout handler', () => {
     expect(sql).toContain('WITH created_order AS');
     expect(sql).toContain('INSERT INTO order_items');
     expect(values).toEqual(expect.arrayContaining([169800, 4900, 8490, 183190]));
-    const savedItems = JSON.parse(String(values[15])) as Array<Record<string, unknown>>;
+    const savedItems = JSON.parse(String(values?.[15])) as Array<Record<string, unknown>>;
     expect(savedItems).toEqual([{
       product_id: 4,
       product_name: 'Glow Ritual Vitamin C Face Serum',
@@ -91,7 +91,7 @@ describe('checkout handler', () => {
 
     expect(result).toMatchObject({ status: 201, body: { total: 1099 } });
     expect(query).toHaveBeenCalledTimes(2);
-    const savedItems = JSON.parse(String(query.mock.calls[1][1][15])) as Array<Record<string, unknown>>;
+    const savedItems = JSON.parse(String(query.mock.calls[1][1]?.[15])) as Array<Record<string, unknown>>;
     expect(savedItems).toEqual([{
       product_id: 9,
       product_name: 'New catalogue serum',
@@ -154,8 +154,8 @@ describe('products API handler', () => {
     const [sql, values] = query.mock.calls[0];
     expect(sql).toContain('INSERT INTO product_images');
     expect(sql).toContain("decode(image.data, 'base64')");
-    expect(values[7]).toBe('serum.png');
-    expect(JSON.parse(String(values[9]))).toMatchObject([{ filename: 'serum.png', position: 0 }]);
+    expect(values?.[7]).toBe('serum.png');
+    expect(JSON.parse(String(values?.[9]))).toMatchObject([{ filename: 'serum.png', position: 0 }]);
   });
 
   it('accepts up to 10 images at any dimensions within the maximum', async () => {
@@ -188,7 +188,7 @@ describe('products API handler', () => {
 
     const result = await createHandlers(database).products('POST', { ...productPayload, images });
     expect(result).toMatchObject({ status: 201, body: { product: { images: expect.arrayContaining(['/api/products/10/images/9']) } } });
-    const savedImages = JSON.parse(String(query.mock.calls[0][1][9])) as Array<{ position: number; width: number; height: number }>;
+    const savedImages = JSON.parse(String(query.mock.calls[0][1]?.[9])) as Array<{ position: number; width: number; height: number }>;
     expect(savedImages).toHaveLength(10);
     expect(savedImages[0]).toMatchObject({ position: 0, width: 800, height: 600 });
     expect(savedImages[9]).toMatchObject({ position: 9 });
@@ -219,6 +219,21 @@ describe('products API handler', () => {
     });
     expect(await handler.productImage(9, 0)).toEqual({ status: 200, mimeType: 'image/png', data: image });
     expect(await handler.productImage(9, 10)).toEqual({ status: 404 });
-    expect(query).toHaveBeenCalledTimes(2);
+    expect(query).toHaveBeenCalledTimes(3);
+  });
+
+  it('reports an unstocked catalogue only while the products table is empty', async () => {
+    async function catalogueManaged(rows: Array<Record<string, unknown>>) {
+      const { database } = makeDatabase(async (sql) => ({
+        rows: sql.includes('count(*) > 0') ? rows : [],
+        rowCount: rows.length,
+      }));
+      const result = await createHandlers(database).products('GET', undefined);
+      return result.body.catalogueManaged;
+    }
+
+    expect(await catalogueManaged([{ managed: false }])).toBe(false);
+    expect(await catalogueManaged([{ managed: true }])).toBe(true);
+    expect(await catalogueManaged([])).toBe(false);
   });
 });

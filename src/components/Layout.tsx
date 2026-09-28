@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, NavLink, useNavigate } from 'react-router-dom';
 import { CartDrawer } from './Cart';
 import { useCart } from './CartContext';
 import { subscribeToNewsletter } from '../lib/api';
+import { useStorefrontPages } from './StorefrontPagesContext';
 import { accountChangedEvent, getDemoAccount, signOutDemo, type DemoAccount } from '../auth/demo-auth';
 
 const navigation = [
@@ -20,8 +21,19 @@ export function Header() {
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const [account, setAccount] = useState<DemoAccount | null>(getDemoAccount);
   const { count, open } = useCart();
+  const { isVisible, pages } = useStorefrontPages();
   const navigate = useNavigate();
   const profileMenuRef = useRef<HTMLDivElement>(null);
+
+  const visibleNavigation = useMemo(
+    () => navigation.filter((item) => isVisible(item.to)),
+    [isVisible],
+  );
+
+  const navLabel = useMemo(() => {
+    const byPath = new Map(pages.map((page) => [page.path, page.label]));
+    return (path: string) => byPath.get(path) ?? null;
+  }, [pages]);
 
   function logout() {
     signOutDemo();
@@ -82,7 +94,7 @@ export function Header() {
           <span><strong>Glow <i>&</i> Grace</strong><small>BEAUTY · CAREERS · COMMUNITY</small></span>
         </Link>
         <nav className={`main-nav${menuOpen ? ' is-open' : ''}`} aria-label="Main navigation">
-          {navigation.map((item) => (
+          {visibleNavigation.map((item) => (
             <NavLink
               key={item.to}
               to={item.to}
@@ -90,7 +102,7 @@ export function Header() {
               onClick={() => setMenuOpen(false)}
               className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'}
             >
-              {item.label}
+              {navLabel(item.to) ?? item.label}
             </NavLink>
           ))}
           {!account && <Link className="nav-account-link nav-link" to="/login" onClick={() => setMenuOpen(false)}>Sign in</Link>}
@@ -136,6 +148,7 @@ export function Header() {
 
 export function Footer() {
   const [status, setStatus] = useState('');
+  const { isVisible } = useStorefrontPages();
 
   async function handleSubscribe(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -174,8 +187,8 @@ export function Footer() {
           </Link>
           <p>A considered beauty house rooted in Lucknow, where feeling good and doing good belong together.</p>
         </div>
-        <div className="footer-column"><h3>Explore</h3><Link to="/shop">The collection</Link><Link to="/partners">Partner parlours</Link><Link to="/careers">Beauty careers</Link></div>
-        <div className="footer-column"><h3>Our house</h3><Link to="/about">Our story</Link><Link to="/contact">Get in touch</Link><a href="mailto:hello@glowandgrace.in">hello@glowandgrace.in</a></div>
+        <div className="footer-column"><h3>Explore</h3>{isVisible('/shop') && <Link to="/shop">The collection</Link>}{isVisible('/partners') && <Link to="/partners">Partner parlours</Link>}{isVisible('/careers') && <Link to="/careers">Beauty careers</Link>}</div>
+        <div className="footer-column"><h3>Our house</h3>{isVisible('/about') && <Link to="/about">Our story</Link>}{isVisible('/contact') && <Link to="/contact">Get in touch</Link>}<a href="mailto:hello@glowandgrace.in">hello@glowandgrace.in</a></div>
       </div>
       <div className="footer-bottom"><span>© {new Date().getFullYear()} Glow &amp; Grace, Lucknow</span><span>Made with care, for the glow in all of us.</span></div>
     </footer>

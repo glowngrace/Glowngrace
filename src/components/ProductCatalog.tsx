@@ -10,12 +10,18 @@ export function ProductCatalogProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let mounted = true;
-    getCatalogueProducts().then((savedProducts) => {
+    getCatalogueProducts().then(({ products: savedProducts, managed }) => {
       if (mounted) {
         setProducts((current) => {
-          const byId = new Map(current.map((product) => [product.id, product]));
-          savedProducts.forEach((product) => byId.set(product.id, product));
-          return [...byId.values()];
+          // An unstocked database means the shop has never been set up, so keep the bundled
+          // samples. Once products exist, the database is the only source of truth and an empty
+          // list legitimately means every product is unpublished or deleted.
+          if (!managed) return current;
+          const byId = new Map(savedProducts.map((product) => [product.id, product]));
+          return current
+            .filter((product) => byId.has(product.id))
+            .map((product) => byId.get(product.id) as Product)
+            .concat(savedProducts.filter((product) => !current.some((entry) => entry.id === product.id)));
         });
         setError('');
         setLoading(false);

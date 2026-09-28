@@ -31,6 +31,24 @@ export const requiredTables = [
   'order_items',
 ] as const;
 
+/**
+ * Tables the admin console needs. They are reported separately from the
+ * storefront core so a database that predates the console still serves the shop
+ * while the console reports exactly what it is missing.
+ */
+export const adminTables = [
+  'admin_users',
+  'admin_sessions',
+  'store_settings',
+  'site_pages',
+  'job_vacancies',
+  'candidates',
+  'partner_salons',
+  'customers',
+  'reviews',
+  'demo_datasets',
+] as const;
+
 const localHosts = new Set(['localhost', '127.0.0.1', '::1', '0.0.0.0', 'host.docker.internal']);
 
 export class DatabaseConfigError extends Error {
@@ -71,6 +89,7 @@ export type HealthReport = {
     ssl?: SslSetting;
     reachable: boolean;
     missingTables: string[];
+    missingAdminTables?: string[];
     productCount?: number | null;
     latencyMs?: number;
     reason?: string;

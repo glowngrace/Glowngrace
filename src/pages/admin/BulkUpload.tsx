@@ -1,0 +1,90 @@
+import { useRef, useState } from 'react';
+import { bulkTemplateByDataset, type BulkDatasetKey, type BulkTemplate } from '../../lib/bulk-templates';
+import { buildWorkbook, downloadBlob, readSpreadsheet, sheetToRecords } from '../../lib/xlsx';
+import { Icon } from './AdminUi';
+import { useAdminStore } from './AdminStore';
+
+function templateWorkbook(template: BulkTemplate) {
+  return buildWorkbook([
+    {
+      name: template.plural,
+      rows: [
+        template.columns,
+        template.example,
+        template.columns.map(() => ''),
+      ],
+    },
+    {
+      name: 'How to fill this in',
+      rows: [
+        ['Column', 'Meaning'],
+        ...template.notes.map((note) => ['Note', note]),
+      ],
+    },
+  ]);
+}
+
+export function BulkUpload({ dataset, plural }: { dataset: BulkDatasetKey; plural: string }) {
+  const { importRows, setError } = useAdminStore();
+  const [summary, setSummary] = useState('');
+  const [busy, setBusy] = useState(false);
+  const input = useRef<HTMLInputElement>(null);
+  const template = bulkTemplateByDataset.get(dataset) ?? (() => { throw new Error(`No bulk template for ${dataset}.`); })();
+
+  async function downloadTemplate() {
+    try {
+      downloadBlob(await templateWorkbook(template), template.filename);
+      setSummary(`${template.plural} template downloaded. Fill in the example row and upload it back.`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The template could not be created.');
+    }
+  }
+
+  async function upload(file: File) {
+    setBusy(true);
+    setSummary('');
+    try {
+      const [sheet] = await readSpreadsheet(file);
+      if (!sheet) throw new Error('That workbook has no sheets to import.');
+      const { headers, records } = sheetToRecords(sheet.rows);
+      const missing = template.columns.filter((column) => !headers.includes(column));
+      const unknown = headers.filter((column) => !template.columns.includes(column));
+      if (headers.length === 0) throw new Error('The first row of the sheet must contain the column names.');
+      if (missing.length > 0) throw new Error(`Missing columns: ${missing.join(', ')}. Download the template and copy your data into it.`);
+      if (records.length === 0) throw new Error('No data rows were found below the column names.');
+      if (unknown.length > 0) setError(`Ignored unknown columns: ${unknown.join(', ')}.`);
+      await importRows(dataset, records.map((record) => {
+        const row: Record<string, unknown> = {};
+        for (const column of template.columns) row[column] = record[column] ?? '';
+        return row;
+      }));
+      setSummary(`${records.length} row${records.length === 1 ? '' : 's'} from ${sheet.name} sent for import.`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'That spreadsheet could not be read.');
+    } finally {
+      setBusy(false);
+      if (input.current) input.current.value = '';
+    }
+  }
+
+  return (
+    <div className="admin-bulk">
+      <input
+        ref={input}
+        className="sr-only"
+        id={`bulk-${dataset}`}
+        type="file"
+        accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv"
+        aria-describedby={`bulk-${dataset}-note`}
+        onChange={(event) => { const file = event.currentTarget.files?.[0]; if (file) void upload(file); }}
+      />
+      <button className="admin-btn admin-btn-light" type="button" onClick={() => void downloadTemplate()} disabled={busy}>
+        <Icon name="download" />Template
+      </button>
+      <button className="admin-btn admin-btn-light" type="button" onClick={() => input.current?.click()} disabled={busy}>
+        <Icon name="upload" />{busy ? 'Importing…' : `Upload ${plural.toLowerCase()}`}
+      </button>
+      {summary && <span className="admin-bulk-note" id={`bulk-${dataset}-note`} role="status">{summary}</span>}
+    </div>
+  );
+}

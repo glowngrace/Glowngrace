@@ -10,8 +10,14 @@ type ProductCardProps = {
 
 const money = (amount: number) => `₹${amount.toLocaleString('en-IN')}`;
 
+function starRow(rating: number) {
+  return `${'★'.repeat(Math.round(rating))}${'☆'.repeat(Math.max(0, 5 - Math.round(rating)))}`;
+}
+
 export function ProductCard({ product, isFavorite, toggleFavorite }: ProductCardProps) {
   const { add } = useCart();
+  const discount = product.mrp > product.price ? Math.round((1 - product.price / product.mrp) * 100) : 0;
+  const tagLabel = product.badge === 'Sale' && discount > 0 ? `−${discount}%` : product.badge;
 
   return (
     <article className="product-card">
@@ -19,7 +25,7 @@ export function ProductCard({ product, isFavorite, toggleFavorite }: ProductCard
         <Link className="product-image" to={`/product/${product.id}`} aria-label={`View ${product.name}`}>
           <img src={productImageUrl(product.image)} alt={product.name} loading="lazy" />
         </Link>
-        {product.badge && <span className="product-badge">{product.badge}</span>}
+        {tagLabel && <span className={`product-badge${product.badge === 'Sale' ? ' is-sale' : ''}`}>{tagLabel}</span>}
         <button
           className={`favorite-button${isFavorite ? ' is-favorite' : ''}`}
           type="button"
@@ -27,16 +33,27 @@ export function ProductCard({ product, isFavorite, toggleFavorite }: ProductCard
           aria-pressed={isFavorite}
           onClick={() => toggleFavorite(product.id)}
         >
-          {isFavorite ? '♥' : '♡'}
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M12 20s-7-4.6-7-9.4A3.9 3.9 0 0 1 12 8a3.9 3.9 0 0 1 7 2.6C19 15.4 12 20 12 20z" />
+          </svg>
         </button>
-        <button className="quick-add" type="button" onClick={() => add(product)}>Add to bag</button>
+        <Link className="quick-add" to={`/product/${product.id}`}>Quick view</Link>
       </div>
       <div className="product-meta">
-        <span>{product.category}</span>
-        <span className="rating">★ {product.rating.toFixed(1)} <span>({product.reviews})</span></span>
+        <span className="product-category">{product.category}</span>
+        <h3 className="product-name"><Link to={`/product/${product.id}`}>{product.name}</Link></h3>
+        <p className="product-rating">
+          <span className="stars" aria-hidden="true">{starRow(product.rating)}</span>
+          <span>({product.reviews})</span>
+        </p>
+        <p className="product-price">
+          <strong>{money(product.price)}</strong>
+          {product.mrp > product.price && <del>{money(product.mrp)}</del>}
+        </p>
+        <div className="product-add">
+          <button className="button button-line button-small" type="button" onClick={() => add(product)}>Add to bag</button>
+        </div>
       </div>
-      <Link to={`/product/${product.id}`} className="product-name">{product.name}</Link>
-      <div className="product-price"><strong>{money(product.price)}</strong><del>{money(product.mrp)}</del></div>
     </article>
   );
 }

@@ -3,6 +3,7 @@ export type AdminSection =
   | 'orders'
   | 'products'
   | 'add-product'
+  | 'edit-product'
   | 'jobs'
   | 'add-job'
   | 'candidates'
@@ -33,6 +34,7 @@ export type IconName =
   | 'menu'
   | 'logout'
   | 'upload'
+  | 'download'
   | 'arrow'
   | 'home'
   | 'warn'
@@ -58,6 +60,7 @@ export const iconPaths: Record<IconName, string> = {  dash: 'M3.5 12.2 12 4.2l8.
   menu: 'M4 7.4h16 M4 12h16 M4 16.6h16',
   logout: 'M14.6 8.2V5.4H4.4v13.2h10.2v-2.8 M9.6 12h10.2 M16.6 8.8 19.8 12l-3.2 3.2',
   upload: 'M12 16.4V4.6 M7.6 8.6 12 4.2l4.4 4.4 M4.4 15.4v4.2h15.2v-4.2',
+  download: 'M12 4.6v11.8 M7.6 12 12 16.4 16.4 12 M4.4 19.4h15.2',
   arrow: 'M4.6 12h14.2 M13.4 6.8 18.6 12l-5.2 5.2',
   home: 'M3.6 10.4 12 3.6l8.4 6.8v9.6H3.6z M9.4 20v-6.6h5.2V20',
   warn: 'M12 4.4 21 19.6H3z M12 10.2v4.2 M12 16.8h.01',

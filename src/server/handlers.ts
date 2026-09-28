@@ -5,11 +5,11 @@ import { checkoutTaxRate, deliveryOptions } from '../data/checkout.js';
 
 export type QueryResult = { rows: Array<Record<string, unknown>>; rowCount: number | null };
 export type Database = {
-  query: (text: string, values: unknown[]) => Promise<QueryResult>;
+  query: (text: string, values?: unknown[]) => Promise<QueryResult>;
 };
 export type ApiResult = {
   status: number;
-  body: { message?: string; error?: string; orderNumber?: string; total?: number; products?: Product[]; product?: Product };
+  body: { message?: string; error?: string; orderNumber?: string; total?: number; products?: Product[]; product?: Product; catalogueManaged?: boolean };
 };
 
 const checkoutSchema = z.object({
@@ -59,7 +59,7 @@ const productSchema = z.object({
   description: z.string().trim().min(1).max(3000),
 }).refine((product) => product.mrp >= product.price, { path: ['mrp'] });
 
-function mapProduct(row: Record<string, unknown>): Product {
+export function mapProduct(row: Record<string, unknown>): Product {
   const images = Array.isArray(row.images) ? row.images.map(String) : [];
   return {
     id: Number(row.id),
@@ -76,8 +76,50 @@ function mapProduct(row: Record<string, unknown>): Product {
     image: images[0] ?? `/images/${String(row.image)}`,
     images,
     description: String(row.description),
+    published: row.published === undefined ? true : Boolean(row.published),
+    featured: Boolean(row.featured),
   };
 }
+
+export type ParsedProductImage = {
+  filename: string;
+  mimeType: 'image/jpeg' | 'image/png' | 'image/webp';
+  data: string;
+  width: number;
+  height: number;
+  position: number;
+};
+
+export const productImageRules = {
+  maxBytes: 307200,
+  maxWidth: 1200,
+  maxHeight: 1200,
+  maxCount: 10,
+} as const;
+
+export function parseProductImages(
+  images: Array<{ filename: string; mimeType: string; data: string; width: number; height: number }>,
+): { images: ParsedProductImage[]; invalid: boolean } {
+  const parsed = images.map((image, position) => {
+    const data = Buffer.from(image.data, 'base64');
+    const dimensions = imageDimensions(data, image.mimeType);
+    if (data.length === 0 || data.length > productImageRules.maxBytes || !dimensions ||
+      dimensions.width < 1 || dimensions.width > productImageRules.maxWidth ||
+      dimensions.height < 1 || dimensions.height > productImageRules.maxHeight) {
+      return null;
+    }
+    return {
+      filename: image.filename,
+      mimeType: image.mimeType as ParsedProductImage['mimeType'],
+      data: image.data,
+      width: dimensions.width,
+      height: dimensions.height,
+      position,
+    };
+  });
+  return { images: parsed.filter((image): image is ParsedProductImage => image !== null), invalid: parsed.some((image) => image === null) };
+}
+
 
 function imageDimensions(data: Buffer, mimeType: string): { width: number; height: number } | null {
   if (mimeType === 'image/png' && data.length >= 24 &&
@@ -130,16 +172,23 @@ export function createHandlers(database: Database) {
           const result = await database.query(
             `SELECT product.id, product.name, product.category, product.brand, product.sku, product.price,
                     product.mrp, product.stock, product.rating, product.reviews, product.badge,
-                    product.image, product.description,
+                    product.image, product.description, product.published, product.featured,
                     COALESCE(
                       (SELECT json_agg('/api/products/' || product.id || '/images/' || image.position ORDER BY image.position)
                        FROM product_images AS image WHERE image.product_id = product.id),
                       '[]'::json
                     ) AS images
-             FROM products AS product ORDER BY product.id`,
+             FROM products AS product WHERE product.published ORDER BY product.id`,
             [],
           );
-          return { status: 200, body: { products: result.rows.map(mapProduct) } };
+          // The storefront ships with a sample catalogue so a database that has never been
+          // stocked still renders. Once any product row exists the database owns the shop, so
+          // a published list that comes back empty means everything is hidden or removed.
+          const managed = await database.query('SELECT count(*) > 0 AS managed FROM products', []);
+          return {
+            status: 200,
+            body: { products: result.rows.map(mapProduct), catalogueManaged: managed.rows[0]?.managed === true },
+          };
         } catch (error) {
           console.error('Unable to load catalogue products', error);
           return { status: 500, body: { error: 'server_error', message: 'The catalogue could not be loaded. Please try again shortly.' } };
@@ -152,27 +201,18 @@ export function createHandlers(database: Database) {
       }
 
       const product = parsed.data;
-      const uploadedImages = product.images.map((image, position) => {
-        const data = Buffer.from(image.data, 'base64');
-        const dimensions = imageDimensions(data, image.mimeType);
-        if (data.length === 0 || data.length > 307200 || !dimensions ||
-          dimensions.width < 1 || dimensions.width > 1200 || dimensions.height < 1 || dimensions.height > 1200) {
-          return null;
-        }
-        return { ...image, position };
-      });
-      if (uploadedImages.some((image) => image === null)) {
+      const { images: validImages, invalid } = parseProductImages(product.images);
+      if (invalid) {
         return { status: 400, body: { error: 'invalid_product_image', message: 'Each image must be a valid JPEG, PNG or WebP file no larger than 1200 × 1200 px or 300 KB.' } };
       }
-      const validImages = uploadedImages.filter((image): image is NonNullable<typeof image> => image !== null);
       const primaryImage = product.images[0];
       if (!primaryImage) return { status: 400, body: { error: 'invalid_product_image', message: 'Upload at least one product image.' } };
       try {
         const result = await database.query(
           `WITH created_product AS (
-             INSERT INTO products (name, category, brand, sku, price, mrp, stock, image, description)
-             VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6, $7, $8, $9)
-             RETURNING id, name, category, brand, sku, price, mrp, stock, rating, reviews, badge, image, description
+             INSERT INTO products (name, category, brand, sku, price, mrp, stock, image, description, published)
+             VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6, $7, $8, $9, TRUE)
+             RETURNING id, name, category, brand, sku, price, mrp, stock, rating, reviews, badge, image, description, published, featured
            ),
            created_images AS (
              INSERT INTO product_images (product_id, position, filename, mime_type, image_data, width, height)
@@ -205,6 +245,7 @@ export function createHandlers(database: Database) {
             }))),
           ],
         );
+
         const savedProduct = result.rows[0];
         if (!savedProduct) throw new Error('The catalogue did not confirm the saved product.');
         return { status: 201, body: { product: mapProduct(savedProduct), message: 'Product added to the catalogue.' } };

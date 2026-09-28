@@ -33,7 +33,7 @@ test('product details expand long copy, zoom the gallery, and add the selected q
   await page.route('**/api/products', (route) => route.fulfill({
     status: 200,
     contentType: 'application/json',
-    body: JSON.stringify({ products: [{
+    body: JSON.stringify({ catalogueManaged: true, products: [{
       id: 901,
       name: 'Product detail reference',
       category: 'Skincare',
@@ -285,8 +285,13 @@ test('admin uploads a product image and saves a product to the catalogue', async
   await expect(page.getByRole('img', { name: 'Preview of e2e-product.png' })).toBeVisible();
   await page.getByRole('button', { name: 'Save product' }).click();
   await expect(page.getByRole('heading', { name: 'Products' })).toBeVisible();
-  await expect(page.getByText('E2E Preview Product')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'View E2E Preview Product' }).first()).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+
+  // Leave the catalogue as we found it so repeat runs stay idempotent.
+  await page.getByRole('button', { name: 'Remove E2E Preview Product' }).first().click();
+  await page.getByRole('button', { name: 'Delete permanently' }).click();
+  await expect(page.getByRole('button', { name: 'View E2E Preview Product' })).toHaveCount(0);
 });
 
 test('tablet header keeps the sign-in link visible without horizontal overflow', async ({ page, isMobile }) => {
