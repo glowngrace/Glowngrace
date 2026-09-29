@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { BrowserRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { CartProvider } from './components/Cart';
+import { LoadingProvider } from './components/LoadingProvider';
 import { ProductCatalogProvider } from './components/ProductCatalog';
 import { PageGate, StorefrontPagesProvider } from './components/StorefrontPages';
 import { Footer, Header } from './components/Layout';
@@ -81,9 +82,11 @@ function AppRoutes() {
 export default function App() {
   return (
     <BrowserRouter>
-      <StorefrontPagesProvider>
-        <ProductCatalogProvider><CartProvider><AppRoutes /></CartProvider></ProductCatalogProvider>
-      </StorefrontPagesProvider>
+      <LoadingProvider>
+        <StorefrontPagesProvider>
+          <ProductCatalogProvider><CartProvider><AppRoutes /></CartProvider></ProductCatalogProvider>
+        </StorefrontPagesProvider>
+      </LoadingProvider>
     </BrowserRouter>
   );
 }

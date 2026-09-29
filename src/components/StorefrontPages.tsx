@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { getStorefrontPages, type StorefrontPage } from '../lib/api';
+import { PageLoader } from './Loader';
 import { StorefrontPagesContext, useStorefrontPages } from './StorefrontPagesContext';
 
 function normalisePath(path: string) {
@@ -14,12 +15,19 @@ export function StorefrontPagesProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let mounted = true;
-    getStorefrontPages().then((loaded) => {
-      if (mounted) {
-        setPages(loaded);
-        setLoading(false);
-      }
-    });
+    // The client API already swallows a failed request and returns an empty
+    // list, but a rejection here would leave `loading` stuck on true and pin a
+    // loader over the page forever. Both outcomes have to clear the flag.
+    getStorefrontPages()
+      .then((loaded) => {
+        if (mounted) setPages(loaded);
+      })
+      .catch(() => {
+        if (mounted) setPages([]);
+      })
+      .finally(() => {
+        if (mounted) setLoading(false);
+      });
     return () => {
       mounted = false;
     };
@@ -42,7 +50,9 @@ export function StorefrontPagesProvider({ children }: { children: ReactNode }) {
 
 export function PageGate({ path, children }: { path: string; children: ReactNode }) {
   const { isVisible, loading } = useStorefrontPages();
-  if (loading) return null;
+  // Used to render nothing at all here, which left a blank white screen for as
+  // long as the visibility check took. A gated page now shows a real loader.
+  if (loading) return <PageLoader label="Checking this page" />;
   if (!isVisible(path)) {
     return (
       <div className="section">

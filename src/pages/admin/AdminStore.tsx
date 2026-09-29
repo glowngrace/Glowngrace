@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { Product } from '../../data/catalog';
 import { adminApi, AdminApiError, getAdminToken, type AdminDataset, type AdminOrder, type AdminPage, type AdminSummary, type AdminUser, type StoreSettings } from '../../lib/admin-api';
 import type { BulkDatasetKey } from '../../lib/bulk-templates';
@@ -105,6 +105,7 @@ const emptyData: AdminData = {
 
 type AdminStore = AdminData & {
   loading: boolean;
+  reloading: boolean;
   error: string;
   notice: string;
   setNotice: (message: string) => void;
@@ -140,6 +141,7 @@ const collectionKeyOf: Record<CollectionKey, keyof AdminData> = {
 export function AdminStoreProvider({ children }: { children: ReactNode }) {
   const [data, setData] = useState<AdminData>(emptyData);
   const [loading, setLoading] = useState(true);
+  const [reloading, setReloading] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
 
@@ -152,8 +154,17 @@ export function AdminStoreProvider({ children }: { children: ReactNode }) {
     setNotice(message);
   }, []);
 
+  // A ref, not `data`: reading it must not change the identity of `reload`, or
+  // the effect below would re-run on every response and loop forever.
+  const hasLoaded = useRef(false);
+
   const reload = useCallback(async () => {
-    setLoading(true);
+    // The first load blanks the console, so it owns the blocking loader. Every
+    // later refresh keeps the current rows on screen and only raises the quiet
+    // inline indicator, so a bulk import never blanks the table under the
+    // operator.
+    if (hasLoaded.current) setReloading(true);
+    else setLoading(true);
     try {
       if (!getAdminToken()) {
         setData(emptyData);
@@ -191,11 +202,13 @@ export function AdminStoreProvider({ children }: { children: ReactNode }) {
         settings,
         summary,
       });
+      hasLoaded.current = true;
       setError('');
     } catch (cause) {
       setError(cause instanceof AdminApiError ? cause.message : 'The console data could not be loaded. Please try again.');
     } finally {
       setLoading(false);
+      setReloading(false);
     }
   }, []);
 
@@ -204,6 +217,7 @@ export function AdminStoreProvider({ children }: { children: ReactNode }) {
   const store = useMemo<AdminStore>(() => ({
     ...data,
     loading,
+    reloading,
     error,
     notice,
     setNotice,
@@ -396,7 +410,7 @@ export function AdminStoreProvider({ children }: { children: ReactNode }) {
         setData(emptyData);
       }
     },
-  }), [announce, data, error, fail, loading, notice, reload]);
+  }), [announce, data, error, fail, loading, notice, reload, reloading]);
 
   return <AdminStoreContext.Provider value={store}>{children}</AdminStoreContext.Provider>;
 }

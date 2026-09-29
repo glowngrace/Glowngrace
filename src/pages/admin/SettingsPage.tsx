@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { useAdminStore } from './AdminStore';
 import { Avatar, IconButton, PageHead, Panel, PanelHead, Toggle } from './AdminUi';
+import { BulkUpload } from './BulkUpload';
 
 const notificationRows: Array<{ key: string; title: string; copy: string }> = [
   { key: 'orders', title: 'New order placed', copy: 'Email the store team for every new order.' },
@@ -95,7 +96,7 @@ export function SettingsPage({ onNotice }: { onNotice: (message: string) => void
           </Panel>
 
           <Panel>
-            <PanelHead title="Team" sub="People helping run the beauty house" />
+            <PanelHead title="Team" sub="People helping run the beauty house" action={<BulkUpload dataset="users" plural="team members" />} />
             <ul className="admin-team-list">
               {users.map((member) => (
                 <li key={member.id}>
@@ -211,7 +212,7 @@ export function SettingsPage({ onNotice }: { onNotice: (message: string) => void
           </Panel>
 
           <Panel>
-            <PanelHead title="Pages" sub="Hide a storefront page without deleting it" />
+            <PanelHead title="Pages" sub="Show or hide a storefront page without deleting it" />
             <ul className="admin-switch-list">
               {pages.map((page) => (
                 <li key={page.slug}>

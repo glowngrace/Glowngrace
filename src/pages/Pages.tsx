@@ -4,6 +4,7 @@ import { categories, jobs, partners, productImageUrl } from '../data/catalog';
 import { submitContactRequest } from '../lib/api';
 import { useCart } from '../components/CartContext';
 import { useProductCatalog } from '../components/ProductCatalogContext';
+import { Loader, PageLoader } from '../components/Loader';
 import { ProductGrid } from '../components/ProductCard';
 
 type PageProps = { favorites: number[]; toggleFavorite: (productId: number) => void };
@@ -154,7 +155,7 @@ export function HomePage({ favorites, toggleFavorite }: PageProps) {
 }
 
 export function ShopPage({ favorites, toggleFavorite }: PageProps) {
-  const { products } = useProductCatalog();
+  const { products, loading } = useProductCatalog();
   const [searchParams, setSearchParams] = useSearchParams();
   const selected = searchParams.get('category') ?? 'All';
   const filters = ['All', ...categories.map((category) => category.name)];
@@ -171,7 +172,9 @@ export function ShopPage({ favorites, toggleFavorite }: PageProps) {
       <section className="section">
         <div className="page-container">
           <div className="shop-toolbar"><div className="filter-list" aria-label="Filter by category">{filters.map((category) => <button type="button" key={category} aria-pressed={selected === category} className={selected === category ? 'filter-chip selected' : 'filter-chip'} onClick={() => selectCategory(category)}>{category}</button>)}</div><span>{shownProducts.length} considered essentials</span></div>
-          <ProductGrid items={shownProducts} favorites={favorites} toggleFavorite={toggleFavorite} />
+          {loading
+            ? <Loader label="Gathering the collection…" />
+            : <ProductGrid items={shownProducts} favorites={favorites} toggleFavorite={toggleFavorite} />}
         </div>
       </section>
     </>
@@ -218,7 +221,7 @@ export function ProductPage({ favorites, toggleFavorite }: PageProps) {
     return () => window.removeEventListener('keydown', closeOnEscape);
   }, [isImageExpanded]);
   if (!product) {
-    if (loading) return <section className="section"><div className="page-container empty-state"><p role="status">Loading this beauty-house favourite…</p></div></section>;
+    if (loading) return <section className="section"><div className="page-container"><PageLoader label="Loading this beauty-house favourite…" /></div></section>;
     return <section className="section"><div className="page-container empty-state"><span className="eyebrow">A little detour</span><h1>That beauty has gone missing.</h1><Link className="button button-dark" to="/shop">Back to the collection</Link></div></section>;
   }
   const related = products.filter((item) => item.category === product.category && item.id !== product.id).slice(0, 4);
