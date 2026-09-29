@@ -52,7 +52,7 @@ describe('Vercel deployment routing', () => {
   });
 
   it('never rewrites API requests to the single-page app', () => {
-    for (const route of ['/api/products', '/api/contact', '/api/newsletter', '/api/checkout', '/api/health', '/api/products/9/images/0']) {
+    for (const route of ['/api/products', '/api/contact', '/api/newsletter', '/api/checkout', '/api/health', '/api/site/pages', '/api/products/9/images/0']) {
       expect(router.resolveRequest(route).kind, route).toBe('function');
     }
     expect(router.resolveRequest('/api/products').target).toContain(join('api', 'products.ts'));
@@ -61,14 +61,39 @@ describe('Vercel deployment routing', () => {
     expect(router.resolveRequest('/api/unknown-endpoint')).toEqual({ kind: 'not-found', target: '/api/unknown-endpoint' });
   });
 
+  /**
+   * The console is the only API that nests a path segment, so it is the only one
+   * that cannot rely on a `[...path]` file. Vercel matches that catch-all for a
+   * single segment and answers `x-vercel-error: NOT_FOUND` for anything deeper,
+   * which took every save, publish and page toggle offline in production while
+   * `app.all('/api/admin/*')` kept the same URLs working in local development.
+   * The rewrite below is what carries the nested paths to the admin function.
+   */
+  it('routes every console path, nested ones included, to the admin function', () => {
+    for (const route of [
+      '/api/admin',
+      '/api/admin/me',
+      '/api/admin/products',
+      '/api/admin/products/11',
+      '/api/admin/pages/careers',
+      '/api/admin/orders/GG-2046',
+      '/api/admin/team/00000000-0000-4000-8000-000000000001',
+      '/api/admin/products/11/images/0',
+    ]) {
+      const resolution = router.resolveRequest(route);
+      expect(resolution.kind, route).toBe('function');
+      expect(resolution.target, route).toContain(join('api', 'admin', 'index.ts'));
+    }
+  });
+
   it('serves built assets and images as files', () => {
     expect(router.resolveRequest('/images/hero1.jpg').kind).toBe('static');
     expect(router.resolveRequest('/images/hero1.jpg').target).toBe(join(router.staticRoot, 'images', 'hero1.jpg'));
     expect(router.resolveRequest('/images/favicon.png').target).toBe(join(router.staticRoot, 'images', 'favicon.png'));
   });
 
-  it('rewrites every route to the Vite entry document that the build copies into the output directory', () => {
-    expect(config.rewrites?.map((rewrite) => rewrite.destination)).toEqual(['/index.html']);
+  it('rewrites every storefront route to the Vite entry document that the build copies into the output directory', () => {
+    expect(config.rewrites?.at(-1)).toEqual({ source: '/:path((?!api/).*)', destination: '/index.html' });
     expect(existsSync(join(projectRoot, 'index.html'))).toBe(true);
   });
 

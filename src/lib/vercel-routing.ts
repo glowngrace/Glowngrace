@@ -162,8 +162,10 @@ export function createDeploymentRouter(options: { root?: string; staticRoot?: st
     const prefix = `/${directories.join('/')}`;
     const entries = readEntries(join(root, ...directories));
     const file = entries.includes(`${name}.ts`) ? `${name}.ts` : dynamicEntry(entries);
-    if (!file) return null;
-    return containedFile(root, `${prefix}/${file.endsWith('.ts') ? file : `${file}.ts`}`);
+    if (file) return containedFile(root, `${prefix}/${file.endsWith('.ts') ? file : `${file}.ts`}`);
+    // A directory holding an index function is the route the platform serves for
+    // the directory itself, which is how /api/admin reaches api/admin/index.ts.
+    return containedFile(root, `${prefix}/${name}/index.ts`);
   }
 
   function resolveRequest(rawPathname: string): RouteResolution {
@@ -175,7 +177,14 @@ export function createDeploymentRouter(options: { root?: string; staticRoot?: st
     if (functionFile) return { kind: 'function', target: functionFile };
     for (const rewrite of config.rewrites ?? []) {
       const values = matchRewrite(rewrite, pathname);
-      if (values) return { kind: 'rewrite', target: applyDestination(rewrite.destination, values) };
+      if (!values) continue;
+      const target = applyDestination(rewrite.destination, values);
+      // A rewrite can forward to a serverless function rather than to a file in
+      // the output directory. The platform runs that function, so the preview
+      // has to resolve it the same way instead of reporting a missing asset.
+      const forwardedFunction = functionFilePath(target);
+      if (forwardedFunction) return { kind: 'function', target: forwardedFunction };
+      return { kind: 'rewrite', target };
     }
     return { kind: 'not-found', target: pathname };
   }
