@@ -67,7 +67,10 @@ test('API requests still reach the API layer and are never rewritten to the sing
   expect(health.headers()['cache-control']).toContain('no-store');
   expect(await health.json()).toMatchObject({ status: 'ok', database: { configured: true, reachable: true } });
 
-  for (const path of ['/api/contact', '/api/newsletter', '/api/checkout', '/api/products/9/images/0', '/api/not-a-function']) {
+  // /api/admin/products/11 is the path the old `[...path]` function could not
+  // match. It belongs here so a nested console route can never fall through to
+  // the single-page-app rewrite again.
+  for (const path of ['/api/contact', '/api/newsletter', '/api/checkout', '/api/products/9/images/0', '/api/admin/me', '/api/admin/products/11', '/api/not-a-function']) {
     const response = await request.get(path);
     expect(response.headers()['content-type'], path).toContain('application/json');
     expect(await response.text(), path).not.toContain('<div id="root">');

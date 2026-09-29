@@ -136,6 +136,114 @@ describe('admin settings handler', () => {
   });
 });
 
+/**
+ * Every console write addresses a nested path such as /products/11 or
+ * /pages/careers, and those are exactly the paths a Vercel `[...path]` function
+ * fails to match, so the handler behind them had no coverage of its own.
+ */
+describe('admin product update route', () => {
+  const productRow: Record<string, unknown> = {
+    id: 11,
+    name: 'K.B. Compact Powder',
+    category: 'Makeup',
+    brand: 'Kajal Bhatt',
+    sku: 'GG-SKM-1001',
+    price: 649,
+    mrp: 849,
+    stock: 24,
+    rating: '4.5',
+    reviews: 18,
+    badge: 'Bestseller',
+    image: 'compact.jpg',
+    description: 'A soft compact powder for an even finish.',
+    published: true,
+    featured: false,
+    images: [],
+  };
+
+  function productDatabase() {
+    const stored = { ...productRow };
+    return makeDatabase(async (text, values) => {
+      if (text.includes('FROM admin_sessions')) return { rows: [activeAdminRow], rowCount: 1 };
+      if (text.includes('UPDATE products')) {
+        // Only the SET clause names columns; the trailing WHERE binds the id.
+        const setClause = text.slice(text.indexOf('SET '), text.indexOf(' WHERE '));
+        const columns = [...setClause.matchAll(/(\w+) = \$\d+/g)].map((match) => match[1]);
+        columns.forEach((column, index) => {
+          stored[column] = values[index + 1];
+        });
+        return { rows: [], rowCount: 1 };
+      }
+      if (text.includes('FROM products AS product')) {
+        const wanted = text.includes('WHERE product.id = $1') ? Number(values[0]) : stored.id;
+        return wanted === stored.id ? { rows: [{ ...stored }], rowCount: 1 } : { rows: [], rowCount: 0 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+  }
+
+  it('saves a product addressed by its nested reference', async () => {
+    const { database, query } = productDatabase();
+    const result = await createAdminHandlers(database).handle({
+      method: 'PATCH',
+      segments: ['products', '11'],
+      body: { price: 599 },
+      token,
+    });
+
+    expect(result).toMatchObject({ status: 200, body: { product: { id: 11, price: 599 }, message: 'Product updated.' } });
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('UPDATE products'), [11, 599]);
+  });
+
+  it('publishes and unpublishes a product through the same nested reference', async () => {
+    const { database, query } = productDatabase();
+    const result = await createAdminHandlers(database).handle({
+      method: 'PATCH',
+      segments: ['products', '11'],
+      body: { published: false },
+      token,
+    });
+
+    expect(result).toMatchObject({ status: 200, body: { product: { id: 11, published: false } } });
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('UPDATE products'), [11, false]);
+  });
+
+  it('refuses a product reference that is not a whole number', async () => {
+    const { database } = productDatabase();
+    const result = await createAdminHandlers(database).handle({
+      method: 'PATCH',
+      segments: ['products', 'not-a-number'],
+      body: { price: 599 },
+      token,
+    });
+
+    expect(result).toMatchObject({ status: 400, body: { error: 'invalid_id' } });
+  });
+
+  it('reports a product that is no longer in the catalogue', async () => {
+    const { database } = productDatabase();
+    const result = await createAdminHandlers(database).handle({
+      method: 'PATCH',
+      segments: ['products', '999'],
+      body: { price: 599 },
+      token,
+    });
+
+    expect(result).toMatchObject({ status: 404, body: { error: 'not_found' } });
+  });
+
+  it('asks for a sign-in instead of reporting the nested route as missing', async () => {
+    const { database } = productDatabase();
+    const result = await createAdminHandlers(database).handle({
+      method: 'PATCH',
+      segments: ['products', '11'],
+      body: { price: 599 },
+    });
+
+    expect(result).toMatchObject({ status: 401, body: { error: 'unauthenticated' } });
+  });
+});
+
 describe('storefront page visibility', () => {
   const pageRows = [
     { slug: 'home', label: 'Home', path: '/', visible: true, position: 0 },
