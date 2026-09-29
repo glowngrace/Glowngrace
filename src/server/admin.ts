@@ -9,6 +9,8 @@ import {
   type Row,
 } from './admin/collections.js';
 import { hashPassword, newSessionToken, passwordPolicy, sessionExpiry, verifyPassword } from './admin/passwords.js';
+import { datasetCountSql, mapDatasetRowCounts } from './admin/datasets.js';
+import { normalizeStoreSettings, validateStoreSettings, type StoreSettings } from './admin/settings.js';
 import { isMissingSchema, schemaNotMigrated } from './schema.js';
 import {
   candidateSeeds,
@@ -142,24 +144,6 @@ const orderUpdateSchema = z.object({
   state: z.string().trim().min(2).max(100).optional(),
   postalCode: z.string().trim().regex(/^[1-9][0-9]{5}$/, 'Use a 6 digit PIN code.').optional(),
   deliveryMethod: z.enum(['Standard', 'Express', 'Same day']).optional(),
-});
-
-const settingsSchema = z.object({
-  profile: z.object({
-    storeName: z.string().trim().min(1).max(120),
-    tagline: z.string().trim().max(160),
-    email: z.string().trim().email().max(254),
-    phone: z.string().trim().max(32),
-    address: z.string().trim().max(300),
-  }).partial().optional(),
-  delivery: z.object({
-    freeAbove: z.coerce.number().int().min(0).max(9999999),
-    deliveryFee: z.coerce.number().int().min(0).max(99999),
-    gst: z.coerce.number().min(0).max(100),
-    returns: z.coerce.number().int().min(0).max(365),
-  }).partial().optional(),
-  notifications: z.record(z.boolean()).optional(),
-  preview: z.object({ livePreview: z.boolean() }).partial().optional(),
 });
 
 const bulkSchema = z.object({
@@ -445,28 +429,52 @@ export function createAdminHandlers(database: Database) {
     return true;
   }
 
+  /**
+   * Reads the settings and normalises them.
+   *
+   * `store_settings` holds one JSONB row per section, so a section can be
+   * missing entirely or hold a value an older build accepted. Normalising here
+   * means `GET /api/admin/settings` and every `PUT` response are the same
+   * complete shape, which is what the console's controlled inputs need.
+   */
+  async function readSettings(): Promise<{ settings: StoreSettings; updatedAt: string | null }> {
+    const result = await database.query('SELECT key, value, updated_at FROM store_settings');
+    const stored: Record<string, unknown> = {};
+    let updatedAt: Date | null = null;
+    for (const row of result.rows) {
+      const value = row.value;
+      stored[String(row.key)] = typeof value === 'string' ? JSON.parse(value) : value;
+      const stamp = row.updated_at instanceof Date ? row.updated_at : new Date(String(row.updated_at ?? ''));
+      if (!Number.isNaN(stamp.getTime()) && (updatedAt === null || stamp > updatedAt)) updatedAt = stamp;
+    }
+    return { settings: normalizeStoreSettings(stored), updatedAt: updatedAt?.toISOString() ?? null };
+  }
+
+  /**
+   * Writes the sections the client actually sent.
+   *
+   * Sections are merged at the JSONB level, so a delivery change never
+   * rewrites the profile and a notification switch never rewrites the
+   * thresholds. That is what stops one half-typed form from breaking another:
+   * the console now sends a single section per save, and this persists exactly
+   * that section.
+   */
   async function saveSettings(input: unknown): Promise<AdminResult> {
-    const parsed = settingsSchema.safeParse(input);
-    if (!parsed.success) return fail(400, 'invalid_settings', 'Please check the store settings values.');
-    for (const [key, value] of Object.entries(parsed.data)) {
-      if (Object.keys(value ?? {}).length === 0) continue;
+    const validation = validateStoreSettings(input);
+    if (!validation.ok) {
+      return fail(400, 'invalid_settings', 'Please check the highlighted settings and try again.', { errors: validation.errors });
+    }
+    for (const section of validation.sections) {
+      const value = validation.update[section as keyof typeof validation.update];
+      if (!value) continue;
       await database.query(
         `INSERT INTO store_settings (key, value) VALUES ($1, $2::jsonb)
          ON CONFLICT (key) DO UPDATE SET value = store_settings.value || EXCLUDED.value, updated_at = NOW()`,
-        [key, JSON.stringify(value)],
+        [section, JSON.stringify(value)],
       );
     }
-    return { status: 200, body: { settings: await readSettings() } };
-  }
-
-  async function readSettings() {
-    const result = await database.query('SELECT key, value FROM store_settings');
-    const settings: Record<string, unknown> = {};
-    for (const row of result.rows) {
-      const value = row.value;
-      settings[String(row.key)] = typeof value === 'string' ? JSON.parse(value) : value;
-    }
-    return settings;
+    const saved = await readSettings();
+    return { status: 200, body: { settings: saved.settings, updatedAt: saved.updatedAt } };
   }
 
   /**
@@ -502,13 +510,20 @@ export function createAdminHandlers(database: Database) {
   }
 
   async function listDatasets() {
-    const result = await database.query('SELECT key, label, visible, seeded FROM demo_datasets ORDER BY key', []);
-    return result.rows.map((row) => ({
+    const [rows, counts] = await Promise.all([database.query('SELECT key, label, visible, seeded FROM demo_datasets ORDER BY key', []), datasetRowCounts()]);
+    const tableCounts = mapDatasetRowCounts(counts.keys, counts.rows[0]);
+    return rows.rows.map((row) => ({
       key: String(row.key),
       label: String(row.label),
       visible: Boolean(row.visible),
       seeded: Boolean(row.seeded),
+      rowCount: tableCounts[String(row.key)] ?? 0,
     }));
+  }
+
+  async function datasetRowCounts() {
+    const { sql, keys } = datasetCountSql();
+    return { keys, rows: (await database.query(sql, [])).rows };
   }
 
   async function listUsers() {
@@ -876,7 +891,10 @@ export function createAdminHandlers(database: Database) {
     }
 
     if (resource === 'settings') {
-      if (method === 'GET') return { status: 200, body: { settings: await readSettings() } };
+      if (method === 'GET') {
+        const { settings, updatedAt } = await readSettings();
+        return { status: 200, body: { settings, updatedAt } };
+      }
       if (method === 'PUT' || method === 'PATCH' || method === 'POST') {
         const saved = await saveSettings(request.body);
         if (saved.status !== 200) return saved;

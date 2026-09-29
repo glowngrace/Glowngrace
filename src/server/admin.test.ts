@@ -20,15 +20,27 @@ function makeDatabase(queryImpl?: (text: string, values: unknown[]) => Promise<Q
 
 function storeDatabase() {
   const store = new Map<string, unknown>();
+  const stamps = new Map<string, Date>();
   return makeDatabase(async (text, values) => {
     if (text.includes('FROM admin_sessions')) {
       return { rows: [activeAdminRow], rowCount: 1 };
     }
     if (text.includes('FROM store_settings')) {
-      return { rows: [...store.entries()].map(([key, value]) => ({ key, value })), rowCount: store.size };
+      return {
+        rows: [...store.entries()].map(([key, value]) => ({ key, value, updated_at: stamps.get(key) })),
+        rowCount: store.size,
+      };
     }
     if (text.includes('INSERT INTO store_settings')) {
-      store.set(String(values[0]), JSON.parse(String(values[1])));
+      const key = String(values[0]);
+      const incoming = JSON.parse(String(values[1])) as Record<string, unknown>;
+      // Mirrors the JSONB `value = store_settings.value || EXCLUDED.value`
+      // upsert: a partial section merges into what is already stored rather than
+      // replacing it. Without this the double would hide the merge behaviour the
+      // console depends on.
+      const existing = store.get(key) as Record<string, unknown> | undefined;
+      store.set(key, { ...(existing ?? {}), ...incoming });
+      stamps.set(key, new Date('2026-02-01T10:00:00.000Z'));
       return { rows: [], rowCount: 0 };
     }
     return { rows: [], rowCount: 0 };
@@ -38,19 +50,44 @@ function storeDatabase() {
 const token = 'bearer-token';
 
 describe('admin settings handler', () => {
-  it('accepts a partial save that only carries notifications', async () => {
+  it('merges a partial notification save instead of clearing the other switches', async () => {
     const { database } = storeDatabase();
     const admin = createAdminHandlers(database);
+    const first = await admin.handle({
+      method: 'PUT',
+      segments: ['settings'],
+      body: { notifications: { orders: true, lowStock: true, partners: true, reviews: true } },
+      token,
+    });
+    expect(first.status).toBe(200);
+
+    // The console now saves one section at a time, so a single flipped switch
+    // must not take the other three down with it.
     const result = await admin.handle({
       method: 'PUT',
       segments: ['settings'],
-      body: { notifications: { orders: false, reviews: true } },
+      body: { notifications: { orders: false } },
       token,
     });
 
     expect(result.status).toBe(200);
     expect(result.body.message).toBe('Settings saved.');
-    expect((result.body.settings as { notifications: Record<string, boolean> }).notifications).toEqual({ orders: false, reviews: true });
+    expect((result.body.settings as { notifications: Record<string, boolean> }).notifications)
+      .toEqual({ orders: false, lowStock: true, partners: true, reviews: true });
+  });
+
+  it('stamps the settings response with an updatedAt timestamp', async () => {
+    const { database } = storeDatabase();
+    const admin = createAdminHandlers(database);
+    const result = await admin.handle({
+      method: 'PUT',
+      segments: ['settings'],
+      body: { profile: { storeName: 'Glow & Grace' } },
+      token,
+    });
+
+    expect(result.status).toBe(200);
+    expect(Number.isNaN(new Date(String(result.body.updatedAt)).getTime())).toBe(false);
   });
 
   it('accepts a partial save that only carries the delivery block', async () => {
@@ -79,6 +116,23 @@ describe('admin settings handler', () => {
 
     expect(result.status).toBe(400);
     expect(result.body.error).toBe('invalid_settings');
+    // The console highlights the offending input, so the error has to name the
+    // field rather than only explaining that something was wrong.
+    expect((result.body.errors as Record<string, string>)['profile.email']).toMatch(/valid email/i);
+  });
+
+  it('rejects a fractional delivery fee even when it arrives as a string', async () => {
+    const { database } = storeDatabase();
+    const admin = createAdminHandlers(database);
+    const result = await admin.handle({
+      method: 'PUT',
+      segments: ['settings'],
+      body: { delivery: { deliveryFee: '49.5' } },
+      token,
+    });
+
+    expect(result.status).toBe(400);
+    expect((result.body.errors as Record<string, string>)['delivery.deliveryFee']).toMatch(/whole number/i);
   });
 });
 

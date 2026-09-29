@@ -205,13 +205,14 @@ export function Toast({ message, onDismiss }: { message: string; onDismiss: () =
   );
 }
 
-export function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (next: boolean) => void; label: string }) {
+export function Toggle({ checked, onChange, label, disabled = false }: { checked: boolean; onChange: (next: boolean) => void; label: string; disabled?: boolean }) {
   return (
     <button
       type="button"
       role="switch"
       aria-checked={checked}
       aria-label={label}
+      disabled={disabled}
       className={checked ? 'admin-switch is-on' : 'admin-switch'}
       onClick={() => onChange(!checked)}
     >

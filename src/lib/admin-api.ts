@@ -1,6 +1,9 @@
 import type { Product } from '../data/catalog';
 import type { StorefrontPage } from './api';
 import type { BulkDatasetKey } from './bulk-templates';
+import type { StoreSettings } from '../server/admin/settings';
+
+export type { StoreSettings, StoreProfile, StoreDelivery, StorePreview, StoreNotifications } from '../server/admin/settings';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '/api';
 const TOKEN_KEY = 'glow-grace-admin-token';
@@ -49,11 +52,8 @@ export type AdminSummary = {
   hiddenDatasets: string[];
 };
 
-export type StoreSettings = {
-  profile: { storeName: string; tagline: string; email: string; phone: string; address: string };
-  delivery: { freeAbove: number; deliveryFee: number; gst: number; returns: number };
-  notifications: Record<string, boolean>;
-};
+/** The settings payload always arrives complete, so a section is never `undefined`. */
+export type StoreSettingsResponse = { settings: StoreSettings; updatedAt: string | null };
 
 export type BulkOutcome = { created: string[]; errors: Array<{ row: number; message: string; errors?: Record<string, string> }>; message: string };
 
@@ -140,8 +140,8 @@ export const adminApi = {
   },
   me: () => get<{ user: AdminUser }>('me').then((result) => result.user),
   summary: () => get<AdminSummary>('summary'),
-  settings: () => get<{ settings: StoreSettings }>('settings').then((result) => result.settings),
-  saveSettings: (settings: unknown) => put<{ settings: StoreSettings; message: string }>('settings', settings),
+  settings: () => get<StoreSettingsResponse>('settings'),
+  saveSettings: (settings: unknown) => put<StoreSettingsResponse & { message: string }>('settings', settings),
   pages: () => get<{ pages: AdminPage[] }>('pages').then((result) => result.pages),
   setPageVisible: (slug: string, visible: boolean) => patch<{ message: string }>(`pages/${encodeURIComponent(slug)}`, { visible }),
   datasets: () => get<{ datasets: AdminDataset[] }>('demo-data').then((result) => result.datasets),

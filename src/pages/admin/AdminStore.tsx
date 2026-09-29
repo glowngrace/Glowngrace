@@ -1,6 +1,17 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { Product } from '../../data/catalog';
-import { adminApi, AdminApiError, getAdminToken, type AdminDataset, type AdminOrder, type AdminPage, type AdminSummary, type AdminUser, type StoreSettings } from '../../lib/admin-api';
+import {
+  adminApi,
+  AdminApiError,
+  getAdminToken,
+  type AdminDataset,
+  type AdminOrder,
+  type AdminPage,
+  type AdminSummary,
+  type AdminUser,
+  type BulkOutcome,
+  type StoreSettings,
+} from '../../lib/admin-api';
 import type { BulkDatasetKey } from '../../lib/bulk-templates';
 
 export type JobRecord = {
@@ -83,6 +94,7 @@ type AdminData = {
   pages: AdminPage[];
   datasets: AdminDataset[];
   settings: StoreSettings | null;
+  settingsUpdatedAt: string | null;
   summary: AdminSummary | null;
 };
 
@@ -100,9 +112,19 @@ const emptyData: AdminData = {
   pages: [],
   datasets: [],
   settings: null,
+  settingsUpdatedAt: null,
   summary: null,
 };
 
+/**
+ * Every mutation rejects on failure.
+ *
+ * They used to swallow the error and return a falsy value, so a caller that
+ * wrapped them in `try`/`catch` always took the success path: the console
+ * announced "Store profile saved." for a request the API had rejected. The
+ * store still records the message in the banner, so callers that do not care
+ * can ignore the rejection; callers that do care now find out.
+ */
 type AdminStore = AdminData & {
   loading: boolean;
   reloading: boolean;
@@ -111,18 +133,18 @@ type AdminStore = AdminData & {
   setNotice: (message: string) => void;
   setError: (message: string) => void;
   reload: () => Promise<void>;
-  saveProduct: (product: unknown, productId?: number) => Promise<Product | null>;
+  saveProduct: (product: unknown, productId?: number) => Promise<Product>;
   setProductPublished: (product: Product, published: boolean) => Promise<void>;
   removeProduct: (product: Product) => Promise<void>;
   saveOrder: (id: string, order: unknown) => Promise<void>;
   removeOrder: (id: string) => Promise<void>;
   saveUser: (user: unknown, id?: string) => Promise<void>;
   removeUser: (id: string) => Promise<void>;
-  changePassword: (id: string, currentPassword: string, newPassword: string) => Promise<boolean>;
-  saveRecord: <T>(key: CollectionKey, record: unknown, id?: string) => Promise<T | null>;
+  changePassword: (id: string, currentPassword: string, newPassword: string) => Promise<void>;
+  saveRecord: <T>(key: CollectionKey, record: unknown, id?: string) => Promise<T>;
   removeRecord: (key: CollectionKey, id: string) => Promise<void>;
-  importRows: (dataset: BulkDatasetKey, rows: Array<Record<string, unknown>>) => Promise<void>;
-  saveSettings: (settings: unknown) => Promise<void>;
+  importRows: (dataset: BulkDatasetKey, rows: Array<Record<string, unknown>>) => Promise<BulkOutcome>;
+  saveSettings: (settings: unknown) => Promise<StoreSettings>;
   setPageVisible: (slug: string, visible: boolean) => Promise<void>;
   runDemoAction: (dataset: string, action: 'hide' | 'show' | 'delete' | 'reset' | 'reset-all') => Promise<void>;
   signOut: () => Promise<void>;
@@ -149,10 +171,32 @@ export function AdminStoreProvider({ children }: { children: ReactNode }) {
     setError(cause instanceof AdminApiError ? cause.message : 'The console could not complete that action. Please try again.');
   }, []);
 
+  /**
+   * Records the failure in the banner and rethrows it.
+   *
+   * Both halves matter: the banner tells the operator what went wrong even for
+   * background actions nobody is awaiting, and the rejection tells the form
+   * that opened the action that it must not report success.
+   */
+  const abort = useCallback((cause: unknown): never => {
+    fail(cause);
+    throw cause;
+  }, [fail]);
+
   const announce = useCallback((message: string) => {
     setError('');
     setNotice(message);
   }, []);
+
+  /**
+   * Clears a stale error banner without raising a toast.
+   *
+   * The settings page narrates its own actions — "Store profile saved.", "New
+   * order placed notifications disabled." — so an API-wide "Settings saved."
+   * arriving afterwards would overwrite the message that actually describes
+   * what the operator just did.
+   */
+  const clearError = useCallback(() => setError(''), []);
 
   // A ref, not `data`: reading it must not change the identity of `reload`, or
   // the effect below would re-run on every response and loop forever.
@@ -171,7 +215,7 @@ export function AdminStoreProvider({ children }: { children: ReactNode }) {
         setError('Sign in to the console to load your data.');
         return;
       }
-      const [account, products, orders, jobs, candidates, partners, customers, reviews, team, pages, datasets, settings, summary] = await Promise.all([
+      const [account, products, orders, jobs, candidates, partners, customers, reviews, team, pages, datasets, settingsResponse, summary] = await Promise.all([
         adminApi.me(),
         adminApi.products(),
         adminApi.orders(),
@@ -199,7 +243,8 @@ export function AdminStoreProvider({ children }: { children: ReactNode }) {
         roles: team.roles,
         pages,
         datasets,
-        settings,
+        settings: settingsResponse.settings,
+        settingsUpdatedAt: settingsResponse.updatedAt,
         summary,
       });
       hasLoaded.current = true;
@@ -239,8 +284,7 @@ export function AdminStoreProvider({ children }: { children: ReactNode }) {
         announce(result.message);
         return result.product;
       } catch (cause) {
-        fail(cause);
-        return null;
+        return abort(cause);
       }
     },
 
@@ -253,7 +297,7 @@ export function AdminStoreProvider({ children }: { children: ReactNode }) {
         }));
         announce(published ? `${product.name} is live in the catalogue.` : `${product.name} is hidden from shoppers.`);
       } catch (cause) {
-        fail(cause);
+        abort(cause);
       }
     },
 
@@ -263,7 +307,7 @@ export function AdminStoreProvider({ children }: { children: ReactNode }) {
         setData((current) => ({ ...current, products: current.products.filter((entry) => entry.id !== product.id) }));
         announce(result.message);
       } catch (cause) {
-        fail(cause);
+        abort(cause);
       }
     },
 
@@ -273,7 +317,7 @@ export function AdminStoreProvider({ children }: { children: ReactNode }) {
         setData((current) => ({ ...current, orders: current.orders.map((entry) => (entry.id === id ? result.order : entry)) }));
         announce(result.message);
       } catch (cause) {
-        fail(cause);
+        abort(cause);
       }
     },
 
@@ -283,7 +327,7 @@ export function AdminStoreProvider({ children }: { children: ReactNode }) {
         setData((current) => ({ ...current, orders: current.orders.filter((entry) => entry.id !== id) }));
         announce(result.message);
       } catch (cause) {
-        fail(cause);
+        abort(cause);
       }
     },
 
@@ -295,30 +339,28 @@ export function AdminStoreProvider({ children }: { children: ReactNode }) {
           users: id === undefined ? [...current.users, result.user] : current.users.map((entry) => (entry.id === id ? result.user : entry)),
           account: current.account && result.user.id === current.account.id ? result.user : current.account,
         }));
-        announce(result.message);
+        clearError();
       } catch (cause) {
-        fail(cause);
+        abort(cause);
       }
     },
 
     async removeUser(id) {
       try {
-        const result = await adminApi.deleteUser(id);
+        await adminApi.deleteUser(id);
         setData((current) => ({ ...current, users: current.users.filter((entry) => entry.id !== id) }));
-        announce(result.message);
+        clearError();
       } catch (cause) {
-        fail(cause);
+        abort(cause);
       }
     },
 
     async changePassword(id, currentPassword, newPassword) {
       try {
-        const result = await adminApi.changePassword(id, currentPassword, newPassword);
-        announce(result.message);
-        return true;
+        await adminApi.changePassword(id, currentPassword, newPassword);
+        clearError();
       } catch (cause) {
-        fail(cause);
-        return false;
+        abort(cause);
       }
     },
 
@@ -340,8 +382,7 @@ export function AdminStoreProvider({ children }: { children: ReactNode }) {
         announce(result.message);
         return result.record as never;
       } catch (cause) {
-        fail(cause);
-        return null;
+        return abort(cause);
       }
     },
 
@@ -355,7 +396,7 @@ export function AdminStoreProvider({ children }: { children: ReactNode }) {
         }));
         announce(result.message);
       } catch (cause) {
-        fail(cause);
+        abort(cause);
       }
     },
 
@@ -367,39 +408,47 @@ export function AdminStoreProvider({ children }: { children: ReactNode }) {
           setError(`${result.errors.length} row${result.errors.length === 1 ? '' : 's'} skipped: ${result.errors[0].message}`);
         }
         await reload();
+        return result;
       } catch (cause) {
-        fail(cause);
+        return abort(cause);
       }
     },
 
     async saveSettings(settings) {
       try {
         const result = await adminApi.saveSettings(settings);
-        setData((current) => ({ ...current, settings: result.settings }));
-        announce(result.message);
+        setData((current) => ({ ...current, settings: result.settings, settingsUpdatedAt: result.updatedAt }));
+        clearError();
+        return result.settings;
       } catch (cause) {
-        fail(cause);
+        return abort(cause);
       }
     },
 
     async setPageVisible(slug, visible) {
       try {
-        const result = await adminApi.setPageVisible(slug, visible);
+        await adminApi.setPageVisible(slug, visible);
         setData((current) => ({ ...current, pages: current.pages.map((page) => (page.slug === slug ? { ...page, visible } : page)) }));
-        announce(result.message);
+        clearError();
       } catch (cause) {
-        fail(cause);
+        abort(cause);
       }
     },
 
+    /**
+     * Demo-data actions replace rows, so the collections have to be re-read.
+     * `reload()` returns a brand new settings object, which is why the settings
+     * screen tracks which sections are being edited and only adopts server
+     * values for the untouched ones.
+     */
     async runDemoAction(dataset, action) {
       try {
         const result = await adminApi.demoAction(dataset, action);
         setData((current) => ({ ...current, datasets: result.datasets }));
-        announce(result.message);
+        clearError();
         await reload();
       } catch (cause) {
-        fail(cause);
+        abort(cause);
       }
     },
 
@@ -410,7 +459,7 @@ export function AdminStoreProvider({ children }: { children: ReactNode }) {
         setData(emptyData);
       }
     },
-  }), [announce, data, error, fail, loading, notice, reload, reloading]);
+  }), [abort, announce, clearError, data, error, loading, notice, reload, reloading]);
 
   return <AdminStoreContext.Provider value={store}>{children}</AdminStoreContext.Provider>;
 }
