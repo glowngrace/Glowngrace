@@ -36,6 +36,28 @@ function sendNotFound(response: ServerResponse, message: string) {
   sendJson(response, 404, { error: 'not_found', message });
 }
 
+/**
+ * The page list the built app reads before it renders any route. It mirrors the
+ * rows `db/migrations` seeds so the preview behaves like a freshly migrated
+ * database, minus the ones the console may switch off.
+ */
+const previewPages = [
+  { slug: 'home', label: 'Home', path: '/', position: 1 },
+  { slug: 'shop', label: 'Shop', path: '/shop', position: 2 },
+  { slug: 'product', label: 'Product details', path: '/product/:productId', position: 3 },
+  { slug: 'checkout', label: 'Checkout', path: '/checkout', position: 4 },
+  { slug: 'order-confirmation', label: 'Order confirmation', path: '/order-confirmation', position: 5 },
+  { slug: 'partners', label: 'Partners', path: '/partners', position: 6 },
+  { slug: 'careers', label: 'Careers', path: '/careers', position: 7 },
+  { slug: 'about', label: 'Our story', path: '/about', position: 8 },
+  { slug: 'contact', label: 'Contact', path: '/contact', position: 9 },
+  { slug: 'login', label: 'Sign in', path: '/login', position: 10 },
+  { slug: 'wishlist', label: 'Wishlist', path: '/wishlist', position: 11 },
+  { slug: 'candidate', label: 'Candidate portal', path: '/candidate', position: 12 },
+  { slug: 'partner', label: 'Partner portal', path: '/partner', position: 13 },
+  { slug: 'admin', label: 'Admin console', path: '/admin', position: 14 },
+];
+
 function sendFunction(response: ServerResponse, pathname: string) {
   if (pathname === '/api/health') {
     const payload = JSON.stringify({
@@ -47,13 +69,20 @@ function sendFunction(response: ServerResponse, pathname: string) {
     return response.end(payload);
   }
   if (pathname === '/api/products') return sendJson(response, 200, { products: [] });
+  // Every route asks for the page list on load, so a preview that 404s this
+  // makes the built app log a failed request on each page it renders.
+  if (pathname === '/api/site/pages') {
+    return sendJson(response, 200, {
+      pages: previewPages.map((page) => ({ ...page, visible: true })),
+      settings: { brandName: 'Glow & Grace' },
+    });
+  }
   return sendNotFound(response, `No preview function handles ${pathname}.`);
 }
 
 function contentTypeFor(file: string) {
   return contentTypes[extname(file).toLowerCase()] ?? 'application/octet-stream';
 }
-
 createServer((request, response) => {
   const method = request.method ?? 'GET';
   if (method !== 'GET' && method !== 'HEAD') {

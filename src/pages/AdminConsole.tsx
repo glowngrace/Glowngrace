@@ -575,9 +575,12 @@ function AdminConsole() {
           onCancel={() => { setEditing(null); go('products'); }}
           onNotice={notify}
           onSave={async (payload) => {
-            const saved = await saveProduct(payload, editingProduct?.id);
-            if (saved) { setEditing(null); go('products'); }
-            return saved !== null;
+            // `saveProduct` rejects on failure, and the form renders the
+            // rejection's message itself, so only the happy path lives here.
+            await saveProduct(payload, editingProduct?.id);
+            setEditing(null);
+            go('products');
+            return true;
           }}
         />
       );

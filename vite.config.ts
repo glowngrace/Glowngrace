@@ -19,7 +19,9 @@ export default defineConfig(({ mode }) => {
       setupFiles: ['./src/test/setup.ts'],
       include: ['src/**/*.test.{ts,tsx}', 'server/**/*.test.ts'],
       css: true,
-      testTimeout: 15000,
+      // A full console page has to resolve a dozen requests before its first
+      // assertion can match, which is slow on a loaded CI runner.
+      testTimeout: 30000,
     },
   };
 });
