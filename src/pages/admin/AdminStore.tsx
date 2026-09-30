@@ -7,6 +7,7 @@ import {
   type AdminDataset,
   type AdminOrder,
   type AdminPage,
+  type AdminResetMessage,
   type AdminSummary,
   type AdminUser,
   type BulkOutcome,
@@ -98,8 +99,7 @@ type AdminData = {
   summary: AdminSummary | null;
 };
 
-const emptyData: AdminData = {
-  account: null,
+const emptyData: AdminData = {  account: null,
   products: [],
   orders: [],
   jobs: [],
@@ -141,6 +141,17 @@ type AdminStore = AdminData & {
   saveUser: (user: unknown, id?: string) => Promise<void>;
   removeUser: (id: string) => Promise<void>;
   changePassword: (id: string, currentPassword: string, newPassword: string) => Promise<void>;
+  /**
+   * Sets a password for an account without its current one, for a colleague who
+   * cannot get in. Distinct from changePassword on purpose: it never needs to
+   * know the old value, which is the whole reason it is here.
+   */
+  recoverPassword: (id: string, newPassword: string) => Promise<void>;
+  /** Every console account onto one password. Signs the operator out too. */
+  recoverAllPasswords: (newPassword: string) => Promise<void>;
+  /** The reset messages this deployment would have sent, newest first. */
+  resetMessages: AdminResetMessage[];
+  loadResetMessages: () => Promise<AdminResetMessage[]>;
   saveRecord: <T>(key: CollectionKey, record: unknown, id?: string) => Promise<T>;
   removeRecord: (key: CollectionKey, id: string) => Promise<void>;
   importRows: (dataset: BulkDatasetKey, rows: Array<Record<string, unknown>>) => Promise<BulkOutcome>;
@@ -162,6 +173,7 @@ const collectionKeyOf: Record<CollectionKey, keyof AdminData> = {
 
 export function AdminStoreProvider({ children }: { children: ReactNode }) {
   const [data, setData] = useState<AdminData>(emptyData);
+  const [resetMessages, setResetMessages] = useState<AdminResetMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [reloading, setReloading] = useState(false);
   const [error, setError] = useState('');
@@ -261,6 +273,7 @@ export function AdminStoreProvider({ children }: { children: ReactNode }) {
 
   const store = useMemo<AdminStore>(() => ({
     ...data,
+    resetMessages,
     loading,
     reloading,
     error,
@@ -364,6 +377,45 @@ export function AdminStoreProvider({ children }: { children: ReactNode }) {
       }
     },
 
+    /**
+     * Recovery deliberately does not reload the console.
+     *
+     * A recovery that covers every account drops the operator's own session on
+     * the way out, so reloading would issue a request that is guaranteed to come
+     * back 401 and replace the success notice with an error. The one thing worth
+     * knowing afterwards is who now holds which password, and that is the
+     * operator's business, not something to re-derive.
+     */
+    async recoverPassword(id, newPassword) {
+      try {
+        await adminApi.recoverPassword(id, newPassword);
+        clearError();
+      } catch (cause) {
+        abort(cause);
+      }
+    },
+
+    async recoverAllPasswords(newPassword) {
+      try {
+        await adminApi.recoverAllPasswords(newPassword);
+        clearError();
+      } catch (cause) {
+        abort(cause);
+      }
+    },
+
+    async loadResetMessages() {
+      try {
+        const messages = await adminApi.resetMessages();
+        setResetMessages(messages);
+        clearError();
+        return messages;
+      } catch (cause) {
+        abort(cause);
+        return [];
+      }
+    },
+
     async saveRecord(key, record, id) {
       try {
         const result = id === undefined
@@ -459,7 +511,7 @@ export function AdminStoreProvider({ children }: { children: ReactNode }) {
         setData(emptyData);
       }
     },
-  }), [abort, announce, clearError, data, error, loading, notice, reload, reloading]);
+  }), [abort, announce, clearError, data, error, loading, notice, reload, reloading, resetMessages]);
 
   return <AdminStoreContext.Provider value={store}>{children}</AdminStoreContext.Provider>;
 }

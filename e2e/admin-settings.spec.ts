@@ -123,6 +123,22 @@ function toast(page: Page, message: string) {
 }
 
 async function openSettings(page: Page) {
+  // The console needs a server-issued session. Registering this last means
+  // Playwright prefers it over the wider admin stub above, and it keeps the
+  // suite independent of whatever password the local database actually holds.
+  await page.route('**/api/admin/session', async (route: Route) => {
+    if (route.request().method() === 'DELETE') {
+      return route.fulfill({ json: { message: 'Signed out of the console.' } });
+    }
+    return route.fulfill({
+      json: {
+        token: 'e2e-session-token',
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+        user: adminUser,
+      },
+    });
+  });
+
   await page.goto('/login');
   await page.getByText('Explore a demo account').click();
   await page.getByRole('button', { name: /Administrator Platform overview/i }).click();

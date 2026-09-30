@@ -602,10 +602,17 @@ h3 { font-size: 1.25rem; }
 .login-form input:focus-visible { outline: 1px solid var(--gold); outline-offset: 1px; }
 .login-form .button { margin-top: 9px; }
 .login-error { margin: 0; color: #a33e4e; font-size: .8rem; }
+.login-reset { margin-top: 12px; }
+.login-reset > summary { color: var(--rose-deep); cursor: pointer; font-size: .8rem; text-decoration: underline; text-underline-offset: 3px; }
+.login-reset > p { margin: 10px 0 0; color: var(--muted); font-size: .78rem; line-height: 1.6; }
+.login-reset .login-form { margin-top: 10px; padding: 14px 15px; border: 1px solid var(--line); background: var(--cream); }
+.login-reset-notice { margin: 16px 0 0; padding: 12px 14px; border: 1px solid #cfe0d2; background: #eef5ef; color: #2c5540; font-size: .82rem; line-height: 1.6; }
+.login-reset-notice + .button { margin-top: 14px; }
 .login-footnote { margin: 17px 0 5px; color: var(--muted); font-size: .82rem; text-align: center; }
 .login-footnote a, .login-back-link { color: var(--rose-deep); text-decoration: underline; text-underline-offset: 3px; }
 .login-back-link { display: block; margin-top: 14px; font-size: .8rem; text-align: center; }
 .demo-security-note { margin: 22px 0 0; color: #81766f; font-size: .72rem; line-height: 1.65; text-align: center; }
+.demo-security-note code { padding: 2px 5px; background: #f1e8e1; color: var(--ink); font-family: var(--sans); }
 
 /* Candidate, salon partner, and administrator dashboards */
 .portal-page { display: grid; min-height: 720px; grid-template-columns: 260px minmax(0, 1fr); background: var(--cream); }
@@ -948,7 +955,9 @@ button.admin-stat:hover { border-color: var(--a-rose); transform: translateY(-2p
 .admin-cell-ref { color: var(--a-muted); font-size: .74rem; letter-spacing: .04em; }
 .admin-cell-review { max-width: 320px; }
 .admin-cell-review > span { display: block; margin-top: 4px; font-size: .78rem; line-height: 1.5; }
-.admin-row-actions { display: flex; gap: 5px; justify-content: flex-end; }
+.admin-row-actions { text-align: right; white-space: nowrap; }
+.admin-row-actions > * { display: inline-grid; margin-left: 5px; vertical-align: middle; }
+.admin-row-actions > *:first-child { margin-left: 0; }
 .admin-product-cell { display: flex; align-items: center; gap: 10px; padding: 0; border: 0; background: none; cursor: pointer; font-family: inherit; text-align: left; }
 .admin-product-cell > img { width: 34px; height: 34px; flex: 0 0 34px; border-radius: var(--a-r); object-fit: cover; }
 .admin-product-cell > span { display: grid; min-width: 0; gap: 1px; }

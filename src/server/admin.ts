@@ -8,7 +8,7 @@ import {
   type Collection,
   type Row,
 } from './admin/collections.js';
-import { hashPassword, newSessionToken, passwordPolicy, sessionExpiry, verifyPassword } from './admin/passwords.js';
+import { hashPassword, newSessionToken, newResetToken, passwordPolicy, recoverablePasswordError, resetTokenExpiry, resetTokenLookup, sessionExpiry, verifyPassword, demoPassword, demoPasswordHash, hashResetToken } from './admin/passwords.js';
 import { datasetCountSql, mapDatasetRowCounts } from './admin/datasets.js';
 import { normalizeStoreSettings, validateStoreSettings, type StoreSettings } from './admin/settings.js';
 import { isMissingSchema, schemaNotMigrated } from './schema.js';
@@ -51,8 +51,31 @@ const orderStatuses = ['Placed', 'Processing', 'Packed', 'Shipped', 'Delivered',
 export const orderStatusFlowList = [...orderStatusFlow];
 export const orderStatusesList = [...orderStatuses];
 
+/**
+ * The account lifecycle, as db/migrations/008_role_signup.sql constrains it.
+ *
+ * This used to be Active/Paused. The column still defaults to 'Active' and the
+ * seeded rows are all Active, so the vocabulary change is invisible until an
+ * approval is recorded, at which point the old enum would reject 'Suspended'
+ * with a 400 and 'Paused' would violate the database constraint with a 500.
+ */
+export const userStatuses = ['Pending', 'Active', 'Suspended'] as const;
+
 const password = z.string().min(passwordPolicy.minLength, `Use at least ${passwordPolicy.minLength} characters.`)
   .max(passwordPolicy.maxLength, `Use at most ${passwordPolicy.maxLength} characters.`);
+
+/**
+ * A password for a recovery action rather than for a form.
+ *
+ * Same limits, except the published demo credential is also accepted, because
+ * restoring the demo state is the reason recovery exists. See
+ * recoverablePasswordError.
+ */
+const recoveryPassword = z.string()
+  .max(passwordPolicy.maxLength, `Use at most ${passwordPolicy.maxLength} characters.`)
+  .refine((value) => recoverablePasswordError(value) === null, {
+    message: `Use at least ${passwordPolicy.minLength} characters, or the sample password ${demoPassword}.`,
+  });
 
 // Spreadsheets can only offer Yes/No, TRUE/FALSE or 1/0, so accept all of those
 // instead of letting z.coerce.boolean() turn the text "false" into true.
@@ -85,11 +108,29 @@ const userUpdateSchema = z.object({
   email: z.string().trim().email().max(254).optional(),
   role: z.enum(adminRoles).optional(),
   avatar: z.string().trim().max(180).optional(),
-  status: z.enum(['Active', 'Paused']).optional(),
+  status: z.enum(userStatuses).optional(),
+  phone: z.string().trim().max(24).optional(),
 });
 
 const passwordChangeSchema = z.object({
   currentPassword: z.string().min(1).max(passwordPolicy.maxLength),
+  newPassword: password,
+});
+
+/**
+ * Recovery does not ask for the current password, which is the whole point: the
+ * operator either cannot read it or is locked out of the account that would let
+ * them change it.
+ */
+const passwordRecoverSchema = z.object({ newPassword: recoveryPassword });
+
+/** One password applied to every console account, for restoring the demo state. */
+const passwordRecoverAllSchema = z.object({ newPassword: recoveryPassword });
+
+const passwordResetRequestSchema = z.object({ email: z.string().trim().email().max(254) });
+
+const passwordResetConfirmSchema = z.object({
+  token: z.string().trim().min(32).max(200),
   newPassword: password,
 });
 
@@ -218,17 +259,39 @@ function mapOrder(row: Row) {
   };
 }
 
+/**
+ * `mapUser` is also handed rows whose SELECT predates a column, because
+ * `currentUser` and the sign-in query are deliberately narrow. Reading an absent
+ * key must therefore produce an empty string rather than the text "undefined",
+ * which is what a bare String(row.x) would put in front of an operator.
+ */
+function text(value: unknown) {
+  return value === null || value === undefined ? '' : String(value);
+}
+
+function stamp(value: unknown): string | null {
+  if (!value) return null;
+  const parsed = value instanceof Date ? value : new Date(String(value));
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
 function mapUser(row: Row) {
   return {
-    id: String(row.id),
-    name: String(row.name),
-    email: String(row.email),
-    role: String(row.role),
-    avatar: row.avatar ? String(row.avatar) : '',
-    status: String(row.status ?? 'Active'),
-    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at ?? ''),
+    id: text(row.id),
+    name: text(row.name),
+    email: text(row.email),
+    role: text(row.role),
+    avatar: text(row.avatar),
+    status: text(row.status) || 'Active',
+    phone: text(row.phone),
+    source: text(row.source) || 'console',
+    reviewedAt: stamp(row.reviewed_at),
+    createdAt: stamp(row.created_at) ?? text(row.created_at),
   };
 }
+
+/** The console columns every user-facing query and RETURNING clause needs. */
+const userColumns = 'id, name, email, role, avatar, status, phone, source, reviewed_at, created_at';
 
 const orderSelect = `SELECT order_record.id, order_record.order_number, order_record.customer_name, order_record.email,
   order_record.phone, order_record.street_address, order_record.locality, order_record.city, order_record.state,
@@ -310,7 +373,7 @@ export async function seedAdminData(database: Database) {
     `INSERT INTO admin_users (id, name, email, role, password_hash, avatar, status)
      VALUES ('00000000-0000-4000-8000-000000000001', 'Glow & Grace Admin', 'admin@glowngrace.in', 'Store Administrator', $1, '/images/partner1.jpg', 'Active')
      ON CONFLICT (email) DO NOTHING`,
-    ['scrypt$16384$8$1$8ad60c22a397f20a36e452887332fea3$b91fbd9edb011c0c620edfc8638f3b18c9128e24492126f98a960e81a3f003280c3ba4e74e2deb31e51f3004ba8c5aaf2dda974cd40e54c376a307f3842f6fae'],
+    [demoPasswordHash],
   );
 }
 
@@ -528,10 +591,182 @@ export function createAdminHandlers(database: Database) {
 
   async function listUsers() {
     const result = await database.query(
-      'SELECT id, name, email, role, avatar, status, created_at FROM admin_users ORDER BY created_at, name',
+      `SELECT ${userColumns} FROM admin_users ORDER BY created_at, name`,
       [],
     );
     return result.rows.map(mapUser);
+  }
+
+  /**
+   * Writes a new hash and ends every session the account holds.
+   *
+   * Every path that sets a password ends up here, so "the old password is no
+   * longer trustworthy" is true of all of them: a session minted before a reset
+   * must not survive it. The caller's own session is passed through when it
+   * belongs to the same account, because otherwise an administrator recovering
+   * their own password would be signed out by the request that fixed it.
+   */
+  async function setPassword(userId: string, newPassword: string, keepToken?: string | null) {
+    await database.query(
+      'UPDATE admin_users SET password_hash = $2, updated_at = NOW() WHERE id = $1',
+      [userId, await hashPassword(newPassword)],
+    );
+    const token = keepToken ?? null;
+    await database.query(
+      token
+        ? 'DELETE FROM admin_sessions WHERE user_id = $1 AND token <> $2'
+        : 'DELETE FROM admin_sessions WHERE user_id = $1',
+      token ? [userId, token] : [userId],
+    );
+  }
+
+  /**
+   * Starts the forgot-password flow.
+   *
+   * There is no SMTP transport in this deployment, so the message is written to
+   * `email_outbox` and read back by the console rather than sent. The response
+   * is identical whether or not the address has an account, because a differing
+   * answer is an account-existence oracle on an unauthenticated route.
+   */
+  async function requestPasswordReset(input: unknown): Promise<AdminResult> {
+    const parsed = passwordResetRequestSchema.safeParse(input);
+    if (!parsed.success) return fail(400, 'invalid_email', 'Enter the email address for the account.');
+    await ensureSeeded();
+    const found = await database.query('SELECT id, name, email FROM admin_users WHERE email = $1', [parsed.data.email.toLowerCase()]);
+    const account = found.rows[0];
+    // A fixed string, and not one that repeats the address back. A response that
+    // varies with the address is an account-existence oracle on an
+    // unauthenticated route, however reassuring the wording.
+    const message = 'If that address has a console account, a reset link is waiting for it.';
+    if (!account) return { status: 200, body: { message } };
+
+    // One live link at a time, so an older message in the outbox cannot be used
+    // after the account holder has asked for a new one.
+    await database.query('UPDATE password_resets SET used_at = NOW() WHERE user_id = $1 AND used_at IS NULL', [account.id]);
+
+    const token = newResetToken();
+    const expiresAt = resetTokenExpiry();
+    const { tokenHash, tokenLookup } = await hashResetToken(token);
+    await database.query(
+      'INSERT INTO password_resets (user_id, token_hash, token_lookup, expires_at) VALUES ($1, $2, $3, $4)',
+      [account.id, tokenHash, tokenLookup, expiresAt],
+    );
+
+    // A path rather than an absolute URL: the API has no reliable view of the
+    // public host, and the console renders the link against the origin the
+    // operator is already on.
+    const path = `/reset-password?token=${token}`;
+    await database.query(
+      `INSERT INTO email_outbox (kind, recipient, subject, body)
+       VALUES ('password-reset', $1, $2, $3)`,
+      [
+        text(account.email),
+        'Your Glow & Grace console password',
+        [
+          `Hello ${text(account.name)},`,
+          '',
+          'Someone asked to reset the console password for this address. Open the link below to choose a new one.',
+          `It works once and stops working at ${expiresAt.toISOString()}.`,
+          '',
+          path,
+          '',
+          'If this was not you, no action is needed: the old password still works until a reset completes.',
+        ].join('\n'),
+      ],
+    );
+    return { status: 200, body: { message } };
+  }
+
+  /**
+   * Completes the forgot-password flow with a token and a new password.
+   *
+   * Unauthenticated by necessity, so every failure answers the same way: a
+   * caller must not be able to tell an expired token from a wrong one from one
+   * that never existed.
+   */
+  async function confirmPasswordReset(input: unknown): Promise<AdminResult> {
+    const parsed = passwordResetConfirmSchema.safeParse(input);
+    if (!parsed.success) {
+      return fail(400, 'invalid_password', parsed.error.issues[0]?.message ?? 'Check the new password and try again.');
+    }
+    await ensureSeeded();
+    const invalid = fail(400, 'invalid_reset_token', 'That reset link has expired or has already been used. Ask for a new one.');
+
+    const tokenLookup = resetTokenLookup(parsed.data.token);
+    const found = await database.query(
+      `SELECT reset.id, reset.user_id, reset.token_hash
+       FROM password_resets AS reset
+       WHERE reset.token_lookup = $1 AND reset.used_at IS NULL AND reset.expires_at > NOW()`,
+      [tokenLookup],
+    );
+    const row = found.rows[0];
+    if (!row) return invalid;
+    // token_lookup only narrows the search. The scrypt hash is what decides.
+    if (!(await verifyPassword(parsed.data.token, String(row.token_hash)))) return invalid;
+
+    await setPassword(text(row.user_id), parsed.data.newPassword);
+    await database.query('UPDATE password_resets SET used_at = NOW() WHERE id = $1', [row.id]);
+    return { status: 200, body: { message: 'Password updated. You can sign in with it now.' } };
+  }
+
+  /**
+   * The reset messages the deployment would have sent.
+   *
+   * This is how a locked-out operator gets their link: there is no mail server,
+   * so the console is the delivery channel and this is the inbox.
+   */
+  async function listResetMessages() {
+    const result = await database.query(
+      `SELECT id, kind, recipient, subject, body, created_at, read_at
+       FROM email_outbox WHERE kind = 'password-reset' ORDER BY created_at DESC LIMIT 20`,
+      [],
+    );
+    return result.rows.map((row) => ({
+      id: text(row.id),
+      recipient: text(row.recipient),
+      subject: text(row.subject),
+      body: text(row.body),
+      createdAt: stamp(row.created_at),
+      readAt: stamp(row.read_at),
+    }));
+  }
+
+  /**
+   * Resets one account's password without asking for the current one.
+   *
+   * A signed-in administrator doing this for a colleague is the supported way
+   * back into an account whose password has drifted away from the demo value.
+   */
+  async function recoverPassword(userId: string, newPassword: string, token: string | null): Promise<AdminResult> {
+    const found = await database.query(`SELECT ${userColumns} FROM admin_users WHERE id = $1`, [userId]);
+    const account = found.rows[0];
+    if (!account) return fail(404, 'not_found', 'That team member no longer exists.');
+    await setPassword(userId, newPassword, token);
+    return {
+      status: 200,
+      // The account as it actually is afterwards. Recovery is not an approval,
+      // so it must not report a Pending or Suspended member as Active.
+      body: { message: `Password reset for ${text(account.name)}. Their other sessions were signed out.`, user: mapUser(account) },
+    };
+  }
+
+  /**
+   * Puts every console account back on one password.
+   *
+   * The demo state is only recoverable in bulk: the seeded accounts share a
+   * published password, so restoring them one at a time means signing in as
+   * each one first, which is impossible for the accounts that are locked out.
+   * Every session is dropped, including the caller's, because the password they
+   * just signed in with no longer exists.
+   */
+  async function recoverAllPasswords(newPassword: string): Promise<AdminResult> {
+    const accounts = await database.query('SELECT id FROM admin_users');
+    for (const account of accounts.rows) await setPassword(text(account.id), newPassword);
+    await database.query('DELETE FROM admin_sessions');
+    return {
+      status: 200,
+      body: { message: `Password reset for all ${accounts.rows.length} console accounts. Everyone has been signed out.` },
+    };
   }
 
   async function bulkImport(dataset: string, rows: Array<Record<string, unknown>>) {
@@ -626,7 +861,7 @@ export function createAdminHandlers(database: Database) {
       return await dispatch(request);
     } catch (error) {
       if (isMissingSchema(error)) {
-        console.error('The admin console needs migrations 005-007', error);
+        console.error('The admin console needs migrations 005-009', error);
         return schemaNotMigrated(error, { path: `/${request.segments.join('/')}` });
       }
       console.error(`The admin console could not handle /${request.segments.join('/')}`, error);
@@ -653,8 +888,9 @@ export function createAdminHandlers(database: Database) {
           return fail(401, 'invalid_credentials', 'That email address and password do not match a console account.');
         }
         const token = newSessionToken();
-        await database.query('INSERT INTO admin_sessions (token, user_id, expires_at) VALUES ($1, $2, $3)', [token, row.id, sessionExpiry()]);
-        return { status: 201, body: { token, user: mapUser(row) } };
+        const expiresAt = sessionExpiry();
+        await database.query('INSERT INTO admin_sessions (token, user_id, expires_at) VALUES ($1, $2, $3)', [token, row.id, expiresAt]);
+        return { status: 201, body: { token, expiresAt: expiresAt.toISOString(), user: mapUser(row) } };
       }
       if (method === 'DELETE') {
         if (request.token) await database.query('DELETE FROM admin_sessions WHERE token = $1', [request.token]);
@@ -663,11 +899,26 @@ export function createAdminHandlers(database: Database) {
       return fail(405, 'method_not_allowed', 'Use POST to sign in and DELETE to sign out.');
     }
 
+    // The forgot-password flow is the one console route an operator who cannot
+    // sign in has to reach, so it is answered before the session check. It is
+    // also the only unauthenticated surface that writes to the database, which
+    // is why it never reveals whether an address exists.
+    if (resource === 'password-reset') {
+      if (method === 'POST' && !id) return requestPasswordReset(request.body);
+      if (method === 'POST' && id === 'confirm') return confirmPasswordReset(request.body);
+    }
+
     const user = await currentUser(request.token);
     if (!user) {
       return fail(401, 'unauthenticated', 'Sign in to the console to continue.');
     }
     await ensureSeeded();
+
+    if (resource === 'password-reset') {
+      if (method === 'GET' && id === 'messages') return { status: 200, body: { messages: await listResetMessages() } };
+      if (method === 'POST' && !id) return fail(401, 'unauthenticated', 'Sign in to the console to continue.');
+      return fail(405, 'method_not_allowed', 'Use POST to ask for a reset link and POST /confirm to redeem one.');
+    }
 
     if (resource === 'me') {
       if (method !== 'GET') return fail(405, 'method_not_allowed', 'The console account cannot be changed from here.');
@@ -816,6 +1067,13 @@ export function createAdminHandlers(database: Database) {
     }
 
     if (resource === 'users') {
+      // Checked before the generic "id is a record reference" branches below,
+      // because "recover-all" is a verb, not a user id.
+      if (rest[0] === 'recover-all' && method === 'POST') {
+        const parsed = passwordRecoverAllSchema.safeParse(request.body);
+        if (!parsed.success) return fail(400, 'invalid_password', parsed.error.issues[0]?.message ?? 'Check the new password and try again.');
+        return recoverAllPasswords(parsed.data.newPassword);
+      }
       if (rest[0] === 'bulk' && method === 'POST') {
         const body = typeof request.body === 'object' && request.body !== null ? request.body as Record<string, unknown> : {};
         const parsed = bulkSchema.safeParse({ ...body, dataset: 'users' });
@@ -829,7 +1087,7 @@ export function createAdminHandlers(database: Database) {
         if (!parsed.success) return fail(400, 'invalid_user', 'Check the team member details.', { errors: fieldErrors(parsed.error) });
         try {
           const result = await database.query(
-            'INSERT INTO admin_users (name, email, role, password_hash, avatar) VALUES ($1, $2, $3, $4, NULLIF($5, \'\')) RETURNING id, name, email, role, avatar, status, created_at',
+            'INSERT INTO admin_users (name, email, role, password_hash, avatar) VALUES ($1, $2, $3, $4, NULLIF($5, \'\')) RETURNING ' + userColumns,
             [parsed.data.name, parsed.data.email.toLowerCase(), parsed.data.role, await hashPassword(parsed.data.password), parsed.data.avatar],
           );
           return { status: 201, body: { user: mapUser(result.rows[0]), message: 'Team member added.' } };
@@ -847,12 +1105,13 @@ export function createAdminHandlers(database: Database) {
         if (!(await verifyPassword(parsed.data.currentPassword, String(row.password_hash)))) {
           return fail(400, 'wrong_password', 'The current password does not match. Nothing was changed.');
         }
-        await database.query(
-          'UPDATE admin_users SET password_hash = $2, updated_at = NOW() WHERE id = $1',
-          [id, await hashPassword(parsed.data.newPassword)],
-        );
-        await database.query('DELETE FROM admin_sessions WHERE user_id = $1 AND token <> $2', [id, request.token]);
+        await setPassword(id, parsed.data.newPassword, request.token);
         return { status: 200, body: { message: 'Password changed. Other sessions were signed out.' } };
+      }
+      if (id && rest[1] === 'recover' && method === 'POST') {
+        const parsed = passwordRecoverSchema.safeParse(request.body);
+        if (!parsed.success) return fail(400, 'invalid_password', parsed.error.issues[0]?.message ?? 'Check the new password and try again.');
+        return recoverPassword(id, parsed.data.newPassword, request.token ?? null);
       }
       if (id && (method === 'PATCH' || method === 'PUT')) {
         const parsed = userUpdateSchema.safeParse(request.body);
@@ -864,20 +1123,33 @@ export function createAdminHandlers(database: Database) {
         if (update.role !== undefined) columns.role = update.role;
         if (update.avatar !== undefined) columns.avatar = update.avatar || null;
         if (update.status !== undefined) columns.status = update.status;
+        if (update.phone !== undefined) columns.phone = update.phone || null;
         if (Object.keys(columns).length === 0) return fail(400, 'empty_update', 'Change at least one detail before saving.');
-        if (id === user.id && update.status === 'Paused') {
-          return fail(400, 'self_pause', 'You cannot pause the account you are signed in with.');
+        // Moving your own account out of Active revokes the session making the
+        // request, so the account would be unrecoverable without an
+        // administrator. Suspending or leaving Pending are both refused; only the
+        // fields that do not affect sign-in may be edited for oneself.
+        if (id === user.id && update.status !== undefined && update.status !== 'Active') {
+          return fail(400, 'self_status', `You cannot set your own status to ${update.status}. Ask another administrator.`);
         }
+        if (update.status !== undefined) columns.reviewed_at = new Date();
+        if (update.status !== undefined) columns.reviewed_by = user.id;
         const names = Object.keys(columns);
         try {
           const result = await database.query(
-            `UPDATE admin_users SET ${names.map((name, position) => `${name} = $${position + 2}`).join(', ')}, updated_at = NOW() WHERE id = $1 RETURNING id, name, email, role, avatar, status, created_at`,
+            `UPDATE admin_users SET ${names.map((name, position) => `${name} = $${position + 2}`).join(', ')}, updated_at = NOW() WHERE id = $1 RETURNING ${userColumns}`,
             [id, ...names.map((name) => columns[name])],
           );
           if (result.rows.length === 0) return fail(404, 'not_found', 'That team member no longer exists.');
           return { status: 200, body: { user: mapUser(result.rows[0]), message: 'Team member updated.' } };
         } catch (error) {
           if (isUniqueViolation(error)) return fail(409, 'duplicate_email', 'That email address already has a console account.');
+          // A status the database constraint refuses means this build is older
+          // than the migration, or newer than it. Saying so beats an anonymous
+          // 500, because the fix is to run a migration.
+          if (isCheckViolation(error)) {
+            return fail(409, 'status_not_accepted', `This database does not accept the status ${update.status}. Run the pending migrations.`);
+          }
           throw error;
         }
       }
@@ -887,7 +1159,7 @@ export function createAdminHandlers(database: Database) {
         if (result.rows.length === 0) return fail(404, 'not_found', 'That team member no longer exists.');
         return { status: 200, body: { deleted: id, message: 'Team member removed.' } };
       }
-      return fail(405, 'method_not_allowed', 'Team members support list, create, update, delete and password changes.');
+      return fail(405, 'method_not_allowed', 'Team members support list, create, update, delete, password changes and password recovery.');
     }
 
     if (resource === 'settings') {
@@ -1008,6 +1280,11 @@ export function createAdminHandlers(database: Database) {
 
 function isUniqueViolation(error: unknown) {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === '23505';
+}
+
+/** A CHECK constraint refused the value, which for this table means a status. */
+function isCheckViolation(error: unknown) {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === '23514';
 }
 
 function fieldErrors(error: z.ZodError) {

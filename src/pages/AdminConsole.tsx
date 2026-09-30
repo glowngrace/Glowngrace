@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { getDemoAccount, signOutDemo } from '../auth/demo-auth';
-import { getAdminToken } from '../lib/admin-api';
+import {
+  endAdminSession,
+  getAdminSessionExpiresIn,
+  getAdminToken,
+  sessionEndedEvent,
+} from '../lib/admin-api';
 import { productImageUrl, type Product } from '../data/catalog';
 import { Spinner } from '../components/Loader';
 import {
@@ -164,10 +169,38 @@ function AdminConsole() {
   const [toast, setToast] = useState('');
   const [modal, setModal] = useState<ModalState>(null);
   const [editing, setEditing] = useState<EditState>(null);
+  const [sessionOpen, setSessionOpen] = useState(() => Boolean(getAdminToken()));
+  const [sessionEnded, setSessionEnded] = useState(false);
 
   useEffect(() => {
     if (notice) setToast(notice);
   }, [notice]);
+
+  // The console session is short. When it lapses - on the countdown below, or the
+  // moment the server answers 401 - the interface has to drop back to the
+  // sign-in screen rather than keep showing the last data it happened to fetch.
+  useEffect(() => {
+    function handleEnded() {
+      setSessionOpen(false);
+      setSessionEnded(true);
+    }
+    window.addEventListener(sessionEndedEvent, handleEnded);
+    return () => window.removeEventListener(sessionEndedEvent, handleEnded);
+  }, []);
+
+  useEffect(() => {
+    if (!sessionOpen) return;
+    const remaining = getAdminSessionExpiresIn();
+    // A token stored without an expiry predates short-lived sessions, so the
+    // server stays the authority on whether it is still good.
+    if (remaining === null) return;
+    if (remaining <= 0) {
+      endAdminSession();
+      return;
+    }
+    const timer = window.setTimeout(() => endAdminSession(), remaining);
+    return () => window.clearTimeout(timer);
+  }, [sessionOpen]);
 
   const dashboardRows = useMemo(
     () => products.map((product, index) => {
@@ -855,12 +888,14 @@ function AdminConsole() {
                   : null
     : null;
 
-  if (account?.role !== 'admin' || !getAdminToken()) {
+  if (account?.role !== 'admin' || !sessionOpen || !getAdminToken()) {
     return (
       <section className="admin-locked">
         <span className="eyebrow">Administrator access</span>
-        <h1>Sign in to continue.</h1>
-        <p>Sign in with the administrator demo account to open this dashboard.</p>
+        <h1>{sessionEnded ? 'Your session has ended.' : 'Sign in to continue.'}</h1>
+        <p>{sessionEnded
+          ? 'For your account’s safety the console signs you out after five minutes. Sign in again to pick up where you left off.'
+          : 'Sign in with your administrator account to open this dashboard.'}</p>
         <button className="button button-dark" type="button" onClick={() => navigate('/login')}>Go to sign in</button>
       </section>
     );

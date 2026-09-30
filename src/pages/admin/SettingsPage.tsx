@@ -5,6 +5,7 @@ import {
 } from 'react';
 import { Spinner } from '../../components/Loader';
 import { AdminApiError, type AdminUser, type StoreSettings } from '../../lib/admin-api';
+import { demoPassword as samplePassword } from '../../lib/demo-credentials';
 import { useAdminStore } from './AdminStore';
 import { Avatar, IconButton, PageHead, Panel, PanelHead, Toggle } from './AdminUi';
 import { BulkUpload } from './BulkUpload';
@@ -37,6 +38,9 @@ type Pending =
   | { kind: 'section'; section: Section }
   | { kind: 'role'; id: string }
   | { kind: 'password'; id: string }
+  | { kind: 'recover'; id: string }
+  | { kind: 'recover-all' }
+  | { kind: 'reset-messages' }
   | { kind: 'invite' }
   | { kind: 'page'; slug: string }
   | { kind: 'demo'; dataset: string }
@@ -72,7 +76,9 @@ function formatStamp(value: string) {
 export function SettingsPage({ onNotice }: { onNotice: (message: string) => void }) {
   const {
     users, roles, pages, datasets, settings, settingsUpdatedAt, summary, account,
-    saveSettings, saveUser, removeUser, changePassword, setPageVisible, runDemoAction,
+    resetMessages, loadResetMessages,
+    saveSettings, saveUser, removeUser, changePassword, recoverPassword, recoverAllPasswords,
+    setPageVisible, runDemoAction,
   } = useAdminStore();
 
   const [profile, setProfile] = useState<Profile>(emptyProfile);
@@ -89,6 +95,7 @@ export function SettingsPage({ onNotice }: { onNotice: (message: string) => void
   const [pending, setPending] = useState<Pending>(idle);
   const [roleChoice, setRoleChoice] = useState('');
   const [passwordFor, setPasswordFor] = useState('');
+  const [recoverFor, setRecoverFor] = useState('');
   const [dangerFor, setDangerFor] = useState<{ dataset: string; label: string } | null>(null);
   const [copied, setCopied] = useState<'idle' | 'done' | 'failed'>('idle');
 
@@ -373,6 +380,16 @@ export function SettingsPage({ onNotice }: { onNotice: (message: string) => void
                     >
                       {passwordFor === member.id ? 'Cancel' : 'Password'}
                     </button>
+                    <button
+                      className="admin-btn admin-btn-light"
+                      type="button"
+                      disabled={busy}
+                      aria-expanded={recoverFor === member.id}
+                      title={`Set a new password for ${member.name} without the current one`}
+                      onClick={() => { setRecoverFor(recoverFor === member.id ? '' : member.id); setPasswordErrors({}); }}
+                    >
+                      {recoverFor === member.id ? 'Cancel' : 'Recover'}
+                    </button>
                   </li>
                 );
               })}
@@ -417,6 +434,44 @@ export function SettingsPage({ onNotice }: { onNotice: (message: string) => void
                 <div className="admin-form-actions">
                   <button className="admin-btn admin-btn-dark" type="submit" disabled={busy}>
                     {pending.kind === 'password' ? <><Spinner /> Updating…</> : 'Update password'}
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {recoverFor && (
+              <form
+                className="admin-password-form"
+                noValidate
+                onSubmit={async (event) => {
+                  event.preventDefault();
+                  const form = event.currentTarget;
+                  const newPassword = String(new FormData(form).get('recoveredPassword') ?? '');
+                  setPending({ kind: 'recover', id: recoverFor });
+                  setPasswordErrors({});
+                  try {
+                    await recoverPassword(recoverFor, newPassword);
+                    form.reset();
+                    setRecoverFor('');
+                    onNotice(`Password reset. ${users.find((member) => member.id === recoverFor)?.name ?? 'That account'} has to sign in again with it.`);
+                  } catch (recoverError) {
+                    setPasswordErrors({ newPassword: messageOf(recoverError, 'The password could not be reset.') });
+                    onNotice(messageOf(recoverError, 'The password could not be reset.'));
+                  } finally {
+                    setPending(idle);
+                  }
+                }}
+              >
+                <p className="admin-muted">
+                  Sets a new password for {users.find((member) => member.id === recoverFor)?.name ?? 'this account'} without asking
+                  for the current one, and signs their other sessions out. Use this when they cannot get in at all.
+                </p>
+                <Field name="recoveredPassword" label="New password" error={passwordErrors.newPassword} hint={`At least 8 characters, or the sample password ${samplePassword}.`}>
+                  <input type="password" name="recoveredPassword" required minLength={8} autoComplete="new-password" disabled={busy} aria-invalid={passwordErrors.newPassword ? true : undefined} />
+                </Field>
+                <div className="admin-form-actions">
+                  <button className="admin-btn admin-btn-dark" type="submit" disabled={busy}>
+                    {pending.kind === 'recover' ? <><Spinner /> Resetting…</> : 'Reset password'}
                   </button>
                 </div>
               </form>
@@ -580,6 +635,98 @@ export function SettingsPage({ onNotice }: { onNotice: (message: string) => void
                 <button className="admin-btn admin-btn-outline-danger" type="button" disabled={busy} onClick={() => setDangerFor({ dataset: 'all', label: 'every demo dataset' })}>Reset</button>
               </li>
             </ul>
+
+            <PanelHead title="Reset console passwords" sub="The way back in when nobody can sign in" />
+            <p className="admin-muted">
+              Sets one password on all {users.length} console accounts and signs everyone out, including you. Use{' '}
+              <code>{samplePassword}</code> to put the sample state back.
+            </p>
+            <form
+              className="admin-password-form"
+              noValidate
+              onSubmit={async (event) => {
+                event.preventDefault();
+                const form = event.currentTarget;
+                const newPassword = String(new FormData(form).get('everyPassword') ?? '');
+                setPending({ kind: 'recover-all' });
+                setPasswordErrors({});
+                try {
+                  await recoverAllPasswords(newPassword);
+                  form.reset();
+                  onNotice('Every console password was reset. Sign in again with the new one.');
+                } catch (allError) {
+                  setPasswordErrors({ newPassword: messageOf(allError, 'The passwords could not be reset.') });
+                  onNotice(messageOf(allError, 'The passwords could not be reset.'));
+                } finally {
+                  setPending(idle);
+                }
+              }}
+            >
+              <Field name="everyPassword" label="Password for every account" error={passwordErrors.newPassword} hint={`At least 8 characters, or the sample password ${samplePassword}.`}>
+                <input type="password" name="everyPassword" required minLength={8} autoComplete="new-password" disabled={busy} aria-invalid={passwordErrors.newPassword ? true : undefined} />
+              </Field>
+              <div className="admin-form-actions">
+                <button className="admin-btn admin-btn-outline-danger" type="submit" disabled={busy}>
+                  {pending.kind === 'recover-all' ? <><Spinner /> Resetting…</> : `Reset all ${users.length} passwords`}
+                </button>
+              </div>
+            </form>
+
+            <PanelHead title="Reset links" sub="Where a forgotten-password link is waiting" />
+            <p className="admin-muted">
+              This deployment has no mail server, so a reset link is written here instead of emailed. Hand the code to whoever
+              asked for it and they can set their own password.
+            </p>
+            <div className="admin-form-actions">
+              <button
+                className="admin-btn admin-btn-light"
+                type="button"
+                disabled={busy}
+                onClick={async () => {
+                  setPending({ kind: 'reset-messages' });
+                  try {
+                    const messages = await loadResetMessages();
+                    onNotice(messages.length === 0 ? 'No reset links are waiting.' : `${messages.length} reset link${messages.length === 1 ? '' : 's'} waiting.`);
+                  } catch (messagesError) {
+                    onNotice(messageOf(messagesError, 'The reset links could not be loaded.'));
+                  } finally {
+                    setPending(idle);
+                  }
+                }}
+              >
+                {pending.kind === 'reset-messages' ? <><Spinner /> Loading…</> : 'Show reset links'}
+              </button>
+            </div>
+            {resetMessages.length > 0 && (
+              <ul className="admin-team-list">
+                {resetMessages.map((message) => {
+                  const code = /token=([0-9a-f]{64})/.exec(message.body)?.[1] ?? '';
+                  return (
+                    <li key={message.id}>
+                      <span className="admin-team-info">
+                        <strong>{message.recipient}</strong>
+                        <small>{formatStamp(message.createdAt ?? '')}{code ? ' · waiting' : ' · no code'}</small>
+                      </span>
+                      {code && (
+                        <button
+                          className="admin-btn admin-btn-light"
+                          type="button"
+                          onClick={() => {
+                            void navigator.clipboard?.writeText(code).then(
+                              () => onNotice('Reset code copied to your clipboard.'),
+                              () => onNotice('Your browser blocked the clipboard. Read the code from the console inbox instead.'),
+                            );
+                          }}
+                        >
+                          Copy code
+                        </button>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+
             {dangerFor && (
               <DangerConfirm
                 target={dangerFor}

@@ -7,6 +7,8 @@ export type { StoreSettings, StoreProfile, StoreDelivery, StorePreview, StoreNot
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '/api';
 const TOKEN_KEY = 'glow-grace-admin-token';
+const EXPIRY_KEY = 'glow-grace-admin-session-expires-at';
+const SESSION_ENDED_EVENT = 'glow-grace-admin-session-ended';
 
 export type AdminUser = {
   id: string;
@@ -15,7 +17,19 @@ export type AdminUser = {
   role: string;
   avatar: string;
   status: string;
+  phone: string;
+  source: string;
+  reviewedAt: string | null;
   createdAt: string;
+};
+
+export type AdminResetMessage = {
+  id: string;
+  recipient: string;
+  subject: string;
+  body: string;
+  createdAt: string | null;
+  readAt: string | null;
 };
 
 export type AdminOrder = {
@@ -88,6 +102,52 @@ export function setAdminToken(token: string | null) {
   }
 }
 
+/**
+ * Milliseconds until the stored session lapses, or `null` when there is no
+ * expiry to honour. A token stored without an expiry is a legacy value from
+ * before sessions were short-lived, so it is left to the server to judge.
+ */
+export function getAdminSessionExpiresIn(now: number = Date.now()) {
+  try {
+    const raw = localStorage.getItem(EXPIRY_KEY);
+    if (!raw) return null;
+    const expiresAt = Date.parse(raw);
+    if (Number.isNaN(expiresAt)) return null;
+    return Math.max(0, expiresAt - now);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Drops the stored session and tells the interface to show the sign-in screen.
+ * Called both when the countdown reaches zero and when the server answers 401,
+ * so a console tab left open can never keep working past its session.
+ */
+export function endAdminSession() {
+  setAdminToken(null);
+  try {
+    localStorage.removeItem(EXPIRY_KEY);
+  } catch {
+    // Nothing to clean up if storage is unavailable.
+  }
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event(SESSION_ENDED_EVENT));
+  }
+}
+
+export const sessionEndedEvent = SESSION_ENDED_EVENT;
+
+function storeAdminSession(token: string, expiresAt: string | null) {
+  setAdminToken(token);
+  try {
+    if (expiresAt) localStorage.setItem(EXPIRY_KEY, expiresAt);
+    else localStorage.removeItem(EXPIRY_KEY);
+  } catch {
+    // A blocked storage API only costs the user a fresh sign-in next time.
+  }
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const token = getAdminToken();
   let response: Response;
@@ -105,6 +165,9 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   }
   const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
   if (!response.ok) {
+    // A rejected session has to end locally too, otherwise the console keeps
+    // rendering its last known data until the operator notices it is stale.
+    if (response.status === 401 && token) endAdminSession();
     throw new AdminApiError(
       response.status,
       String(payload.error ?? 'request_failed'),
@@ -127,15 +190,15 @@ function collectionOf(key: string) {
 
 export const adminApi = {
   async signIn(email: string, password: string) {
-    const result = await post<{ token: string; user: AdminUser }>('session', { email, password });
-    setAdminToken(result.token);
+    const result = await post<{ token: string; expiresAt?: string; user: AdminUser }>('session', { email, password });
+    storeAdminSession(result.token, result.expiresAt ?? null);
     return result.user;
   },
   async signOut() {
     try {
       await request<{ message: string }>('DELETE', 'session');
     } finally {
-      setAdminToken(null);
+      endAdminSession();
     }
   },
   me: () => get<{ user: AdminUser }>('me').then((result) => result.user),
@@ -163,6 +226,31 @@ export const adminApi = {
   deleteUser: (id: string) => remove<{ message: string }>(`users/${encodeURIComponent(id)}`),
   changePassword: (id: string, currentPassword: string, newPassword: string) =>
     post<{ message: string }>(`users/${encodeURIComponent(id)}/password`, { currentPassword, newPassword }),
+  /**
+   * Sets a password without asking for the current one. The account holder
+   * either cannot remember it or is locked out of the account that would let
+   * them change it, which is the only reason this route exists.
+   */
+  recoverPassword: (id: string, newPassword: string) =>
+    post<{ message: string }>(`users/${encodeURIComponent(id)}/recover`, { newPassword }),
+  /**
+   * Puts every console account on one password. The demo state is only
+   * recoverable this way, and it signs the caller out along with everyone else.
+   */
+  recoverAllPasswords: (newPassword: string) => post<{ message: string }>('users/recover-all', { newPassword }),
+
+  /**
+   * The forgot-password pair. Both are reachable without a session, because the
+   * person using them has none.
+   */
+  requestPasswordReset: (email: string) => post<{ message: string }>('password-reset', { email }),
+  confirmPasswordReset: (token: string, newPassword: string) =>
+    post<{ message: string }>('password-reset/confirm', { token, newPassword }),
+  /**
+   * There is no mail server, so the reset message is read here instead. This is
+   * how a locked-out administrator gets their link.
+   */
+  resetMessages: () => get<{ messages: AdminResetMessage[] }>('password-reset/messages').then((result) => result.messages),
 
   records: <T>(key: string) => get<{ records: T[] }>(collectionOf(key)).then((result) => result.records),
   createRecord: <T>(key: string, record: unknown) => post<{ record: T; message: string }>(collectionOf(key), record),
