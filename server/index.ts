@@ -5,6 +5,8 @@ import { database } from '../src/server/database.js';
 import { checkDatabaseHealth } from '../src/server/health.js';
 import { assertLocalRuntimeUsesLocalDatabase, resolveRuntimeDatabase } from '../src/server/config.js';
 import { createApiRouter } from '../src/server/router.js';
+import { startOwnerPasswordRotation } from '../src/server/admin/owner-password.js';
+import { mailConfigFromEnv, startMailDelivery } from '../src/server/mailer.js';
 
 assertLocalRuntimeUsesLocalDatabase(resolveRuntimeDatabase());
 
@@ -84,3 +86,32 @@ const port = Number(process.env.PORT ?? 3001);
 app.listen(port, '0.0.0.0', () => {
   console.log(`Glow & Grace API listening on port ${port}`);
 });
+
+/**
+ * The owner account's password is generated on a schedule rather than chosen,
+ * because nobody sits down to set it. Started after the listener so a database
+ * that is still coming up cannot delay the port from opening; the rotation logs
+ * its own failures and tries again the next day.
+ */
+startOwnerPasswordRotation(database);
+
+/**
+ * Carries any owner credential that is still waiting in the outbox into the
+ * mailbox it was addressed to.
+ *
+ * A rotation writes the message and then tries to send it, so this normally has
+ * nothing to do. It is here for the case that matters: a transport that was down
+ * when the password was generated. That row is the only copy of a working
+ * password, so it stays queued until a send actually succeeds. Without SMTP
+ * settings the pass does nothing and the outbox keeps being the record, which is
+ * what a local checkout and a preview deployment rely on.
+ */
+startMailDelivery(database);
+
+// Said once at boot, because a deployment that believes it is sending owner
+// credentials and is not is the kind of mistake that is only discovered a week
+// later, when a password nobody received stops working.
+const mail = mailConfigFromEnv();
+console.log(mail
+  ? `Owner credentials will be emailed through ${mail.host}:${mail.port} as ${mail.from}.`
+  : 'No SMTP settings found, so owner credentials stay in the outbox instead of being emailed. Set SMTP_HOST, SMTP_USER and SMTP_PASSWORD to send them.');

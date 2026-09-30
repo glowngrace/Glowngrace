@@ -133,7 +133,7 @@ describe('admin console against a database that predates the console migrations'
       const result = await createAdminHandlers(database).handle({
         method: 'POST',
         segments: ['session'],
-        body: { email: 'admin@glowngrace.in', password: 'demo123' },
+        body: { email: 'admin@glowngrace.in', password: 'a-password-they-chose' },
       });
 
       expect(result.status).toBe(503);
@@ -161,7 +161,7 @@ describe('admin console against a database that predates the console migrations'
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const admin = createAdminHandlers(database);
     try {
-      const signIn = { method: 'POST', segments: ['session'], body: { email: 'admin@glowngrace.in', password: 'demo123' } };
+      const signIn = { method: 'POST', segments: ['session'], body: { email: 'admin@glowngrace.in', password: 'a-password-they-chose' } };
       expect((await admin.handle(signIn)).status).toBe(503);
 
       migrated = true;

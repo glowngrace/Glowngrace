@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { consoleAccount, signInWithStubbedConsole } from './support/accounts';
 
 /**
  * Regression coverage for the three bugs fixed on this branch:
@@ -19,37 +20,7 @@ const storePage = {
   content: '#000000',
 };
 
-const e2eAdmin = {
-  id: 'e2e-admin',
-  name: 'Glow & Grace Admin',
-  email: 'admin@glowngrace.in',
-  role: 'Store Administrator',
-  avatar: '',
-  status: 'Active',
-  createdAt: '2026-01-01',
-};
-
-/**
- * Issues a console session without contacting the API.
- *
- * Playwright checks the most recently registered route first, so registration
- * order below is what gives each stub the right precedence: the catch-all is
- * registered first, then the session, then anything a test supplies.
- */
-async function stubAdminSession(page: import('@playwright/test').Page) {
-  await page.route('**/api/admin/session', async (route) => {
-    if (route.request().method() === 'DELETE') {
-      return route.fulfill({ json: { message: 'Signed out of the console.' } });
-    }
-    return route.fulfill({
-      json: {
-        token: 'e2e-session-token',
-        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
-        user: e2eAdmin,
-      },
-    });
-  });
-}
+const e2eAdmin = consoleAccount;
 
 /**
  * Every read the console store loads on mount. Without these the store's single
@@ -95,12 +66,8 @@ async function stubAdminReads(page: import('@playwright/test').Page) {
  */
 async function signInAsAdmin(page: import('@playwright/test').Page, extra?: () => Promise<unknown>) {
   await stubAdminReads(page);
-  await stubAdminSession(page);
   await extra?.();
-  await page.goto('/login');
-  await page.getByText('Explore a demo account').click();
-  await page.getByRole('button', { name: /Administrator Platform overview/i }).click();
-  await page.getByRole('button', { name: 'Sign in to your account' }).click();
+  await signInWithStubbedConsole(page);
 }
 
 /**

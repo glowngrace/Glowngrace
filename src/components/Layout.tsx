@@ -4,7 +4,8 @@ import { CartDrawer } from './Cart';
 import { useCart } from './CartContext';
 import { subscribeToNewsletter } from '../lib/api';
 import { useStorefrontPages } from './StorefrontPagesContext';
-import { accountChangedEvent, getDemoAccount, signOutDemo, type DemoAccount } from '../auth/demo-auth';
+import { adminApi, getSignedInAccount, sessionEndedEvent, type SignedInAccount } from '../lib/admin-api';
+import { destinationForRole, isConsoleRole } from '../auth/roles';
 
 const navigation = [
   { label: 'Home', to: '/' },
@@ -19,7 +20,7 @@ const navigation = [
 export function Header() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
-  const [account, setAccount] = useState<DemoAccount | null>(getDemoAccount);
+  const [account, setAccount] = useState<SignedInAccount | null>(getSignedInAccount);
   const { count, open } = useCart();
   const { isVisible, pages } = useStorefrontPages();
   const navigate = useNavigate();
@@ -35,25 +36,25 @@ export function Header() {
     return (path: string) => byPath.get(path) ?? null;
   }, [pages]);
 
-  function logout() {
-    signOutDemo();
+  async function logout() {
+    // The server session goes first, so a closed tab cannot leave a live token
+    // behind. endAdminSession clears the cached account in either case.
+    await adminApi.signOut();
+    setAccount(null);
     setMenuOpen(false);
     setProfileMenuOpen(false);
     navigate('/');
   }
 
-  const profileImage = account?.role === 'candidate'
-    ? '/images/partner2.jpg'
-    : account?.role === 'partner'
-      ? '/images/partner1.jpg'
-      : '/images/logo_mark.png';
+  const profileImage = account?.avatar
+    || (account && !isConsoleRole(account.role) ? '/images/partner1.jpg' : '/images/logo_mark.png');
 
   useEffect(() => {
     function syncAccount() {
-      setAccount(getDemoAccount());
+      setAccount(getSignedInAccount());
     }
-    window.addEventListener(accountChangedEvent, syncAccount);
-    return () => window.removeEventListener(accountChangedEvent, syncAccount);
+    window.addEventListener(sessionEndedEvent, syncAccount);
+    return () => window.removeEventListener(sessionEndedEvent, syncAccount);
   }, []);
 
   useEffect(() => {
@@ -120,20 +121,20 @@ export function Header() {
                 onClick={() => setProfileMenuOpen((open) => !open)}
               >
                 <img src={profileImage} alt="" />
-                <span><strong>{account.name}</strong><small><i />Signed in · {account.label}</small></span>
-                <span className="profile-menu-chevron" aria-hidden="true">⌄</span>
-              </button>
-              {profileMenuOpen && (
-                <div className="profile-dropdown" id="header-profile-menu" aria-label="Profile menu">
-                  <div className="profile-dropdown-account">
-                    <img src={profileImage} alt="" />
-                    <span><strong>{account.name}</strong><small>{account.email}</small></span>
-                  </div>
-                  <p className="profile-dropdown-status"><i />Signed in · {account.label}</p>
-                  <Link to={account.destination} onClick={() => setProfileMenuOpen(false)}>Go to dashboard</Link>
-                  <button type="button" onClick={logout}>Sign out</button>
-                </div>
-              )}
+                    <span><strong>{account.name}</strong><small><i />Signed in · {account.role}</small></span>
+                    <span className="profile-menu-chevron" aria-hidden="true">⌄</span>
+                  </button>
+                  {profileMenuOpen && (
+                    <div className="profile-dropdown" id="header-profile-menu" aria-label="Profile menu">
+                      <div className="profile-dropdown-account">
+                        <img src={profileImage} alt="" />
+                        <span><strong>{account.name}</strong><small>{account.email}</small></span>
+                      </div>
+                      <p className="profile-dropdown-status"><i />Signed in · {account.role}</p>
+                      <Link to={destinationForRole(account.role)} onClick={() => setProfileMenuOpen(false)}>Go to my space</Link>
+                      <button type="button" onClick={logout}>Sign out</button>
+                    </div>
+                  )}
             </div>
           ) : <Link className="account-link" to="/login">Sign in</Link>}
           <button className="bag-button" type="button" onClick={open} aria-label={`Open shopping bag, ${count} items`}>

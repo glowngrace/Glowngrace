@@ -5,7 +5,6 @@ import {
 } from 'react';
 import { Spinner } from '../../components/Loader';
 import { AdminApiError, type AdminUser, type StoreSettings } from '../../lib/admin-api';
-import { demoPassword as samplePassword } from '../../lib/demo-credentials';
 import { useAdminStore } from './AdminStore';
 import { Avatar, IconButton, PageHead, Panel, PanelHead, Toggle } from './AdminUi';
 import { BulkUpload } from './BulkUpload';
@@ -263,7 +262,9 @@ export function SettingsPage({ onNotice }: { onNotice: (message: string) => void
 
   const busy = pending.kind !== 'none';
   const roleOptions = roles.length > 0 ? roles : ['Store Administrator'];
-  const removable = users.filter((member) => member.role !== 'Store Administrator' && member.id !== account?.id);
+  // The owner account is the way back into a deployment, so it is not offered
+  // for removal or a role change the way the other protected account is not.
+  const removable = users.filter((member) => member.role !== 'Store Administrator' && member.role !== 'Super Admin' && member.id !== account?.id);
   const hiddenPages = pages.filter((page) => !page.visible);
 
   return (
@@ -466,7 +467,7 @@ export function SettingsPage({ onNotice }: { onNotice: (message: string) => void
                   Sets a new password for {users.find((member) => member.id === recoverFor)?.name ?? 'this account'} without asking
                   for the current one, and signs their other sessions out. Use this when they cannot get in at all.
                 </p>
-                <Field name="recoveredPassword" label="New password" error={passwordErrors.newPassword} hint={`At least 8 characters, or the sample password ${samplePassword}.`}>
+                <Field name="recoveredPassword" label="New password" error={passwordErrors.newPassword} hint="At least 8 characters.">
                   <input type="password" name="recoveredPassword" required minLength={8} autoComplete="new-password" disabled={busy} aria-invalid={passwordErrors.newPassword ? true : undefined} />
                 </Field>
                 <div className="admin-form-actions">
@@ -638,8 +639,8 @@ export function SettingsPage({ onNotice }: { onNotice: (message: string) => void
 
             <PanelHead title="Reset console passwords" sub="The way back in when nobody can sign in" />
             <p className="admin-muted">
-              Sets one password on all {users.length} console accounts and signs everyone out, including you. Use{' '}
-              <code>{samplePassword}</code> to put the sample state back.
+              Sets one password on all {users.length} console accounts and signs everyone out, including you.
+              Use it when an import or a bulk edit has left nobody able to sign in.
             </p>
             <form
               className="admin-password-form"
@@ -662,7 +663,7 @@ export function SettingsPage({ onNotice }: { onNotice: (message: string) => void
                 }
               }}
             >
-              <Field name="everyPassword" label="Password for every account" error={passwordErrors.newPassword} hint={`At least 8 characters, or the sample password ${samplePassword}.`}>
+              <Field name="everyPassword" label="Password for every account" error={passwordErrors.newPassword} hint="At least 8 characters.">
                 <input type="password" name="everyPassword" required minLength={8} autoComplete="new-password" disabled={busy} aria-invalid={passwordErrors.newPassword ? true : undefined} />
               </Field>
               <div className="admin-form-actions">

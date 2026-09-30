@@ -8,7 +8,10 @@ import {
   type Collection,
   type Row,
 } from './admin/collections.js';
-import { hashPassword, newSessionToken, newResetToken, passwordPolicy, recoverablePasswordError, resetTokenExpiry, resetTokenLookup, sessionExpiry, verifyPassword, demoPassword, demoPasswordHash, hashResetToken } from './admin/passwords.js';
+import { hashPassword, generateStrongPassword, newSessionToken, newResetToken, passwordPolicy, removedDemoPassword, resetTokenExpiry, resetTokenLookup, sessionExpiry, verifyPassword, hashResetToken } from './admin/passwords.js';
+import { consoleRoles, signupRoles, superAdminEmail, superAdminRole } from '../auth/roles.js';
+import { ownerCredentialsMessage } from './admin/owner-password.js';
+import { tryDeliverPendingMail } from './mailer.js';
 import { datasetCountSql, mapDatasetRowCounts } from './admin/datasets.js';
 import { normalizeStoreSettings, validateStoreSettings, type StoreSettings } from './admin/settings.js';
 import { isMissingSchema, schemaNotMigrated } from './schema.js';
@@ -36,14 +39,20 @@ export type AdminRequest = {
 
 export type AdminResult = { status: number; body: Record<string, unknown> };
 
-export const adminRoles = [
-  'Store Administrator',
-  'Store Manager',
-  'Inventory Manager',
-  'Partnerships Lead',
-  'Content & Reviews',
-  'Placements Coordinator',
-] as const;
+export const adminRoles = consoleRoles;
+
+/**
+ * The roles the public registration form offers.
+ *
+ * Portal roles only, and that is the security boundary rather than a detail of
+ * the form: a back-office role is granted from the console. A registration is
+ * written as Pending and cannot sign in, so even an approved request is a
+ * deliberate act by somebody who can already see the team list.
+ */
+export { signupRoles };
+
+/** The one account whose password is generated rather than chosen. */
+export const ownerAccount = { email: superAdminEmail, role: superAdminRole, name: 'Glow & Grace Super Admin' } as const;
 
 const orderStatusFlow = ['Placed', 'Processing', 'Packed', 'Shipped', 'Delivered'] as const;
 const orderStatuses = ['Placed', 'Processing', 'Packed', 'Shipped', 'Delivered', 'Returned', 'Cancelled'] as const;
@@ -65,17 +74,13 @@ const password = z.string().min(passwordPolicy.minLength, `Use at least ${passwo
   .max(passwordPolicy.maxLength, `Use at most ${passwordPolicy.maxLength} characters.`);
 
 /**
- * A password for a recovery action rather than for a form.
+ * Recovery holds a password to exactly the same standard as every other form.
  *
- * Same limits, except the published demo credential is also accepted, because
- * restoring the demo state is the reason recovery exists. See
- * recoverablePasswordError.
+ * It used to be allowed to skip the minimum length so the published sample
+ * credential could be put back. With no demo accounts there is no such
+ * credential, so the ordinary policy is the whole rule.
  */
-const recoveryPassword = z.string()
-  .max(passwordPolicy.maxLength, `Use at most ${passwordPolicy.maxLength} characters.`)
-  .refine((value) => recoverablePasswordError(value) === null, {
-    message: `Use at least ${passwordPolicy.minLength} characters, or the sample password ${demoPassword}.`,
-  });
+const recoveryPassword = password;
 
 // Spreadsheets can only offer Yes/No, TRUE/FALSE or 1/0, so accept all of those
 // instead of letting z.coerce.boolean() turn the text "false" into true.
@@ -132,6 +137,23 @@ const passwordResetRequestSchema = z.object({ email: z.string().trim().email().m
 const passwordResetConfirmSchema = z.object({
   token: z.string().trim().min(32).max(200),
   newPassword: password,
+});
+
+/**
+ * The public registration form.
+ *
+ * Unauthenticated by necessity, so it is deliberately narrow: no status, no
+ * role beyond the published list, and nothing that would let a caller grant
+ * themselves access. `role` is checked against `signupRoles` rather than
+ * `adminRoles`, because a visitor asking for "Partner Salon" has to be
+ * describable here too.
+ */
+const signupSchema = z.object({
+  name: z.string().trim().min(2).max(120),
+  email: z.string().trim().email().max(254),
+  role: z.enum(signupRoles),
+  password,
+  phone: z.string().trim().max(24).optional().default(''),
 });
 
 const productUpdateSchema = z.object({
@@ -326,9 +348,45 @@ async function insertSeedRows(database: Database, table: string, columns: string
 }
 
 /**
+ * Replaces the published password on a row that is still sitting on it.
+ *
+ * The console used to be seeded with an administrator whose password was printed
+ * in the README, so an old database can still hold a row that anybody can sign
+ * in with. Deleting the row is not an option: this file is replayed on every
+ * migration run, and a row an operator has since given a real password must
+ * survive that. Comparing the stored hash against a hardcoded one does not work
+ * either, because every hash carries its own random salt, so such a comparison
+ * only ever matches the single row the value was copied from.
+ *
+ * So the question is answered where it can be: by verifying the password against
+ * the row's own salt. A row holding anything an operator chose does not verify, so
+ * it is left exactly as it is.
+ */
+async function retirePublishedAdminPassword(database: Database) {
+  const found = await database.query(
+    'SELECT id, password_hash FROM admin_users WHERE email = $1',
+    ['admin@glowngrace.in'],
+  );
+  const row = found.rows[0] as { id: string; password_hash: string } | undefined;
+  if (!row) return;
+  if (!await verifyPassword(removedDemoPassword, String(row.password_hash))) return;
+
+  // Replaced rather than deleted: the address is the console's stable entry
+  // point, and the replacement is a password nobody holds, which is the state the
+  // reset script exists to claim from.
+  await database.query(
+    'UPDATE admin_users SET password_hash = $1, updated_at = NOW() WHERE id = $2',
+    [await hashPassword(generateStrongPassword()), row.id],
+  );
+  // Any session opened with the published password is worthless now.
+  await database.query('DELETE FROM admin_sessions WHERE user_id = $1', [row.id]);
+}
+
+/**
  * Brings a freshly migrated database up to the console's starting point: the
- * storefront page list, the preview collections and the demo administrator.
- * Running it twice is a no-op, so it doubles as the "reset demo data" replay.
+ * storefront page list, the preview collections and the one bootstrap
+ * administrator. Running it twice is a no-op, so it doubles as the
+ * "reset demo data" replay.
  */
 export async function seedAdminData(database: Database) {
   await insertSeedRows(
@@ -373,8 +431,40 @@ export async function seedAdminData(database: Database) {
     `INSERT INTO admin_users (id, name, email, role, password_hash, avatar, status)
      VALUES ('00000000-0000-4000-8000-000000000001', 'Glow & Grace Admin', 'admin@glowngrace.in', 'Store Administrator', $1, '/images/partner1.jpg', 'Active')
      ON CONFLICT (email) DO NOTHING`,
-    [demoPasswordHash],
+    // A random secret nobody holds, not a published one. The address exists so
+    // the console has a stable owner to be opened with, but the only way in is
+    // to set a real password from the host:
+    //   npx tsx scripts/reset-admin-password.ts --email admin@glowngrace.in
+    [await hashPassword(generateStrongPassword())],
   );
+  await retirePublishedAdminPassword(database);
+  // The owner account, which is rotated on a schedule rather than ever being
+  // chosen by hand. `password_rotated_at` is stamped here so the first rotation
+  // is a week after the account appears, not a second after the server boots.
+  //
+  // The first password is delivered the moment the account is created, because an
+  // account nobody has the password for is not a way in: a hash that was never
+  // written down anywhere is the same as no account at all. The outbox row is
+  // only written when the insert actually created the row, so a boot that finds
+  // the account already there does not mail a password that was never stored.
+  const ownerPassword = generateStrongPassword();
+  const created = await database.query(
+    `INSERT INTO admin_users (id, name, email, role, password_hash, avatar, status, password_rotated_at)
+     VALUES ('00000000-0000-4000-8000-0000000000f1', $1, $2, $3, $4, '/images/partner1.jpg', 'Active', NOW())
+     ON CONFLICT (email) DO NOTHING`,
+    [ownerAccount.name, ownerAccount.email, ownerAccount.role, await hashPassword(ownerPassword)],
+  );
+  if (created.rowCount) {
+    const message = ownerCredentialsMessage({ password: ownerPassword, role: ownerAccount.role, now: new Date() });
+    await database.query(
+      `INSERT INTO email_outbox (kind, recipient, subject, body)
+       VALUES ('owner-credentials', $1, $2, $3)`,
+      [ownerAccount.email, message.subject, message.body],
+    );
+    // Sent straight away, because this password is generated once and its hash is
+    // already in place. The row stays in the outbox either way.
+    await tryDeliverPendingMail(database);
+  }
 }
 
 async function resetDataset(database: Database, dataset: DemoDatasetKey) {
@@ -406,6 +496,17 @@ export function createAdminHandlers(database: Database) {
     });
     return seeded;
   };
+
+  /**
+   * Whether an id is the owner account.
+   *
+   * The address is the identity, not the id, so this survives a row being
+   * recreated and it cannot be fooled by a client that made up an id.
+   */
+  async function isOwnerAccount(id: string) {
+    const found = await database.query('SELECT 1 FROM admin_users WHERE id = $1 AND email = $2', [id, superAdminEmail]);
+    return found.rows.length > 0;
+  }
 
   async function currentUser(token?: string | null) {
     if (!token) return null;
@@ -710,6 +811,75 @@ export function createAdminHandlers(database: Database) {
   }
 
   /**
+   * The public registration form.
+   *
+   * The row is written as Pending, so the account exists but cannot sign in:
+   * `POST /session` and `currentUser` both require Active. Nothing here decides
+   * whether the requested role is a sensible one either, because that judgement
+   * belongs to the administrator who reviews it in the console.
+   *
+   * The duplicate-email answer does name the clash, unlike the forgot-password
+   * route. That is the right trade on a registration form: the address is the
+   * visitor's own, and telling them to sign in instead is more useful than a
+   * neutral message that leaves them stuck in a loop.
+   */
+  async function registerSignup(input: unknown): Promise<AdminResult> {
+    const parsed = signupSchema.safeParse(input);
+    if (!parsed.success) return fail(400, 'invalid_signup', 'Check the details below and try again.', { errors: fieldErrors(parsed.error) });
+    await ensureSeeded();
+    const email = parsed.data.email.toLowerCase();
+
+    const taken = await database.query('SELECT id FROM admin_users WHERE email = $1', [email]);
+    if (taken.rows[0]) {
+      return fail(409, 'duplicate_email', 'That email address already has an account. Sign in instead, or reset its password.');
+    }
+
+    let created;
+    try {
+      created = await database.query(
+        `INSERT INTO admin_users (name, email, role, password_hash, phone, status, source)
+         VALUES ($1, $2, $3, $4, NULLIF($5, ''), 'Pending', 'signup')
+         RETURNING ${userColumns}`,
+        [parsed.data.name, email, parsed.data.role, await hashPassword(parsed.data.password), parsed.data.phone],
+      );
+    } catch (error) {
+      // Two people can reach the form for the same address at the same time, so
+      // the check above is a courtesy and this is what actually holds the line.
+      if (isUniqueViolation(error)) {
+        return fail(409, 'duplicate_email', 'That email address already has an account. Sign in instead, or reset its password.');
+      }
+      throw error;
+    }
+
+    const account = mapUser(created.rows[0]);
+    await database.query(
+      `INSERT INTO email_outbox (kind, recipient, subject, body)
+       VALUES ('signup', $1, $2, $3)`,
+      [
+        text(account.email),
+        'Your Glow & Grace account is waiting for approval',
+        [
+          `Hello ${text(account.name)},`,
+          '',
+          `We have your request for the ${text(account.role)} role.`,
+          'An administrator reviews each request, and we will write again as soon as yours has been looked at.',
+          'You cannot sign in until then, and you do not need to do anything else now.',
+        ].join('\n'),
+      ],
+    );
+
+    return {
+      status: 201,
+      body: {
+        user: account,
+        // The one thing a visitor needs to know, and the reason they cannot sign
+        // in yet. It is deliberately not a session: the account is not Active.
+        message: 'Thanks. Your request is with our team, and an administrator will review it before you can sign in.',
+      },
+    };
+  }
+
+  /**
    * The reset messages the deployment would have sent.
    *
    * This is how a locked-out operator gets their link: there is no mail server,
@@ -735,7 +905,7 @@ export function createAdminHandlers(database: Database) {
    * Resets one account's password without asking for the current one.
    *
    * A signed-in administrator doing this for a colleague is the supported way
-   * back into an account whose password has drifted away from the demo value.
+   * back into an account whose password has drifted away.
    */
   async function recoverPassword(userId: string, newPassword: string, token: string | null): Promise<AdminResult> {
     const found = await database.query(`SELECT ${userColumns} FROM admin_users WHERE id = $1`, [userId]);
@@ -753,11 +923,9 @@ export function createAdminHandlers(database: Database) {
   /**
    * Puts every console account back on one password.
    *
-   * The demo state is only recoverable in bulk: the seeded accounts share a
-   * published password, so restoring them one at a time means signing in as
-   * each one first, which is impossible for the accounts that are locked out.
-   * Every session is dropped, including the caller's, because the password they
-   * just signed in with no longer exists.
+   * Useful after an import or a bulk edit, when nobody remembers what they were
+   * set to. Every session is dropped, including the caller's, because the
+   * password they just signed in with no longer exists.
    */
   async function recoverAllPasswords(newPassword: string): Promise<AdminResult> {
     const accounts = await database.query('SELECT id FROM admin_users');
@@ -897,6 +1065,15 @@ export function createAdminHandlers(database: Database) {
         return { status: 200, body: { message: 'Signed out of the console.' } };
       }
       return fail(405, 'method_not_allowed', 'Use POST to sign in and DELETE to sign out.');
+    }
+
+    // Registration is the one route a visitor with no account at all has to
+    // reach, so it is answered before the session check alongside the
+    // forgot-password pair. It writes a Pending row and mints no session, so it
+    // grants nothing: the account still cannot sign in.
+    if (resource === 'signup') {
+      if (method === 'POST') return registerSignup(request.body);
+      return fail(405, 'method_not_allowed', 'Use POST to register an account.');
     }
 
     // The forgot-password flow is the one console route an operator who cannot
@@ -1132,6 +1309,11 @@ export function createAdminHandlers(database: Database) {
         if (id === user.id && update.status !== undefined && update.status !== 'Active') {
           return fail(400, 'self_status', `You cannot set your own status to ${update.status}. Ask another administrator.`);
         }
+        // Moving the owner account to another role would take the deployment's way
+        // back in with it, so the rotation job is the only thing that changes it.
+        if (update.role !== undefined && update.role !== superAdminRole && await isOwnerAccount(id)) {
+          return fail(400, 'owner_protected', `The owner account keeps the ${superAdminRole} role.`);
+        }
         if (update.status !== undefined) columns.reviewed_at = new Date();
         if (update.status !== undefined) columns.reviewed_by = user.id;
         const names = Object.keys(columns);
@@ -1155,6 +1337,10 @@ export function createAdminHandlers(database: Database) {
       }
       if (id && method === 'DELETE') {
         if (id === user.id) return fail(400, 'self_delete', 'You cannot delete the account you are signed in with.');
+        // The owner account is the way back into a deployment whose passwords have
+        // all been rotated away, so it is not something a console session can
+        // remove. Recovery goes through the rotation schedule, not through here.
+        if (await isOwnerAccount(id)) return fail(400, 'owner_protected', 'The owner account cannot be deleted. Rotate its password instead.');
         const result = await database.query('DELETE FROM admin_users WHERE id = $1 RETURNING id', [id]);
         if (result.rows.length === 0) return fail(404, 'not_found', 'That team member no longer exists.');
         return { status: 200, body: { deleted: id, message: 'Team member removed.' } };

@@ -1,7 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { adminApi, AdminApiError } from '../lib/admin-api';
-import { demoPassword } from '../lib/demo-credentials';
 
 /**
  * Redeems a reset link.
@@ -73,8 +72,9 @@ export function ResetPasswordPage() {
           </form>
 
           <p className="login-footnote">Lost the link? <Link to="/login">Ask for another one</Link>.</p>
+          <p className="login-footnote">No account yet? <Link to="/signup">Create one</Link>.</p>
           <Link className="login-back-link" to="/">← Back to Glow &amp; Grace</Link>
-          <p className="demo-security-note">A reset link works once and expires after an hour. The sample accounts all use <code>{demoPassword}</code>.</p>
+          <p className="login-security-note">A reset link works once and expires after an hour. A registration that is still waiting for approval cannot sign in yet.</p>
         </div>
       </div>
     </section>
