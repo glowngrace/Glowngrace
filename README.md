@@ -1,6 +1,6 @@
 # Glow & Grace
 
-A responsive React storefront and beauty-career platform built to `Design/glow-and-grace-elegant 1.html`, with an administrator console built to `Design/glow-and-grace-admin.html`. The working app includes a product catalogue, category filters, product pages, a persistent bag and wishlist, sign-in and candidate/partner/admin demo portals, partner salons, career listings, contact requests, and newsletter signups. The typography uses the reference's Cormorant Garamond / Jost font pairing, 16 px base size, and matching heading and navigation scale.
+A responsive React storefront and beauty-career platform built to `Design/glow-and-grace-elegant 1.html`, with an administrator console built to `Design/glow-and-grace-admin.html`. The working app includes a product catalogue, category filters, product pages, a persistent bag and wishlist, server-backed sign-in with role-based candidate/partner/admin portals, public registration, partner salons, career listings, contact requests, and newsletter signups. The typography uses the reference's Cormorant Garamond / Jost font pairing, 16 px base size, and matching heading and navigation scale.
 
 ## Stack
 
@@ -66,11 +66,43 @@ That produces exactly the database a deployment had before the console migration
 
 Run `npm run db:mirror:up` again with a higher `--through` to apply the missing migrations to the running mirror; the API picks them up on its next request, with no restart.
 
-## Sign-in and portal previews
+## Accounts, roles, and the way in
 
-Choose **Sign in** in the header and open **Explore a demo account** to fill in one of the sample profiles. Each preview account uses the password `demo123`: `customer@glowngrace.in`, `candidate@glowngrace.in`, `partner@glowngrace.in`, or `admin@glowngrace.in`. The candidate and partner previews open dashboards with working in-page tabs; the administrator preview opens the admin console at `/admin`; the customer preview opens the shop. Saved wishlist items persist in the browser.
+There is no demo account any more. Authentication is the server's: passwords are scrypt-hashed, sessions are bearer tokens in `admin_sessions`, and every protected route checks the account's own role rather than the mere presence of a token. A `Customer` who signs in successfully still cannot walk into `/admin` with a valid session.
 
-These sample accounts and dashboards are front-end previews only. Their role selection is stored in local browser storage, without password hashing, server-side authorization, or a production authentication provider. Do not use these demo credentials or portal previews to protect real customer or business data; production authentication and server-side role authorization must be added before making protected portals available publicly.
+- **Registration is public and narrow.** `/signup` offers exactly three roles - `Customer`, `Candidate`, and `Partner Salon` - and the server rejects anything else, including every console role. A registration creates a `Pending` account with `source = 'signup'`, mints no session, and leaves a message in `email_outbox` so an administrator knows a request arrived. Nobody can sign in as a `Pending` account, and nobody can send a status in the request body: the caller does not choose one.
+- **Console roles** - `Super Admin`, `Store Administrator`, `Store Manager`, `Inventory Manager`, `Partnerships Lead`, `Content & Reviews`, `Placement Coordinator` - are granted from the console's Settings section, never by self-registration.
+- **Approval** happens in Settings, where a pending registration is promoted to `Active` with a role. Until then the account exists and cannot sign in.
+- **Forgotten passwords** use a hashed, single-use, expiring token. `POST /api/admin/password-reset` always answers the same way whether or not the address is known, so it cannot be used to discover who has an account. A console operator can also set any team member's password from Settings.
+- **Passwords** are 8-128 characters and there is no longer any `demo123` exception. The browser demo sign-in, `src/auth/demo-auth.ts`, and the published credentials were all removed.
+
+### The owner account
+
+`glownglancebiz@gmail.com` is a fixed `Super Admin` whose password nobody chooses: the system generates a 24-character password, stores only its hash, and mails the plaintext to that same address. This is the only way into a deployment that has lost every other credential.
+
+- The first password is written to `email_outbox` at the moment the account is created. The insert is guarded by its row count, so a later boot does not mail a password that was never stored.
+- `password_rotated_at` then drives a rotation every 7 days from `src/server/admin/owner-password.ts`. Each rotation replaces the hash, revokes every session the old password opened, and mails the new one. The schedule wakes daily and decides in SQL whether a rotation is due, so a clock skew or a restart cannot cause one on every request.
+- The owner row cannot be deleted or moved to another role, while its name can still be corrected. The rotation job, not the account row, is what changes the password.
+- "Mail" here means a row in `email_outbox`. `src/server/mailer.ts` sends the owner's message over SMTP and stamps `sent_at`, and the outbox stays the record either way. On a host where the outbox is not acceptable, set the first password directly instead: `npx tsx scripts/reset-admin-password.ts --email glownglancebiz@gmail.com`.
+
+### Sending the owner's password
+
+A rotation writes the message and then tries to send it in the same call, so the password is normally in the mailbox before the request returns. Because that row is the only copy of a working password, a send that fails is not allowed to break anything: the row stays queued, and a pass runs every 5 minutes from `server/index.ts` to try again. `sent_at` is what stops it being sent twice.
+
+SMTP is configured in `.env` (see `.env.example`):
+
+```
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=465
+SMTP_USER=postmaster@glowandgrace.in
+SMTP_PASSWORD=<a Gmail app password, not the account password>
+MAIL_FROM=postmaster@glowandgrace.in
+```
+
+- Port 465 implies implicit TLS; any other port negotiates STARTTLS. `SMTP_SECURE=true` forces implicit TLS elsewhere.
+- `MAIL_FROM` defaults to `SMTP_USER`, which is right for a dedicated sending mailbox. Use a real address the provider is allowed to send from, or the mail will be rejected.
+- The server says at boot whether it will send owner credentials or only queue them. A deployment that believes it is emailing a password and is not would otherwise be found out a week later, when a password nobody received stops working.
+- Delivery is restricted to `kind = 'owner-credentials'` addressed to `glownglancebiz@gmail.com`. No other message in the outbox is ever sent, and no other address is ever mailed, whatever the row says. Everything else - signup notices and reset links - stays in the console inbox on purpose.
 
 ## Loading feedback
 
@@ -115,7 +147,7 @@ Bulk upload templates are generated in the browser by `src/lib/xlsx.ts` and down
 
 ## Administrator console
 
-`/admin` is a single-page console built to `Design/glow-and-grace-admin.html`: a dark grouped sidebar, a topbar with search and quick-create, and twelve sections — Dashboard, Orders, Products, Add product, Job vacancies, Post a vacancy, Candidates, Partner salons, Customers, Reviews, Add a review, and Settings. It shares the demo-auth `/login` route; there is no separate administrator login.
+`/admin` is a single-page console built to `Design/glow-and-grace-admin.html`: a dark grouped sidebar, a topbar with search and quick-create, and twelve sections — Dashboard, Orders, Products, Add product, Job vacancies, Post a vacancy, Candidates, Partner salons, Customers, Reviews, Add a review, and Settings. It shares the storefront `/login` route; there is no separate administrator login.
 
 - The sidebar collapses to an off-canvas drawer below 1000 px, opened with the **Toggle navigation** button in the topbar.
 - Search, status filter chips, table sorting-free row actions, detail modals, CSV export, toasts, and the settings forms are all client-side.
@@ -260,9 +292,15 @@ Playwright runs Chromium in desktop and mobile emulation. Install its browser on
 
 `e2e/regressions.spec.ts` covers the three regressions fixed in the loading, settings, and spreadsheet work described above: a held request must produce a visible and announced loader that then clears (including on failure), the Settings page must offer exactly three page switches and no structural pages, and the products template must download as a real ZIP archive whose button announces progress while the workbook is built. Every request in that file is stubbed, so the suite never touches the database.
 
+`e2e/ui-review.spec.ts` is the pass over the pages this branch touched, checked the way a person meets them. It walks `/signup`, `/login`, `/reset-password`, and `/admin` on desktop and mobile and asserts the things a component test cannot see: that the sign-up form offers exactly the three public roles and never mentions a console role, that a refused sign-up or a wrong password produces an announced message without revealing whether an account exists, that the console lock offers a route to the sign-up form, and that a weak password never reaches the server. The last check on each page is a layout audit - no horizontal overflow, no text clipped by its own box, no unlabelled field, no image without alternative text, exactly one `h1`, and a clean console. The screen-reader-only one-pixel pattern is excluded from the clipping check on purpose, since hiding a label from the eye is the point of it.
+
 The admin settings work is covered twice. `src/pages/admin/SettingsPage.test.tsx` runs twelve UI tests against a stubbed fetch: per-section saves, dotted-path field errors, a rejected save keeping the typed value, cleared number fields staying empty rather than becoming `0`, the `wrong_password` mapping, the focus-managed danger dialog, and the blocked-clipboard path. `e2e/admin-settings.spec.ts` repeats the critical ones in Chromium on desktop and mobile against a real signed-in session. Both are slower than the other suites because the page resolves thirteen requests per render; `src/test/setup.ts` raises `asyncUtilTimeout` and `vite.config.ts` raises `testTimeout` for that reason. The E2E file stubs `**/api/admin/**` and never touches the database, so the sign-in request must still reach the real API — register the catch-all route first and `route.continue()` for anything unstubbed, because Playwright matches the most recently registered route first.
 
-**The storefront specs expect the bundled sample catalogue.** `e2e/storefront.spec.ts` and `e2e/deployment.spec.ts` look for the shipped products by name (for example *Glow Ritual Vitamin C Face Serum*). They pass on a database that has never been stocked, because the API falls back to the bundled catalogue when `products` is empty. After `npm run db:sync` the local database holds the three production products instead, so those tests fail on product names that are no longer there. That is local data, not a code defect: run the sync when you need production data, and leave the products table empty when you are running the storefront suites.
+**The storefront specs pin the bundled sample catalogue.** `e2e/storefront.spec.ts` asserts on shipped product names (for example *Glow Ritual Vitamin C Face Serum*) because those are stable fixtures with known prices, and a test that reads its expectations out of whatever the database holds cannot assert anything. Those specs call `stubBundledCatalogue()` from `e2e/support/accounts.ts`, which answers `**/api/products` with `catalogueManaged: false`. That is the value the API really returns for a shop that has never been stocked, and it is the only setting under which `ProductCatalog` keeps the bundled products, so the stub documents the contract rather than faking around it.
+
+This matters because the alternative was a suite whose result depended on local data. `npm run db:sync` copies three production products into the local database, the API then answers `catalogueManaged: true`, and the browser correctly discards the bundled samples - every product-name assertion failed on data rather than on code. Pinning the catalogue means the same suite passes against a stocked database, an unstocked one, or none at all. `e2e/deployment.spec.ts` needs no stub because it runs against `npm run preview:dist`, whose API is stand-in JSON and never consults a database.
+
+Worth knowing why the fallback exists at all: the API never serves bundled rows. It returns an empty list and lets the browser decide, so a catalogue outage is indistinguishable from an unstocked shop, and a customer sees sample products rather than an empty grid.
 
 `src/server/admin.test.ts` covers the nested product route, because every console write depends on a path the deployment bug took offline and that route had no tests of its own: saving through `PATCH /products/:id`, the publish toggle, a reference that is not a whole number, a product that is no longer in the catalogue, and an unauthenticated request. The last two matter for triage: the handler answers `401` for a missing session and `404 not_found` for a missing product, so a platform `404` with an `x-vercel-error` header is a routing failure rather than data.
 

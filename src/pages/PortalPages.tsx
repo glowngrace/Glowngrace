@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { getDemoAccount, signOutDemo, type DemoRole } from '../auth/demo-auth';
+import { getSignedInAccount, adminApi, type SignedInAccount } from '../lib/admin-api';
+import { isConsoleRole, type PortalRole } from '../auth/roles';
 import { productImageUrl } from '../data/catalog';
 import { useProductCatalog } from '../components/ProductCatalogContext';
 import { AdminPortal as AdminConsole } from './AdminConsole';
@@ -30,14 +31,14 @@ function DataTable({ headers, rows }: { headers: string[]; rows: string[][] }) {
   );
 }
 
-function PortalContent({ role, tab }: { role: DemoRole; tab: string }) {
-  if (role === 'candidate') {
+function PortalContent({ role, tab }: { role: PortalRole; tab: string }) {
+  if (role === 'Candidate') {
     if (tab === 'saved') return <><PortalHeading eyebrow="For another day" title="Saved openings" copy="A short list of lovely possibilities worth coming back to." /><DataTable headers={['Role', 'Salon', 'Location', 'Salary', 'Status']} rows={ [['Makeup Artist', 'Glamour Studio', 'Gomti Nagar', '₹20k – ₹30k', 'Still open'], ['Hair Stylist', 'Style Hub Salon', 'Aliganj', '₹15k – ₹22k', 'New opening'], ['Nail Art Specialist', 'The Nail Bar', 'Indira Nagar', '₹16k – ₹24k', 'Still open']] } /></>;
     if (tab === 'training') return <><PortalHeading eyebrow="Keep growing" title="Training & certificates" copy="Your next skill can open another door." /><div className="portal-course-grid"><article><span>06 weeks · Completed</span><h3>Bridal makeup &amp; airbrush</h3><p>Hands-on certification with in-studio practical training.</p><button className="portal-inline-button" type="button">View certificate ↗</button></article><article><span>04 weeks · In progress</span><h3>Hair styling &amp; spa care</h3><p>Three sessions left in your hair and scalp-care track.</p><div className="portal-progress"><span style={{ width: '68%' }} /></div><small>68% complete</small></article><article><span>Coming up</span><h3>Advanced bridal techniques</h3><p>Explore the next workshop from our skills studio.</p><Link className="portal-inline-button" to="/contact?topic=Training%20courses">Ask about this course ↗</Link></article></div></>;
-    if (tab === 'profile') return <><PortalHeading eyebrow="A little about you" title="Personal details" copy="Keep your profile current so salons can get to know the real you." /><div className="portal-profile"><label>Full name<input defaultValue="Anjali Verma" /></label><label>Mobile number<input defaultValue="+91 98765 43210" /></label><label>Email address<input defaultValue="candidate@glowngrace.in" /></label><label>Experience<select defaultValue="3 years"><option>Fresher</option><option>1 year</option><option>3 years</option><option>5+ years</option></select></label><label className="portal-full-row">Your skills<input defaultValue="Bridal makeup, party makeup, skincare" /></label><button className="button button-dark" type="button">Save profile</button><span className="portal-profile-note">Your sample profile is for preview only.</span></div></>;
+    if (tab === 'profile') return <><PortalHeading eyebrow="A little about you" title="Personal details" copy="Keep your profile current so salons can get to know the real you." /><div className="portal-profile"><label>Full name<input defaultValue="Anjali Verma" /></label><label>Mobile number<input defaultValue="+91 98765 43210" /></label><label>Email address<input defaultValue="candidate@glowngrace.in" /></label><label>Experience<select defaultValue="3 years"><option>Fresher</option><option>1 year</option><option>3 years</option><option>5+ years</option></select></label><label className="portal-full-row">Your skills<input defaultValue="Bridal makeup, party makeup, skincare" /></label><button className="button button-dark" type="button">Save profile</button><span className="portal-profile-note">Salons see the details you save here.</span></div></>;
     return <><PortalHeading eyebrow="Your next chapter" title="My applications" copy="Every application is a step towards work worth celebrating." /><DataTable headers={['Role', 'Salon', 'Applied', 'Salary', 'Status']} rows={ [['Senior Beautician', 'Blush Beauty Lounge', '18 Sep 2026', '₹18k – ₹25k', 'Interview scheduled'], ['Makeup Artist', 'Glamour Studio', '15 Sep 2026', '₹20k – ₹30k', 'Application received'], ['Hair Stylist', 'Style Hub Salon', '10 Sep 2026', '₹15k – ₹22k', 'Shortlisted']] } /><div className="portal-callout"><span><strong>Two interviews coming up</strong><span>Blush Beauty Lounge · 29 September, 11:00 am</span></span><Link className="underlined-link" to="/careers">Browse openings <span>↗</span></Link></div></>;
   }
-  if (role === 'partner') {
+  if (role === 'Partner Salon') {
     if (tab === 'applicants') return <><PortalHeading eyebrow="People behind the applications" title="Applicant pipeline" copy="Meet the local talent who’d love to bring something special to your salon." /><DataTable headers={['Candidate', 'Applying for', 'Experience', 'Applied', 'Stage']} rows={ [['Anjali Verma', 'Senior Beautician', '3 years', '18 Sep 2026', 'Interview'], ['Meera Khan', 'Makeup Artist', '2 years', '16 Sep 2026', 'Shortlisted'], ['Riya Singh', 'Hair Stylist', 'Fresher', '15 Sep 2026', 'New applicant']] } /></>;
     if (tab === 'orders') return <><PortalHeading eyebrow="For your next restock" title="Wholesale orders" copy="Authentic favourites, delivered to your salon door." /><DataTable headers={['Order', 'Items', 'Date', 'Amount', 'Status']} rows={ [['GG-2041', '18 products', '21 Sep 2026', '₹12,480', 'Delivered'], ['GG-2022', '12 products', '08 Sep 2026', '₹8,920', 'Delivered'], ['GG-1987', '24 products', '29 Aug 2026', '₹18,200', 'Delivered']] } /><div className="portal-callout"><span><strong>Time for a little restock?</strong><span>Browse the beauty house edit and ask us about partner pricing.</span></span><Link className="underlined-link" to="/shop">Shop the collection <span>↗</span></Link></div></>;
     if (tab === 'salon') return <><PortalHeading eyebrow="Your parlour, your story" title="Salon details" copy="Help beauty lovers and talented professionals find you." /><div className="portal-profile"><label>Salon name<input defaultValue="Blush Beauty Lounge" /></label><label>Salon type<input defaultValue="Premium Unisex Salon" /></label><label>Locality<input defaultValue="Hazratganj, Lucknow" /></label><label>Established<input defaultValue="2016" /></label><label className="portal-full-row">Services offered<input defaultValue="Bridal, Hair spa, Facials, Keratin" /></label><button className="button button-dark" type="button">Save salon details</button><Link className="portal-profile-note" to="/contact?topic=Salon%20partnership">Need a hand? Contact the partner team.</Link></div></>;
@@ -49,53 +50,66 @@ function PortalHeading({ eyebrow, title, copy }: { eyebrow: string; title: strin
   return <div className="portal-content-heading"><span className="eyebrow">{eyebrow}</span><h2>{title}</h2><p>{copy}</p></div>;
 }
 
-function PortalShell({ role, name, subheading, tabs, initialTab }: { role: DemoRole; name: string; subheading: string; tabs: PortalTab[]; initialTab: string }) {
+function PortalShell({ role, account, subheading, tabs, initialTab }: { role: PortalRole; account: SignedInAccount; subheading: string; tabs: PortalTab[]; initialTab: string }) {
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState(initialTab);
   const active = tabs.find((tab) => tab.id === activeTab) ?? tabs[0];
 
-  function logout() {
-    signOutDemo();
-    navigate('/');
+  async function logout() {
+    await adminApi.signOut();
+    navigate('/login');
   }
 
-  const account: { initials: string; image?: string; greeting: string } = role === 'candidate'
-    ? { initials: 'AV', image: '/images/partner2.jpg', greeting: name }
-    : role === 'partner'
-      ? { initials: 'BL', image: '/images/partner1.jpg', greeting: name }
-      : { initials: 'GG', greeting: 'Glow & Grace' };
+  const initials = account.name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase() ?? '').join('') || 'GG';
+  const profileImage = account.avatar || (role === 'Candidate' ? '/images/partner2.jpg' : '/images/partner1.jpg');
 
   return (
-    <section className={`portal-page portal-${role}`}>
+    <section className={`portal-page portal-${role === 'Partner Salon' ? 'partner' : 'candidate'}`}>
       <aside className="portal-sidebar">
         <Link className="brand portal-brand" to="/"><img src="/images/logo_mark.png" alt="" /><span><strong>Glow <i>&</i> Grace</strong><small>BEAUTY · CAREERS · COMMUNITY</small></span></Link>
-        {role !== 'admin' && <div className="portal-user">{account.image ? <img src={account.image} alt="" /> : <span className="portal-user-initials" aria-hidden="true">{account.initials}</span>}<span><strong>{account.greeting}</strong><small>{subheading}</small></span></div>}
+        <div className="portal-user"><img src={profileImage} alt="" /><span><strong>{account.name}</strong><small>{subheading}</small></span></div>
         <nav aria-label="Dashboard sections" className="portal-nav">{tabs.map((tab) => <button type="button" key={tab.id} aria-current={activeTab === tab.id ? 'page' : undefined} className={activeTab === tab.id ? 'portal-nav-button active' : 'portal-nav-button'} onClick={() => setActiveTab(tab.id)}><span aria-hidden="true">✦</span>{tab.label}</button>)}</nav>
         <div className="portal-sidebar-bottom"><Link to="/">← Back to the beauty house</Link><button type="button" onClick={logout}>Sign out</button></div>
       </aside>
       <div className="portal-workspace">
-        <header className="portal-topbar"><span className="portal-breadcrumb">Your space <span>/</span> {active.label}</span><div><span className="demo-preview-label">DEMO PREVIEW</span><span className="portal-avatar">{account.initials}</span></div></header>
+        <header className="portal-topbar"><span className="portal-breadcrumb">Your space <span>/</span> {active.label}</span><div><span className="portal-avatar">{initials}</span></div></header>
         <div className="portal-content"><PortalContent role={role} tab={activeTab} /></div>
       </div>
     </section>
   );
 }
 
-function ProtectedPortal({ role, name, subheading, tabs, initialTab }: { role: DemoRole; name: string; subheading: string; tabs: PortalTab[]; initialTab: string }) {
+/**
+ * Gates a portal on the signed-in account's own role.
+ *
+ * A console role is let through as well: the back office has to be able to look
+ * at a partner's or a candidate's page to answer a question about it.
+ */
+function ProtectedPortal({ role, subheading, tabs, initialTab }: { role: PortalRole; subheading: string; tabs: PortalTab[]; initialTab: string }) {
   const navigate = useNavigate();
-  const account = getDemoAccount();
-  if (account?.role !== role && account?.role !== 'admin') {
-    return <section className="portal-locked"><span className="eyebrow">Your space is waiting</span><h1>Sign in to continue.</h1><p>Sign in with the matching demo account to see this dashboard.</p><button className="button button-dark" type="button" onClick={() => navigate('/login')}>Go to sign in</button></section>;
+  const account = getSignedInAccount();
+  if (!account || (account.role !== role && !isConsoleRole(account.role))) {
+    return (
+      <section className="portal-locked">
+        <span className="eyebrow">Your space is waiting</span>
+        <h1>Sign in to continue.</h1>
+        <p>Sign in with the account registered for this space. If you do not have one yet, you can request it.</p>
+        <div className="portal-locked-actions">
+          <button className="button button-dark" type="button" onClick={() => navigate('/login')}>Go to sign in</button>
+          <Link className="button button-light" to="/signup">Request an account</Link>
+        </div>
+      </section>
+    );
   }
-  return <PortalShell role={role} name={name} subheading={subheading} tabs={tabs} initialTab={initialTab} />;
+  return <PortalShell role={role} account={account} subheading={subheading} tabs={tabs} initialTab={initialTab} />;
 }
 
 export function CandidatePortal() {
-  return <ProtectedPortal role="candidate" name="Anjali Verma" subheading="Senior Beautician · Lucknow" tabs={candidateTabs} initialTab="applications" />;
+  return <ProtectedPortal role="Candidate" subheading="Candidate · Lucknow" tabs={candidateTabs} initialTab="applications" />;
 }
 
 export function PartnerPortal() {
-  return <ProtectedPortal role="partner" name="Blush Beauty Lounge" subheading="Premium salon · Hazratganj" tabs={partnerTabs} initialTab="vacancies" />;
+  return <ProtectedPortal role="Partner Salon" subheading="Partner salon" tabs={partnerTabs} initialTab="vacancies" />;
 }
 
 export function AdminPortal() {

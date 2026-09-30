@@ -140,8 +140,10 @@ async function openSettings(page: Page) {
   });
 
   await page.goto('/login');
-  await page.getByText('Explore a demo account').click();
-  await page.getByRole('button', { name: /Administrator Platform overview/i }).click();
+  // There is no demo picker to lean on any more, so this signs in the way an
+  // operator does: an address and a password, with the session route answering.
+  await page.locator('#login-email').fill(adminUser.email);
+  await page.locator('#login-password').fill('a-password-the-admin-chose');
   await page.getByRole('button', { name: 'Sign in to your account' }).click();
   await expect(page.getByTestId('admin-loader')).toHaveCount(0, { timeout: 20_000 });
   if (test.info().project.name === 'mobile-chromium') {

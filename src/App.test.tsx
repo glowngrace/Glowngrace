@@ -9,11 +9,30 @@ import { ProductGrid } from './components/ProductCard';
 import { ProductCatalogProvider } from './components/ProductCatalog';
 import { PageGate, StorefrontPagesProvider } from './components/StorefrontPages';
 import { products } from './data/catalog';
-import { signInDemo } from './auth/demo-auth';
 import { AdminPortal } from './pages/PortalPages';
 import { LoginPage } from './pages/AuthPage';
+import { SignupPage } from './pages/SignupPage';
 import { ResetPasswordPage } from './pages/ResetPasswordPage';
 import { ProductPage } from './pages/Pages';
+
+const consoleUser = {
+  id: '1', name: 'Gauri Khanna', email: 'admin@glowngrace.in', role: 'Store Administrator',
+  avatar: '', status: 'Active', phone: '', source: 'console', reviewedAt: null, createdAt: '2026-01-01',
+};
+
+/**
+ * Puts a signed-in console session in localStorage.
+ *
+ * The interface reads the account out of the session store rather than asking
+ * the server again, so a test that wants the console to open has to seed the
+ * same pair of keys a real sign-in writes.
+ */
+function signInAsAccount(account: { name: string; email: string; role: string; avatar?: string } = consoleUser) {
+  localStorage.setItem('glow-grace-admin-token', 'test-token');
+  localStorage.setItem('glow-grace-account', JSON.stringify({
+    name: account.name, email: account.email, role: account.role, avatar: account.avatar ?? '',
+  }));
+}
 
 function FavoriteCardHarness() {
   const [favorites, setFavorites] = useState<number[]>([]);
@@ -29,13 +48,13 @@ function FavoriteCardHarness() {
 }
 
 function stubAdminApi() {
-  const user = { id: '1', name: 'Gauri Khanna', email: 'admin@glowngrace.in', role: 'admin', avatar: '', status: 'Active', createdAt: '2026-01-01' };
+  const user = consoleUser;
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
     const payload = url.endsWith('/admin/session') ? { user }
       : url.endsWith('/admin/settings') ? { settings: { profile: { storeName: 'Glow & Grace', tagline: '', email: '', phone: '', address: '' }, delivery: { freeAbove: 0, deliveryFee: 0, gst: 0, returns: 0 }, notifications: {} } }
         : url.endsWith('/admin/summary') ? { summary: { orders: 0, products: 0, jobs: 0, candidates: 0, partners: 0, customers: 0, reviews: 0, pages: [], hiddenDatasets: [] } }
-          : url.endsWith('/admin/users') ? { users: [user], roles: ['admin'] }
+          : url.endsWith('/admin/users') ? { users: [user], roles: ['Store Administrator'] }
             : url.endsWith('/admin/pages') ? { pages: [] }
               : url.endsWith('/admin/demo-data') ? { datasets: [] }
                 : url.endsWith('/admin/orders') ? { orders: [] }
@@ -43,7 +62,7 @@ function stubAdminApi() {
     return { ok: true, json: async () => payload } as Response;
   });
   vi.stubGlobal('fetch', fetchMock);
-  localStorage.setItem('glow-grace-admin-token', 'test-token');
+  signInAsAccount();
   return fetchMock;
 }
 
@@ -58,14 +77,14 @@ describe('console sign-in and session lifetime', () => {
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/admin" element={<p>Console landing</p>} />
-        <Route path="/candidate" element={<p>Sample portal landing</p>} />
+        <Route path="/candidate" element={<p>Candidate portal landing</p>} />
         <Route path="/" element={<p>Storefront landing</p>} />
       </Routes>
     );
   }
 
-  it('signs an administrator in with their own password even when it is not the sample one', async () => {
-    const user = { id: '9', name: 'Kanchan Iyer', email: 'kanchan@glowngrace.in', role: 'Store Administrator', avatar: '', status: 'Active', createdAt: '2026-01-01' };
+  it('sends a console role to the console after a server sign-in', async () => {
+    const user = { ...consoleUser, id: '9', name: 'Kanchan Iyer', email: 'kanchan@glowngrace.in' };
     vi.stubGlobal('fetch', vi.fn(async () => ({
       ok: true,
       json: async () => ({ token: 'server-issued-token', expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(), user }),
@@ -81,20 +100,80 @@ describe('console sign-in and session lifetime', () => {
     await userEvent.type(screen.getByLabelText('Password'), 'a-password-the-admin-chose');
     await userEvent.click(screen.getByRole('button', { name: 'Sign in to your account' }));
 
-    // A real server sign-in is the authority. It must not then be second-guessed
-    // against the four sample accounts, which is what produced the misleading
-    // "did not match a demo account" error for anyone whose password is not
-    // the sample password.
     expect(await screen.findByText('Console landing')).toBeVisible();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(localStorage.getItem('glow-grace-admin-token')).toBe('server-issued-token');
+    // The account is cached with the token, so the header can name its owner on
+    // the first paint rather than waiting for a second request.
+    expect(JSON.parse(localStorage.getItem('glow-grace-account') ?? '{}')).toMatchObject({
+      email: 'kanchan@glowngrace.in', role: 'Store Administrator',
+    });
   });
 
-  it('falls back to the sample accounts when the address has no console account', async () => {
+  it('sends an approved portal role to its own space rather than the console', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        token: 'server-issued-token',
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+        user: { ...consoleUser, id: '4', name: 'Reha Qureshi', email: 'reha@example.com', role: 'Candidate' },
+      }),
+    }) as unknown as Response));
+
+    render(
+      <MemoryRouter initialEntries={['/login']}>
+        <LoginHarness />
+      </MemoryRouter>,
+    );
+
+    await userEvent.type(screen.getByLabelText('Email address'), 'reha@example.com');
+    await userEvent.type(screen.getByLabelText('Password'), 'a-password-they-chose');
+    await userEvent.click(screen.getByRole('button', { name: 'Sign in to your account' }));
+
+    expect(await screen.findByText('Candidate portal landing')).toBeVisible();
+  });
+
+  it('updates the storefront header for somebody signing in on the login page', async () => {
+    // The form is rendered inside the storefront header, so a sign-in that only
+    // wrote the session cache would leave the "Sign in" link on screen for an
+    // already signed-in customer.
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        token: 'server-issued-token',
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+        user: { ...consoleUser, id: '5', name: 'Ritika Srivastava', email: 'ritika@example.com', role: 'Customer' },
+      }),
+    }) as unknown as Response));
+
+    render(
+      <MemoryRouter initialEntries={['/login']}>
+        <CartProvider>
+          <Header />
+          <Routes>
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/shop" element={<p>Shop landing</p>} />
+          </Routes>
+        </CartProvider>
+      </MemoryRouter>,
+    );
+
+    expect(screen.getAllByRole('link', { name: 'Sign in' }).length).toBeGreaterThan(0);
+
+    await userEvent.type(screen.getByLabelText('Email address'), 'ritika@example.com');
+    await userEvent.type(screen.getByLabelText('Password'), 'a-password-they-chose');
+    await userEvent.click(screen.getByRole('button', { name: 'Sign in to your account' }));
+
+    expect(await screen.findByText('Shop landing')).toBeVisible();
+    await waitFor(() => expect(screen.queryByRole('link', { name: 'Sign in' })).not.toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'Profile menu for Ritika Srivastava' })).toBeVisible();
+  });
+
+  it('reports the server reason when the address does not match an account', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({
       ok: false,
       status: 401,
-      json: async () => ({ error: 'invalid_credentials', message: 'no console account' }),
+      json: async () => ({ error: 'invalid_credentials', message: 'That email address and password do not match a console account.' }),
     }) as unknown as Response));
 
     render(
@@ -104,12 +183,30 @@ describe('console sign-in and session lifetime', () => {
     );
 
     await userEvent.type(screen.getByLabelText('Email address'), 'candidate@glowngrace.in');
-    await userEvent.type(screen.getByLabelText('Password'), 'demo123');
+    await userEvent.type(screen.getByLabelText('Password'), 'a-password-nobody-has');
     await userEvent.click(screen.getByRole('button', { name: 'Sign in to your account' }));
 
-    // The portal sample accounts are not console accounts, so they still sign in.
-    expect(await screen.findByText('Sample portal landing')).toBeVisible();
-    expect(localStorage.getItem('glow-grace-demo-account')).toContain('candidate');
+    // The console is the only account store, so a refusal is a refusal. There is
+    // no longer a second set of browser-only credentials to fall back to.
+    expect(await screen.findByRole('alert')).toHaveTextContent('do not match a console account');
+    expect(localStorage.getItem('glow-grace-admin-token')).toBeNull();
+  });
+
+  it('offers registration and password recovery instead of a demo account', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({}) }) as unknown as Response));
+
+    render(
+      <MemoryRouter initialEntries={['/login']}>
+        <LoginHarness />
+      </MemoryRouter>,
+    );
+
+    // The published sample credentials are gone, so nothing on this page may
+    // offer a way in other than a real one.
+    expect(screen.queryByText(/demo/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/sample/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Create an account' })).toHaveAttribute('href', '/signup');
+    expect(screen.getByText('Forgotten your password?')).toBeVisible();
   });
 
   it('signs the operator out on its own when the session runs out', async () => {
@@ -117,7 +214,6 @@ describe('console sign-in and session lifetime', () => {
     // An expiry just around the corner: the console must react to the countdown
     // rather than wait for a request to come back 401.
     localStorage.setItem('glow-grace-admin-session-expires-at', new Date(Date.now() + 80).toISOString());
-    signInDemo('admin@glowngrace.in', 'demo123');
 
     render(
       <MemoryRouter initialEntries={['/admin']}>
@@ -128,11 +224,13 @@ describe('console sign-in and session lifetime', () => {
     expect(await screen.findByText('Your session has ended.')).toBeVisible();
     expect(localStorage.getItem('glow-grace-admin-token')).toBeNull();
     expect(localStorage.getItem('glow-grace-admin-session-expires-at')).toBeNull();
+    // The cached account goes with the token, or a name and an address would sit
+    // in the header for an account that is no longer signed in.
+    expect(localStorage.getItem('glow-grace-account')).toBeNull();
   });
 
   it('ends the stored session when the server rejects the token', async () => {
     stubAdminApi();
-    signInDemo('admin@glowngrace.in', 'demo123');
     vi.stubGlobal('fetch', vi.fn(async () => ({
       ok: false,
       status: 401,
@@ -148,6 +246,20 @@ describe('console sign-in and session lifetime', () => {
     expect(await screen.findByText('Your session has ended.')).toBeVisible();
     expect(localStorage.getItem('glow-grace-admin-token')).toBeNull();
   });
+
+  it('keeps a customer out of the console even with a live session', async () => {
+    stubAdminApi();
+    signInAsAccount({ name: 'Ritika Srivastava', email: 'ritika@example.com', role: 'Customer' });
+
+    render(
+      <MemoryRouter initialEntries={['/admin']}>
+        <AdminPortal />
+      </MemoryRouter>,
+    );
+
+    // A valid token is not a console pass. The gate reads the account's role.
+    expect(await screen.findByText('Sign in to continue.')).toBeVisible();
+  });
 });
 
 describe('storefront interface', () => {
@@ -158,7 +270,6 @@ describe('storefront interface', () => {
 
   it('opens the admin add-product form without redirecting and returns to inventory on cancel', async () => {
     stubAdminApi();
-    signInDemo('admin@glowngrace.in', 'demo123');
     render(
       <MemoryRouter initialEntries={['/admin']}>
         <AdminPortal />
@@ -201,10 +312,10 @@ describe('storefront interface', () => {
       return { ok: true, json: async () => payload } as Response;
     });
     vi.stubGlobal('fetch', fetchMock);
+    signInAsAccount();
     vi.stubGlobal('createImageBitmap', async () => ({ width: 800, height: 600, close: () => undefined }));
     localStorage.setItem('glow-grace-admin-token', 'test-token');
 
-    signInDemo('admin@glowngrace.in', 'demo123');
     render(
       <MemoryRouter>
         <ProductCatalogProvider><AdminPortal /></ProductCatalogProvider>
@@ -264,8 +375,8 @@ describe('storefront interface', () => {
       return { ok: true, json: async () => payload } as Response;
     });
     vi.stubGlobal('fetch', fetchMock);
+    signInAsAccount();
     localStorage.setItem('glow-grace-admin-token', 'test-token');
-    signInDemo('admin@glowngrace.in', 'demo123');
 
     render(
       <MemoryRouter initialEntries={['/admin']}>
@@ -304,8 +415,8 @@ describe('storefront interface', () => {
       return { ok: true, json: async () => payload } as Response;
     });
     vi.stubGlobal('fetch', fetchMock);
+    signInAsAccount();
     localStorage.setItem('glow-grace-admin-token', 'test-token');
-    signInDemo('admin@glowngrace.in', 'demo123');
 
     render(
       <MemoryRouter initialEntries={['/admin']}>
@@ -341,8 +452,8 @@ describe('storefront interface', () => {
       return { ok: true, json: async () => payload } as Response;
     });
     vi.stubGlobal('fetch', fetchMock);
+    signInAsAccount();
     localStorage.setItem('glow-grace-admin-token', 'test-token');
-    signInDemo('admin@glowngrace.in', 'demo123');
 
     render(
       <MemoryRouter initialEntries={['/admin']}>
@@ -512,7 +623,7 @@ describe('forgotten password and reset', () => {
     );
   }
 
-it('shows what the server said instead of blaming the demo account', async () => {
+  it('shows what the server said rather than inventing a reason', async () => {
     // The original bug: a bare catch turned every failure, including a wrong
     // password, into "this demo account is not available", which sent people
     // resetting a password that had never been the problem.
@@ -524,8 +635,8 @@ it('shows what the server said instead of blaming the demo account', async () =>
 
     render(<MemoryRouter initialEntries={['/login']}>{passwordRoutes()}</MemoryRouter>);
 
-    // A real console administrator whose address is not also a sample portal
-    // account. Every answer to them has to come from the server.
+    // Every answer on this form has to come from the server, because the console
+    // is the only account store there is.
     await userEvent.type(screen.getByLabelText('Email address'), 'deepak@glowngrace.in');
     await userEvent.type(screen.getByLabelText('Password'), 'the-wrong-password');
     await userEvent.click(screen.getByRole('button', { name: 'Sign in to your account' }));
@@ -544,16 +655,15 @@ it('shows what the server said instead of blaming the demo account', async () =>
 
     render(<MemoryRouter initialEntries={['/login']}>{passwordRoutes()}</MemoryRouter>);
 
-    // admin@glowngrace.in is also a sample portal account. Even so, a 503 must
-    // report the outage, never "your password is wrong, try demo123". The wrong
-    // password keeps the portal fallback from swallowing the outage.
+    // A 503 must report the outage, never a verdict on the password.
     await userEvent.type(screen.getByLabelText('Email address'), 'admin@glowngrace.in');
     await userEvent.type(screen.getByLabelText('Password'), 'oops-not-the-password');
     await userEvent.click(screen.getByRole('button', { name: 'Sign in to your account' }));
 
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent('The console database is unavailable.');
-    expect(alert).not.toHaveTextContent('demo123');
+    // The outage must not become a hint about the password that was tried.
+    expect(alert).not.toHaveTextContent('oops-not-the-password');
   });
 
   it('confirms a reset request without saying whether the account exists', async () => {
@@ -635,5 +745,174 @@ it('shows what the server said instead of blaming the demo account', async () =>
     // No "current password" field exists on this page, and asking for one is the
     // thing that made the original flow impossible.
     expect(screen.queryByLabelText(/current password/i)).toBeNull();
+  });
+});
+
+describe('role-based registration', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    localStorage.clear();
+  });
+
+  function signupRoutes() {
+    return (
+      <Routes>
+        <Route path="/signup" element={<SignupPage />} />
+        <Route path="/login" element={<p>Sign in screen</p>} />
+      </Routes>
+    );
+  }
+
+  /**
+   * The radio for one role.
+   *
+   * Anchored at the start of the accessible name, because a name is the role and
+   * its description together: "Candidate Apply for roles and track your training"
+   * would otherwise also answer a search for "Apply for roles".
+   */
+  function roleRadio(role: string) {
+    return screen.getByRole('radio', { name: new RegExp(`^${role}\\b`) });
+  }
+
+  async function fillForm({ role = 'Candidate', password = 'a-good-password', confirm = 'a-good-password' } = {}) {
+    await userEvent.click(roleRadio(role));
+    await userEvent.type(screen.getByLabelText('Full name'), 'Reha Qureshi');
+    await userEvent.type(screen.getByLabelText('Email address'), 'reha@example.com');
+    await userEvent.type(screen.getByLabelText(/^Mobile number/), '9876543210');
+    await userEvent.type(screen.getByLabelText('Password'), password);
+    await userEvent.type(screen.getByLabelText('Confirm password'), confirm);
+  }
+
+  it('offers the three portal roles, and no back-office role, before anything is sent', () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+
+    render(<MemoryRouter initialEntries={['/signup']}>{signupRoutes()}</MemoryRouter>);
+
+    for (const role of ['Customer', 'Candidate', 'Partner Salon']) {
+      expect(roleRadio(role)).toBeVisible();
+    }
+    // A console role is a grant rather than a request, so it is not something the
+    // public form offers. Staff are added from the console instead.
+    expect(screen.queryByRole('radio', { name: /^Store Administrator\b/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('radio', { name: /^Super Admin\b/ })).not.toBeInTheDocument();
+    // A role is chosen before the form can be sent, and the default is the one a
+    // visitor shopping the collection is most likely to want.
+    expect(roleRadio('Customer')).toBeChecked();
+  });
+
+  it('sends the chosen role and explains the account still has to be approved', async () => {
+    const sent: Array<{ url: string; body: unknown }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
+      sent.push({ url: String(url), body: JSON.parse(String(init.body)) });
+      return {
+        ok: true,
+        status: 201,
+        json: async () => ({ message: 'Thanks. Your request is with our team, and an administrator will review it before you can sign in.' }),
+      } as unknown as Response;
+    }));
+
+    render(<MemoryRouter initialEntries={['/signup']}>{signupRoutes()}</MemoryRouter>);
+    await fillForm({ role: 'Partner Salon' });
+    await userEvent.click(screen.getByRole('button', { name: 'Request my account' }));
+
+    expect(await screen.findByText(/an administrator will review it/i)).toBeVisible();
+    expect(sent[0].url).toContain('/admin/signup');
+    expect(sent[0].body).toEqual({
+      name: 'Reha Qureshi',
+      email: 'reha@example.com',
+      role: 'Partner Salon',
+      password: 'a-good-password',
+      phone: '9876543210',
+    });
+    // No session is stored: the account is Pending and the server has issued no
+    // token, so the form must not leave one lying around.
+    expect(localStorage.getItem('glow-grace-admin-token')).toBeNull();
+  });
+
+  it('sends an address in lower case, the way the account is keyed', async () => {
+    const sent: unknown[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
+      sent.push(JSON.parse(String(init.body)));
+      return { ok: true, status: 201, json: async () => ({ message: 'Sent.' }) } as unknown as Response;
+    }));
+
+    render(<MemoryRouter initialEntries={['/signup']}>{signupRoutes()}</MemoryRouter>);
+    await userEvent.type(screen.getByLabelText('Full name'), 'Reha Qureshi');
+    await userEvent.type(screen.getByLabelText('Email address'), '  Reha@Example.COM ');
+    await userEvent.type(screen.getByLabelText('Password'), 'a-good-password');
+    await userEvent.type(screen.getByLabelText('Confirm password'), 'a-good-password');
+    await userEvent.click(screen.getByRole('button', { name: 'Request my account' }));
+
+    expect(await screen.findByText('Sent.')).toBeVisible();
+    expect(sent[0]).toMatchObject({ email: 'reha@example.com', phone: '' });
+  });
+
+  it('keeps a short password and a mismatch beside the field that caused them', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+
+    render(<MemoryRouter initialEntries={['/signup']}>{signupRoutes()}</MemoryRouter>);
+    await userEvent.type(screen.getByLabelText('Full name'), 'Reha Qureshi');
+    await userEvent.type(screen.getByLabelText('Email address'), 'reha@example.com');
+    await userEvent.type(screen.getByLabelText('Password'), 'short');
+    await userEvent.type(screen.getByLabelText('Confirm password'), 'different');
+    await userEvent.click(screen.getByRole('button', { name: 'Request my account' }));
+
+    expect(await screen.findByText('Use at least 8 characters.')).toBeVisible();
+    expect(screen.getByText('The two passwords do not match.')).toBeVisible();
+    // A complaint the server would have made anyway never leaves the browser.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('tells somebody the address is already taken rather than failing quietly', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false,
+      status: 409,
+      json: async () => ({
+        error: 'duplicate_email',
+        message: 'That email address already has an account. Sign in instead, or reset its password.',
+      }),
+    }) as unknown as Response));
+
+    render(<MemoryRouter initialEntries={['/signup']}>{signupRoutes()}</MemoryRouter>);
+    await fillForm();
+    await userEvent.click(screen.getByRole('button', { name: 'Request my account' }));
+
+    // Unlike the forgot-password route, which must not reveal whether an address
+    // exists, this is the visitor's own address and "sign in instead" is the
+    // useful answer.
+    expect(await screen.findByRole('alert')).toHaveTextContent('Sign in instead');
+  });
+
+  it('puts a field the server named beside itself and keeps the rest of the form', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false,
+      status: 400,
+      json: async () => ({
+        error: 'invalid_signup',
+        message: 'Check the details below and try again.',
+        errors: { email: 'That address is not one we can deliver to.' },
+      }),
+    }) as unknown as Response));
+
+    render(<MemoryRouter initialEntries={['/signup']}>{signupRoutes()}</MemoryRouter>);
+    await fillForm();
+    await userEvent.click(screen.getByRole('button', { name: 'Request my account' }));
+
+    expect(await screen.findByText('That address is not one we can deliver to.')).toBeVisible();
+    expect(screen.getByLabelText('Email address')).toHaveValue('reha@example.com');
+    // A field-level complaint must not wipe the form the visitor filled in.
+    expect(screen.getByLabelText('Full name')).toHaveValue('Reha Qureshi');
+  });
+
+  it('offers a way back to sign in and a way to a forgotten password', () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+
+    render(<MemoryRouter initialEntries={['/signup']}>{signupRoutes()}</MemoryRouter>);
+
+    expect(screen.getByRole('link', { name: 'Sign in instead' })).toHaveAttribute('href', '/login');
+    expect(screen.getByRole('link', { name: 'Forgot your password?' })).toHaveAttribute('href', '/login');
   });
 });

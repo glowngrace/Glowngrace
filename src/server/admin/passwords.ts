@@ -1,5 +1,4 @@
 import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from 'node:crypto';
-import { demoPassword } from '../../lib/demo-credentials.js';
 
 const KEY_LENGTH = 64;
 const COST = 16384;
@@ -15,43 +14,11 @@ export type PasswordPolicy = {
 
 export const passwordPolicy: PasswordPolicy = { minLength: 8, maxLength: 128 };
 
-/**
- * The credential every sample account and every seeded console account uses.
- *
- * It is deliberately the same value the storefront demo sign-in uses, so one
- * password opens both. At 7 characters it is shorter than
- * `passwordPolicy.minLength`, which is why no form may choose it: it is only
- * ever written by a recovery action, and `recoverablePasswordError` is the
- * single check that permits it.
- */
-export { demoPassword };
-
-/**
- * The salted scrypt hash of `demoPassword`, for the rows that have to exist
- * before anybody can sign in. A hash rather than the value itself, so the
- * migration files never contain a usable password.
- */
-export const demoPasswordHash =
-  'scrypt$16384$8$1$8ad60c22a397f20a36e452887332fea3$b91fbd9edb011c0c620edfc8638f3b18c9128e24492126f98a960e81a3f003280c3ba4e74e2deb31e51f3004ba8c5aaf2dda974cd40e54c376a307f3842f6fae';
-
 /** Why the policy rejects this password, or `null` when it accepts it. */
 export function passwordPolicyError(password: string) {
   if (password.length < passwordPolicy.minLength) return `Use at least ${passwordPolicy.minLength} characters.`;
   if (password.length > passwordPolicy.maxLength) return `Use at most ${passwordPolicy.maxLength} characters.`;
   return null;
-}
-
-/**
- * The policy check for a recovery action.
- *
- * Recovery is how a locked-out administrator or the demo state is put back, so
- * it additionally accepts the published demo password. Without this the demo
- * credential could never be restored: every password-setting path enforces
- * `minLength`, and `demo123` is 7 characters.
- */
-export function recoverablePasswordError(password: string) {
-  if (password === demoPassword) return null;
-  return passwordPolicyError(password);
 }
 
 type DeriveOptions = { N: number; r: number; p: number };
@@ -88,11 +55,60 @@ export async function verifyPassword(password: string, stored: string) {
 }
 
 /**
+ * The password the console used to be seeded with, and the only thing it is
+ * still allowed to be used for.
+ *
+ * It never authenticates anything. It exists so the seed can recognise a row
+ * that is still sitting on the published credential and replace it, which is the
+ * one thing a migration cannot do: `hashPassword` salts every value, so "is this
+ * row still the demo one?" cannot be answered by comparing hash strings. The salt
+ * differs on every row in every database, so a hardcoded hash would only ever
+ * match the single row it was copied from.
+ */
+export const removedDemoPassword = 'demo123';
+
+/**
  * The console session is deliberately short. An unattended browser should not
  * stay signed into the back office for the length of a working day, so the
  * session simply ends and the operator signs in again.
  */
 export const sessionDurationMinutes = 5;
+
+/**
+ * How often the owner account's password is replaced.
+ *
+ * Seven days, because the owner credential is the one account whose password is
+ * not chosen by a person: nobody sits down to set it, so it is generated and
+ * delivered instead of being kept.
+ */
+export const superAdminRotationDays = 7;
+
+const GENERATED_PASSWORD_LENGTH = 24;
+const GENERATED_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%&*?';
+
+/**
+ * A password nobody chose, for an account nobody signs into by remembering.
+ *
+ * Two of each character class are dealt unconditionally and the rest come from
+ * the CSPRNG, so the result cannot be all one kind of character no matter how
+ * the bytes fall. Ambiguous glyphs are left out of the alphabet: this is read off
+ * a screen and typed back in by hand.
+ */
+export function generateStrongPassword(length: number = GENERATED_PASSWORD_LENGTH): string {
+  const size = Math.max(length, 12);
+  const required = 'ABCDEFGHJKLMNPQRSTUVWXYZ'.slice(0, 2) + 'abcdefghijkmnopqrstuvwxyz'.slice(0, 2) + '23456789'.slice(0, 2);
+  const characters = [...required];
+  while (characters.length < size) {
+    characters.push(GENERATED_ALPHABET[randomBytes(1)[0] % GENERATED_ALPHABET.length]);
+  }
+  // Fisher-Yates with the CSPRNG, so the dealt characters are not always first.
+  for (let index = characters.length - 1; index > 0; index -= 1) {
+    const swap = randomBytes(1)[0] % (index + 1);
+    [characters[index], characters[swap]] = [characters[swap], characters[index]];
+  }
+  const password = characters.join('');
+  return passwordPolicyError(password) === null ? password : generateStrongPassword(size);
+}
 
 export function newSessionToken() {
   return randomUUID();

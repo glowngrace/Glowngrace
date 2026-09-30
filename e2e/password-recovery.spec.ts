@@ -95,11 +95,11 @@ async function stubConsole(page: Page) {
     const body = route.request().postDataJSON();
     writes.push({ method: 'POST', url: 'users/recover', body });
     const newPassword = String((body as { newPassword: string }).newPassword ?? '');
-    // Mirrors the server's recovery policy: only the published sample password
-    // may be shorter than 8 characters, and it may - because recovery is the
-    // path that puts the demo state back.
-    if (newPassword.length < 8 && newPassword !== 'demo123') {
-      return route.fulfill({ status: 400, json: { error: 'invalid_password', message: 'Use at least 8 characters, or the sample password demo123.' } });
+    // Mirrors the server's recovery policy. There is no published sample password
+    // to make an exception for any more, so the ordinary minimum applies here as
+    // it does on every other form.
+    if (newPassword.length < 8) {
+      return route.fulfill({ status: 400, json: { error: 'invalid_password', message: 'Use at least 8 characters.' } });
     }
     return route.fulfill({ json: { message: 'Password reset for Karan Mehra. Their other sessions were signed out.' } });
   });
@@ -129,9 +129,11 @@ async function openSettings(page: Page) {
     });
   });
 
-await page.goto('/login');
-  await page.getByText('Explore a demo account').click();
-  await page.getByRole('button', { name: /Administrator Platform overview/i }).click();
+  await page.goto('/login');
+  // There is no demo picker to lean on any more, so this signs in the way an
+  // operator does: an address and a password, with the session route answering.
+  await page.locator('#login-email').fill(adminUser.email);
+  await page.locator('#login-password').fill('a-password-the-admin-chose');
   await page.getByRole('button', { name: 'Sign in to your account' }).click();
   await expect(page.getByTestId('admin-loader')).toHaveCount(0, { timeout: 20_000 });
   if (test.info().project.name === 'mobile-chromium') {
@@ -145,9 +147,9 @@ await page.goto('/login');
 
 test.describe('password recovery', () => {
   test('shows the server message for a wrong console password', async ({ page }) => {
-    // The page used to catch every error and blame the sample account. Now the
-    // server's answer travels to the alert, and a demo hint only appears for a
-    // portal address whose password was actually rejected.
+    // The page used to catch every error and blame the sample account, and it
+    // added a hint naming a published password. Both are gone with the demo
+    // state, so the server's answer travels to the alert unaltered.
     await page.route('**/api/admin/session', (route) => route.fulfill({
       status: 401,
       json: { error: 'invalid_credentials', message: 'That email address and password do not match a console account.' },
@@ -224,11 +226,11 @@ test.describe('password recovery', () => {
     await team.getByText('Karan Mehra').locator('..').getByRole('button', { name: 'Recover' }).click();
 
     const form = team.getByLabel('New password');
-    await form.fill('demo123');
+    await form.fill('recovered-2026');
     await page.getByRole('button', { name: 'Reset password' }).click();
 
     await expect(page.getByRole('status').getByText('Password reset. Karan Mehra has to sign in again with it.')).toBeVisible();
-    expect(writes).toEqual([{ method: 'POST', url: 'users/recover', body: { newPassword: 'demo123' } }]);
+    expect(writes).toEqual([{ method: 'POST', url: 'users/recover', body: { newPassword: 'recovered-2026' } }]);
   });
 
   test('explains why a short password is rejected during recovery', async ({ page }) => {
@@ -240,7 +242,7 @@ test.describe('password recovery', () => {
     await team.getByLabel('New password').fill('short');
     await page.getByRole('button', { name: 'Reset password' }).click();
 
-    await expect(team.getByText('Use at least 8 characters, or the sample password demo123.')).toBeVisible();
+    await expect(team.getByText('Use at least 8 characters.')).toBeVisible();
     expect(writes.length).toBe(1);
   });
 
@@ -249,11 +251,11 @@ test.describe('password recovery', () => {
     await openSettings(page);
 
     const forms = page.locator('section', { has: page.getByRole('heading', { name: 'Reset console passwords' }) });
-    await forms.getByLabel('Password for every account').fill('demo123');
+    await forms.getByLabel('Password for every account').fill('every-console-2026');
     await page.getByRole('button', { name: 'Reset all 2 passwords' }).click();
 
     await expect(page.getByRole('status').getByText('Every console password was reset. Sign in again with the new one.')).toBeVisible();
-    expect(writes.some((write) => write.url === 'users/recover-all' && (write.body as { newPassword: string }).newPassword === 'demo123')).toBe(true);
+    expect(writes.some((write) => write.url === 'users/recover-all' && (write.body as { newPassword: string }).newPassword === 'every-console-2026')).toBe(true);
   });
 
   test('lists the waiting reset links and offers to copy a code', async ({ page }) => {

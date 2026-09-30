@@ -1,6 +1,8 @@
 import { expect, test } from '@playwright/test';
+import { candidateAccount, customerAccount, signInWithStubbedConsole, stubBundledCatalogue, stubEmptyConsoleReads } from './support/accounts';
 
 test('home navigation and category filters lead to the right product edit', async ({ page }) => {
+  await stubBundledCatalogue(page);
   await page.goto('/');
   await expect(page.getByRole('heading', { name: /beauty that feels like you/i })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
@@ -15,6 +17,7 @@ test('home navigation and category filters lead to the right product edit', asyn
 });
 
 test('product page, wishlist, and bag interactions work end to end', async ({ page }) => {
+  await stubBundledCatalogue(page);
   await page.goto('/shop');
   await page.getByRole('link', { name: 'View Glow Ritual Vitamin C Face Serum' }).click();
   await expect(page.getByRole('heading', { name: 'Glow Ritual Vitamin C Face Serum' })).toBeVisible();
@@ -63,6 +66,7 @@ test('product details expand long copy, zoom the gallery, and add the selected q
 });
 
 test('checkout calculates delivery and GST, confirms the order, and clears the saved bag', async ({ page }) => {
+  await stubBundledCatalogue(page);
   let savedOrder: Record<string, unknown> | undefined;
   await page.route('**/api/checkout', async (route) => {
     savedOrder = route.request().postDataJSON() as Record<string, unknown>;
@@ -103,6 +107,7 @@ test('checkout calculates delivery and GST, confirms the order, and clears the s
 });
 
 test('checkout keeps the bag if the order API fails', async ({ page }) => {
+  await stubBundledCatalogue(page);
   await page.route('**/api/checkout', (route) => route.fulfill({
     status: 500,
     contentType: 'application/json',
@@ -148,17 +153,16 @@ test('a beauty-career application opens the matching contact topic', async ({ pa
   await expect(page.getByLabel('I’m reaching out about')).toHaveValue('Apply for Senior Beautician');
 });
 
-test('demo sign-in opens the matching candidate dashboard and its tabs', async ({ page, isMobile }) => {
-  await page.goto('/login');
-  await page.getByText('Explore a demo account').click();
-  await page.getByRole('button', { name: /Candidate Applications and training/i }).click();
-  await expect(page.locator('.login-form').getByLabel('Email address')).toHaveValue('candidate@glowngrace.in');
-  await page.getByRole('button', { name: 'Sign in to your account' }).click();
+test('signing in as a candidate opens the matching dashboard and its tabs', async ({ page, isMobile }) => {
+  // The candidate portal is rendered from the signed-in account alone, so only
+  // the session has to be answered.
+  await signInWithStubbedConsole(page, candidateAccount);
   await expect(page.locator('.header-profile img')).toHaveAttribute('src', '/images/partner2.jpg');
   await page.getByRole('button', { name: 'Profile menu for Anjali Verma' }).click();
   const profileMenu = page.getByLabel('Profile menu', { exact: true });
   await expect(profileMenu).toContainText('Signed in · Candidate');
-  await expect(profileMenu.getByRole('link', { name: 'Go to dashboard' })).toBeVisible();
+  // A candidate is offered their own space, not the back office.
+  await expect(profileMenu.getByRole('link', { name: 'Go to my space' })).toHaveAttribute('href', '/candidate');
   await page.getByRole('button', { name: 'Profile menu for Anjali Verma' }).click();
   await expect(page.getByRole('heading', { name: 'My applications' })).toBeVisible();
   await expect(page.getByRole('navigation', { name: 'Dashboard sections' }).getByRole('button', { name: 'Training & certificates' })).toBeVisible();
@@ -172,10 +176,7 @@ test('demo sign-in opens the matching candidate dashboard and its tabs', async (
 });
 
 test('header sign out clears the session and redirects home', async ({ page, isMobile }) => {
-  await page.goto('/login');
-  await page.getByText('Explore a demo account').click();
-  await page.getByRole('button', { name: /Customer Shopping and your wishlist/i }).click();
-  await page.getByRole('button', { name: 'Sign in to your account' }).click();
+  await signInWithStubbedConsole(page, customerAccount);
   await expect(page.locator('.header-profile img')).toBeVisible();
   await page.getByRole('button', { name: 'Profile menu for Ritika Srivastava' }).click();
   const profileMenu = page.getByLabel('Profile menu', { exact: true });
@@ -187,61 +188,63 @@ test('header sign out clears the session and redirects home', async ({ page, isM
   await expect(page.locator('.header-profile')).toHaveCount(0);
 });
 
-test('portal routes require the matching demo role', async ({ page }) => {
+test('portal routes require the matching account role', async ({ page }) => {
+  // A portal belonging to someone else is a locked page, not a dashboard.
+  await stubEmptyConsoleReads(page);
+  await signInWithStubbedConsole(page, candidateAccount);
   await page.goto('/admin');
   await expect(page.getByRole('heading', { name: 'Sign in to continue.' })).toBeVisible();
   await expect(page.locator('.site-header')).toHaveCount(0);
   await expect(page.locator('.site-footer')).toHaveCount(0);
-  await page.getByRole('button', { name: 'Go to sign in' }).click();
-  await page.getByText('Explore a demo account').click();
-  await page.getByRole('button', { name: /Administrator Platform overview/i }).click();
-  await page.getByRole('button', { name: 'Sign in to your account' }).click();
-  await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
-  await expect(page.locator('.admin-brand')).toHaveCount(1);
-  const navigation = page.getByRole('navigation', { name: 'Dashboard sections' });
-  const openSidebar = async () => {
-    if (test.info().project.name === 'mobile-chromium') {
-      await page.getByRole('button', { name: 'Toggle navigation' }).click();
-      await expect(navigation).toBeVisible();
-    }
-  };
-  const chooseSection = async (label: RegExp, heading: string) => {
-    await openSidebar();
-    await navigation.getByRole('button', { name: label }).click();
-    await expect(page.getByRole('heading', { name: heading })).toBeVisible();
-  };
-  await chooseSection(/^Partner salons/, 'Partner salons');
-  await chooseSection(/^Job vacancies/, 'Job vacancies');
-  await chooseSection(/^Customers/, 'Customers');
+  // The lock offers the way out, which is registration rather than a demo.
+  await page.getByRole('link', { name: 'Request an account' }).click();
+  await expect(page).toHaveURL(/\/signup$/);
 });
 
 test('admin uploads a product image and saves a product to the catalogue', async ({ page }) => {
-  await page.route('**/api/products', async (route) => {
+  // The console writes through the admin API, so both the storefront route and
+  // the admin one are answered here: the test is about the upload form, and
+  // should not depend on a catalogue it then has to clean up.
+  let created: { id: number; name: string } | null = null;
+  const catalogue = new Map<number, { id: number; name: string }>();
+  const respond = (route: import('@playwright/test').Route) => {
     if (route.request().method() === 'GET') {
-      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ products: [] }) });
-      return;
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ products: [...catalogue.values()] }) });
     }
-    const payload = route.request().postDataJSON() as { name: string; category: string; price: number; mrp: number; stock: number; description: string; images: Array<{ width: number; height: number }> };
-    expect(payload.images).toHaveLength(1);
-    await route.fulfill({
-      status: 201,
-      contentType: 'application/json',
-      body: JSON.stringify({
-        product: {
-          ...payload,
-          id: 9,
-          rating: 0,
-          reviews: 0,
-          image: '/api/products/9/images/0',
-          images: ['/api/products/9/images/0'],
-        },
-      }),
-    });
-  });
-  await page.goto('/login');
-  await page.getByText('Explore a demo account').click();
-  await page.getByRole('button', { name: /Administrator Platform overview/i }).click();
-  await page.getByRole('button', { name: 'Sign in to your account' }).click();
+    if (route.request().method() === 'POST') {
+      const payload = route.request().postDataJSON() as { name: string; category: string; price: number; mrp: number; stock: number; description: string; images: Array<{ width: number; height: number }> };
+      expect(payload.images).toHaveLength(1);
+      created = { id: 9, name: payload.name };
+      catalogue.set(9, { id: 9, name: payload.name });
+      return route.fulfill({
+        status: 201,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          product: {
+            ...payload,
+            id: 9,
+            rating: 0,
+            reviews: 0,
+            image: '/api/products/9/images/0',
+            images: ['/api/products/9/images/0'],
+          },
+        }),
+      });
+    }
+    if (route.request().method() === 'DELETE') {
+      catalogue.delete(9);
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ message: 'Product deleted.' }) });
+    }
+    return route.continue();
+  };
+  // Playwright checks the newest route first, so the empty-collection catch-all
+  // has to be registered before these, or it would swallow the product writes.
+  await stubEmptyConsoleReads(page);
+  await page.route('**/api/products', respond);
+  // The trailing glob also catches `/api/admin/products/9`, which is where the
+  // delete of a saved product goes.
+  await page.route('**/api/admin/products**', respond);
+  await signInWithStubbedConsole(page);
 
   const navigation = page.getByRole('navigation', { name: 'Dashboard sections' });
   if (test.info().project.name === 'mobile-chromium') {
@@ -292,6 +295,8 @@ test('admin uploads a product image and saves a product to the catalogue', async
   await page.getByRole('button', { name: 'Remove E2E Preview Product' }).first().click();
   await page.getByRole('button', { name: 'Delete permanently' }).click();
   await expect(page.getByRole('button', { name: 'View E2E Preview Product' })).toHaveCount(0);
+  expect(catalogue.size).toBe(0);
+  expect(created).not.toBeNull();
 });
 
 test('tablet header keeps the sign-in link visible without horizontal overflow', async ({ page, isMobile }) => {
@@ -303,6 +308,7 @@ test('tablet header keeps the sign-in link visible without horizontal overflow',
 });
 
 test('wishlist lists saved products and allows removing them', async ({ page }) => {
+  await stubBundledCatalogue(page);
   await page.goto('/shop');
   await page.getByRole('button', { name: 'Add Glow Ritual Vitamin C Face Serum to wishlist' }).click();
   if (test.info().project.name === 'mobile-chromium') {

@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { getDemoAccount, signOutDemo } from '../auth/demo-auth';
 import {
   endAdminSession,
   getAdminSessionExpiresIn,
   getAdminToken,
+  getSignedInAccount,
   sessionEndedEvent,
 } from '../lib/admin-api';
+import { isConsoleRole } from '../auth/roles';
 import { productImageUrl, type Product } from '../data/catalog';
 import { Spinner } from '../components/Loader';
 import {
@@ -134,7 +135,7 @@ export function AdminPortal() {
 
 function AdminConsole() {
   const navigate = useNavigate();
-  const account = getDemoAccount();
+  const account = getSignedInAccount();
   const store = useAdminStore();
   const {
     account: signedIn,
@@ -238,8 +239,9 @@ function AdminConsole() {
   }
 
   const logout = useCallback(async () => {
+    // apiSignOut ends the server session and clears the cached account, so
+    // there is nothing left to tidy up here.
     await apiSignOut();
-    signOutDemo();
     navigate('/');
   }, [apiSignOut, navigate]);
 
@@ -888,15 +890,21 @@ function AdminConsole() {
                   : null
     : null;
 
-  if (account?.role !== 'admin' || !sessionOpen || !getAdminToken()) {
+  // The gate is the account's own role, not merely the presence of a token: a
+  // customer who signs in successfully still holds a valid session and must not
+  // be able to walk into the back office with it.
+  if (!account || !isConsoleRole(account.role) || !sessionOpen || !getAdminToken()) {
     return (
       <section className="admin-locked">
         <span className="eyebrow">Administrator access</span>
         <h1>{sessionEnded ? 'Your session has ended.' : 'Sign in to continue.'}</h1>
         <p>{sessionEnded
           ? 'For your account’s safety the console signs you out after five minutes. Sign in again to pick up where you left off.'
-          : 'Sign in with your administrator account to open this dashboard.'}</p>
-        <button className="button button-dark" type="button" onClick={() => navigate('/login')}>Go to sign in</button>
+          : 'Sign in with a console account to open this dashboard. A registration that is still waiting for approval cannot open it yet.'}</p>
+        <div className="admin-locked-actions">
+          <button className="button button-dark" type="button" onClick={() => navigate('/login')}>Go to sign in</button>
+          <Link className="button button-light" to="/signup">Request an account</Link>
+        </div>
       </section>
     );
   }

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createAdminHandlers, seedAdminData } from './admin';
-import { hashPassword, sessionDurationMinutes, sessionExpiry } from './admin/passwords';
+import { hashPassword, sessionDurationMinutes, sessionExpiry, verifyPassword } from './admin/passwords';
 import type { Database, QueryResult } from './handlers';
 
 const activeAdminRow = {
@@ -469,6 +469,115 @@ describe('admin session lifetime', () => {
 });
 
 describe('admin demo seeding', () => {
+  it('seeds the owner account with a generated password nobody chose', async () => {
+    const { database, query } = makeDatabase();
+    await seedAdminData(database);
+
+    const ownerInsert = query.mock.calls.find(([text, values]) => String(text).includes('INSERT INTO admin_users') && (values as unknown[]).includes('glownglancebiz@gmail.com'));
+    if (!ownerInsert) throw new Error('The owner account was never seeded.');
+    const values = ownerInsert[1] as unknown[];
+    expect(values).toContain('Super Admin');
+    // The hash is of a generated password, so there is nothing to publish: the
+    // owner learns it from the rotation message.
+    const hash = String(values[3]);
+    expect(hash.startsWith('scrypt$')).toBe(true);
+    // Stamped at creation, so the first rotation is a week away rather than a
+    // second after the server boots.
+    expect(String(ownerInsert[0])).toContain('password_rotated_at');
+  });
+
+  it('mails the owner the password the account was created with', async () => {
+    // An account whose generated password was never written down is the same as
+    // no account at all, so the first one has to be delivered like every later
+    // rotation is.
+    const { database, query } = makeDatabase(async (text, values) => (
+      text.includes('INSERT INTO admin_users') && (values as unknown[]).includes('glownglancebiz@gmail.com')
+        ? { rows: [], rowCount: 1 }
+        : { rows: [], rowCount: 0 }
+    ));
+    await seedAdminData(database);
+
+    const ownerInsert = query.mock.calls.find(([text, values]) => String(text).includes('INSERT INTO admin_users') && (values as unknown[]).includes('glownglancebiz@gmail.com'));
+    if (!ownerInsert) throw new Error('The owner account was never seeded.');
+    const storedHash = String((ownerInsert[1] as unknown[])[3]);
+
+    const mail = query.mock.calls.find(([text]) => String(text).includes('INSERT INTO email_outbox'));
+    if (!mail) throw new Error('The first owner password was never delivered.');
+    const [text, values] = mail as [string, unknown[]];
+    expect(text).toContain("'owner-credentials'");
+    expect(values[0]).toBe('glownglancebiz@gmail.com');
+    // The password in the message is the one the stored hash was made from, so
+    // the link in it actually signs in.
+    const sent = /^Password: (.+)$/m.exec(String(values[2]));
+    expect(sent).not.toBeNull();
+    expect(await verifyPassword(sent![1], storedHash)).toBe(true);
+  });
+
+  it('retires a bootstrap account still sitting on the published password', async () => {
+    // An old database can still hold a row anybody can sign in with. It has to be
+    // replaced, and the only way to recognise it is by verifying the password:
+    // every hash carries its own random salt, so no stored value can be compared.
+    const published = await hashPassword('demo123');
+    const { database, query } = makeDatabase(async (text) => (
+      text.includes('SELECT id, password_hash FROM admin_users')
+        ? { rows: [{ id: 'bootstrap-1', password_hash: published }], rowCount: 1 }
+        : { rows: [], rowCount: 0 }
+    ));
+    await seedAdminData(database);
+
+    const replacement = query.mock.calls.find(([text]) => String(text).includes('UPDATE admin_users SET password_hash'));
+    if (!replacement) throw new Error('The published password was left in place.');
+    expect(await verifyPassword('demo123', String((replacement[1] as unknown[])[0]))).toBe(false);
+    // Any session opened with it is worthless the moment the hash changes.
+    expect(query.mock.calls.some(([text]) => String(text).includes('DELETE FROM admin_sessions WHERE user_id = $1'))).toBe(true);
+  });
+
+  it('leaves a bootstrap account an operator has claimed alone', async () => {
+    // The seed is replayed on every migration run, so it must not touch a
+    // password a person chose.
+    const chosen = await hashPassword('a-password-the-operator-chose');
+    const { database, query } = makeDatabase(async (text) => (
+      text.includes('SELECT id, password_hash FROM admin_users')
+        ? { rows: [{ id: 'bootstrap-1', password_hash: chosen }], rowCount: 1 }
+        : { rows: [], rowCount: 0 }
+    ));
+    await seedAdminData(database);
+
+    expect(query.mock.calls.some(([text]) => String(text).includes('UPDATE admin_users SET password_hash'))).toBe(false);
+  });
+
+  it('does not re-mail the first owner password on a later boot', async () => {
+    // The insert conflicts, so the account kept the password it already had.
+    const { database, query } = makeDatabase(async (text, values) => (
+      text.includes('INSERT INTO admin_users') && (values as unknown[]).includes('glownglancebiz@gmail.com')
+        ? { rows: [], rowCount: 0 }
+        : { rows: [], rowCount: 0 }
+    ));
+    await seedAdminData(database);
+
+    const mail = query.mock.calls.find(([text]) => String(text).includes('INSERT INTO email_outbox') && String(text).includes('owner-credentials'));
+    expect(mail).toBeUndefined();
+  });
+
+  it('leaves an account nobody named out of the seed entirely', async () => {
+    const { database, query } = makeDatabase();
+    await seedAdminData(database);
+
+    // The seeded rows are the storefront's own sample content plus the two
+    // bootstrap accounts. No colleague is created for anybody to sign in as.
+    const seededAddresses = query.mock.calls
+      .filter(([text]) => String(text).includes('INSERT INTO admin_users'))
+      .map(([text, values]) => [
+        ...String(text).match(/[a-z0-9._-]+@[a-z0-9.]+/gi) ?? [],
+        ...(values as unknown[]).filter((value): value is string => typeof value === 'string' && value.includes('@')),
+      ])
+      .flat();
+    expect(seededAddresses).toEqual(expect.arrayContaining(['admin@glowngrace.in', 'glownglancebiz@gmail.com']));
+    for (const address of ['deepak@glowngrace.in', 'aditi@glowngrace.in', 'rohit@glowngrace.in', 'neha@glowngrace.in', 'karan@glowngrace.in']) {
+      expect(seededAddresses).not.toContain(address);
+    }
+  });
+
   it('writes payment_method in the column slot the orders constraint checks', async () => {
     const { database, query } = makeDatabase();
     await seedAdminData(database);
@@ -578,17 +687,17 @@ describe('admin password recovery route', () => {
     expect(await verifyPassword('recovered-2026', String(rows[0].password_hash))).toBe(true);
   });
 
-  it('accepts the published sample password, which the ordinary password form refuses', async () => {
-    // `demo123` is 7 characters and the policy minimum is 8. Without this
-    // exemption the seeded demo state is unrecoverable by any route, which is
-    // precisely the bug this work exists to fix.
+  it('holds recovery to the same password policy as every other form', async () => {
+    // Recovery used to accept the published sample password, which was 7
+    // characters against a minimum of 8. There is no published credential left
+    // to restore, so the exemption is gone and a short password is refused.
     const { database, rows } = recoveryConsole([{ ...memberRow }]);
     const admin = createAdminHandlers(database);
 
     const rejected = await admin.handle({
       method: 'POST',
       segments: ['users', String(memberRow.id), 'password'],
-      body: { currentPassword: 'anything-long-enough', newPassword: 'demo123' },
+      body: { currentPassword: 'anything-long-enough', newPassword: 'short' },
       token,
     });
     expect(rejected.status).toBe(400);
@@ -596,12 +705,21 @@ describe('admin password recovery route', () => {
     const accepted = await admin.handle({
       method: 'POST',
       segments: ['users', String(memberRow.id), 'recover'],
-      body: { newPassword: 'demo123' },
+      body: { newPassword: 'short' },
       token,
     });
-    expect(accepted.status).toBe(200);
+    expect(accepted.status).toBe(400);
+    expect(accepted.body.message).toContain('Use at least 8 characters.');
+
+    const worked = await admin.handle({
+      method: 'POST',
+      segments: ['users', String(memberRow.id), 'recover'],
+      body: { newPassword: 'recovered-2026' },
+      token,
+    });
+    expect(worked.status).toBe(200);
     const { verifyPassword } = await import('./admin/passwords');
-    expect(await verifyPassword('demo123', String(rows[0].password_hash))).toBe(true);
+    expect(await verifyPassword('recovered-2026', String(rows[0].password_hash))).toBe(true);
   });
 
   it('reports a member as they are, not as active, because recovery is not approval', async () => {
@@ -619,7 +737,7 @@ type RecoveredUser = { status: string; source: string };
     expect((result.body.user as RecoveredUser).source).toBe('signup');
   });
 
-  it('refuses a password that is neither long enough nor the sample one', async () => {
+  it('refuses a password that is too short', async () => {
     const { database } = recoveryConsole([{ ...memberRow }]);
     const admin = createAdminHandlers(database);
     const result = await admin.handle({
@@ -631,7 +749,7 @@ type RecoveredUser = { status: string; source: string };
 
     expect(result.status).toBe(400);
     expect(result.body.error).toBe('invalid_password');
-    expect(result.body.message).toContain('sample password demo123');
+    expect(result.body.message).toContain('Use at least 8 characters.');
   });
 
   it('404s a member who has been deleted', async () => {
@@ -658,7 +776,7 @@ type RecoveredUser = { status: string; source: string };
     const result = await admin.handle({
       method: 'POST',
       segments: ['users', 'recover-all'],
-      body: { newPassword: 'demo123' },
+      body: { newPassword: 'recovered-2026' },
       token,
     });
 
@@ -666,7 +784,7 @@ type RecoveredUser = { status: string; source: string };
     expect(result.body.message).toBe('Password reset for all 3 console accounts. Everyone has been signed out.');
     const { verifyPassword } = await import('./admin/passwords');
     for (const row of rows) {
-      expect(await verifyPassword('demo123', String(row.password_hash))).toBe(true);
+      expect(await verifyPassword('recovered-2026', String(row.password_hash))).toBe(true);
     }
   });
 });
@@ -827,9 +945,10 @@ const { hashResetToken } = await import('./admin/passwords');
     expect(result.body.message).toBe('That reset link has expired or has already been used. Ask for a new one.');
   });
 
-  it('holds a redeemed password to the ordinary policy, including the sample password', async () => {
-    // Recovery may set `demo123`; a link emailed to a person may not, because
-    // anyone who has read the README could guess it.
+  it('holds a redeemed password to the ordinary policy, including the removed sample password', async () => {
+    // The published sample password used to be eight characters, so length alone
+    // would have accepted it. A link emailed to a person may not set it, because
+    // anyone who read an old README could guess it.
     const { database } = makeDatabase(async (text) => {
       if (text.includes('FROM password_resets')) return { rows: [], rowCount: 0 };
       return { rows: [], rowCount: 0 };
@@ -866,5 +985,302 @@ const { hashResetToken } = await import('./admin/passwords');
 const inbox = result.body.messages as Array<{ recipient: string }>;
     expect(inbox).toHaveLength(1);
     expect(inbox[0].recipient).toBe('admin@glowngrace.in');
+  });
+});
+
+describe('public role-based registration', () => {
+  const seededAdmin = activeAdminRow;
+
+  /**
+   * A console with a single account and no session, because registration is
+   * reached by somebody who has never signed in.
+   */
+  function signupConsole() {
+    // A console that is already seeded, so the owner account exists and the seed
+    // does not treat this boot as the moment the owner password was issued.
+    const rows: Array<Record<string, unknown>> = [
+      { ...seededAdmin },
+      { ...seededAdmin, id: '00000000-0000-4000-8000-0000000000f1', name: 'Glow & Grace Super Admin', email: 'glownglancebiz@gmail.com', role: 'Super Admin' },
+    ];
+    const outbox: Array<{ recipient: string; subject: string; body: string }> = [];
+    const queries: string[] = [];
+    const { database } = makeDatabase(async (text, values) => {
+      queries.push(text);
+      if (text.includes('INSERT INTO email_outbox')) {
+        outbox.push({ recipient: String(values[0]), subject: String(values[1]), body: String(values[2]) });
+        return { rows: [], rowCount: 1 };
+      }
+      if (text.includes('INSERT INTO admin_users')) {
+        // `ON CONFLICT (email) DO NOTHING` reports the row count it changed, so
+        // an address that is already there creates nothing.
+        if (rows.some((row) => row.email === values[1])) return { rows: [], rowCount: 0 };
+        const created = {
+          ...seededAdmin,
+          id: '00000000-0000-4000-8000-00000000000a',
+          name: values[0],
+          email: values[1],
+          role: values[2],
+          password_hash: values[3],
+          phone: values[4] === '' ? null : values[4],
+          avatar: '',
+          status: 'Pending',
+          source: 'signup',
+          reviewed_at: null,
+        };
+        rows.push(created);
+        return { rows: [created], rowCount: 1 };
+      }
+      if (text.includes('FROM admin_users WHERE email')) {
+        const match = rows.find((row) => row.email === values[0]);
+        return { rows: match ? [match] : [], rowCount: match ? 1 : 0 };
+      }
+      if (text.includes('FROM admin_sessions')) return { rows: [seededAdmin], rowCount: 1 };
+      if (text.includes('FROM admin_users')) return { rows, rowCount: rows.length };
+      return { rows: [], rowCount: 0 };
+    });
+    return { database, rows, outbox, queries };
+  }
+
+  const validSignup = {
+    name: 'Reha Qureshi',
+    email: 'Reha@Example.com',
+    role: 'Candidate',
+    password: 'a-good-password',
+  };
+
+  it('creates a Pending account and mints no session', async () => {
+    const { database, rows } = signupConsole();
+    const admin = createAdminHandlers(database);
+    const result = await admin.handle({ method: 'POST', segments: ['signup'], body: validSignup });
+
+    expect(result.status).toBe(201);
+    const user = result.body.user as { status: string; source: string; email: string; role: string };
+    expect(user.status).toBe('Pending');
+    expect(user.source).toBe('signup');
+    // The address is keyed in lower case, the way sign-in and the unique index
+    // both look it up.
+    expect(user.email).toBe('reha@example.com');
+    expect(user.role).toBe('Candidate');
+
+    // Pending means the account cannot sign in, and the row must exist for an
+    // administrator to be able to review it.
+    const created = rows.find((row) => row.email === 'reha@example.com');
+    expect(created).toBeDefined();
+    const { verifyPassword } = await import('./admin/passwords');
+    expect(await verifyPassword('a-good-password', String(created?.password_hash))).toBe(true);
+  });
+
+  it('leaves a registered account unable to sign in until it is approved', async () => {
+    const { database } = signupConsole();
+    const admin = createAdminHandlers(database);
+    await admin.handle({ method: 'POST', segments: ['signup'], body: validSignup });
+
+    const signIn = await admin.handle({
+      method: 'POST',
+      segments: ['session'],
+      body: { email: 'reha@example.com', password: 'a-good-password' },
+    });
+
+    // The whole point of the Pending status: a request is a claim, never a grant.
+    expect(signIn.status).toBe(401);
+    expect(signIn.body.error).toBe('invalid_credentials');
+  });
+
+  it('reaches registration without a session', async () => {
+    const { database, queries } = signupConsole();
+    const admin = createAdminHandlers(database);
+    const result = await admin.handle({ method: 'POST', segments: ['signup'], body: validSignup });
+
+    expect(result.status).toBe(201);
+    expect(queries.some((query) => query.includes('FROM admin_sessions WHERE token = $1'))).toBe(false);
+  });
+
+  it('leaves the request in the outbox so an administrator knows it arrived', async () => {
+    const { database, outbox } = signupConsole();
+    const admin = createAdminHandlers(database);
+    await admin.handle({ method: 'POST', segments: ['signup'], body: { ...validSignup, phone: '9876543210' } });
+
+    expect(outbox).toHaveLength(1);
+    expect(outbox[0].recipient).toBe('reha@example.com');
+    expect(outbox[0].body).toContain('Candidate');
+    expect(outbox[0].body).toContain('cannot sign in');
+  });
+
+  it('accepts a portal role and refuses a console one', async () => {
+    const { database } = signupConsole();
+    const admin = createAdminHandlers(database);
+    for (const role of ['Customer', 'Candidate', 'Partner Salon']) {
+      const result = await admin.handle({
+        method: 'POST',
+        segments: ['signup'],
+        body: { ...validSignup, email: `${role.replaceAll(/\s+/g, '-').toLowerCase()}@example.com`, role },
+      });
+      expect(result.status).toBe(201);
+    }
+    // A back-office role is a grant, not a request. Accepting one here would let
+    // anybody put "Super Admin" in the approval queue.
+    for (const role of ['Super Admin', 'Store Administrator', 'Placement Coordinator']) {
+      const refused = await admin.handle({
+        method: 'POST',
+        segments: ['signup'],
+        body: { ...validSignup, email: `${role.replaceAll(/\s+/g, '-').toLowerCase()}@example.com`, role },
+      });
+      expect(refused.status).toBe(400);
+      expect(refused.body.error).toBe('invalid_signup');
+    }
+  });
+
+  it('refuses a role that is not on the published list', async () => {
+    const { database, rows } = signupConsole();
+    const admin = createAdminHandlers(database);
+    const result = await admin.handle({
+      method: 'POST',
+      segments: ['signup'],
+      body: { ...validSignup, role: 'Owner' },
+    });
+
+    // Otherwise anybody could register themselves as whatever they liked.
+    expect(result.status).toBe(400);
+    expect(result.body.error).toBe('invalid_signup');
+    expect(rows.map((row) => row.email)).not.toContain('reha@example.com');
+  });
+
+  it('refuses a status in the request body, because the caller does not choose one', async () => {
+    const { database, rows } = signupConsole();
+    const admin = createAdminHandlers(database);
+    const result = await admin.handle({
+      method: 'POST',
+      segments: ['signup'],
+      body: { ...validSignup, status: 'Active' },
+    });
+
+    // The account is Pending whatever was asked for, so the status is stripped
+    // rather than trusted.
+    expect(result.status).toBe(201);
+    const created = rows.find((row) => row.email === 'reha@example.com');
+    expect(created?.status).toBe('Pending');
+  });
+
+  it('says an address is taken, and points at signing in', async () => {
+    const { database } = signupConsole();
+    const admin = createAdminHandlers(database);
+    await admin.handle({ method: 'POST', segments: ['signup'], body: validSignup });
+    const again = await admin.handle({ method: 'POST', segments: ['signup'], body: validSignup });
+
+    // Unlike the forgot-password route this names the clash: it is the visitor's
+    // own address, and "sign in instead" is the useful answer.
+    expect(again.status).toBe(409);
+    expect(again.body.error).toBe('duplicate_email');
+    expect(again.body.message).toContain('Sign in instead');
+  });
+
+  it('holds a weak password and a missing field to the same standard as sign-in', async () => {
+    const { database } = signupConsole();
+    const admin = createAdminHandlers(database);
+
+    const weak = await admin.handle({ method: 'POST', segments: ['signup'], body: { ...validSignup, password: 'short' } });
+    expect(weak.status).toBe(400);
+    // The complaint belongs beside the field, not only in the summary.
+    expect((weak.body.errors as Record<string, string>).password).toContain('Use at least 8 characters.');
+
+    const nameless = await admin.handle({ method: 'POST', segments: ['signup'], body: { ...validSignup, name: '' } });
+    expect(nameless.status).toBe(400);
+    expect(nameless.body.error).toBe('invalid_signup');
+
+    const anonymous = await admin.handle({ method: 'POST', segments: ['signup'], body: { email: 'x@example.com', password: 'a-good-password' } });
+    expect(anonymous.status).toBe(400);
+  });
+
+  it('refuses to be read', async () => {
+    const { database } = signupConsole();
+    const admin = createAdminHandlers(database);
+    const result = await admin.handle({ method: 'GET', segments: ['signup'] });
+    expect(result.status).toBe(405);
+  });
+});
+
+describe('owner account protection', () => {
+  const ownerId = '00000000-0000-4000-8000-0000000000f1';
+  const operatorRow = { ...activeAdminRow, id: '00000000-0000-4000-8000-000000000002', email: 'operator@glowngrace.in' };
+
+  /**
+   * A console of two accounts: the operator making the request, and the owner
+   * account they are trying to get rid of.
+   */
+  function ownerConsole() {
+    const rows = [operatorRow, { ...activeAdminRow, id: ownerId, name: 'Glow & Grace Super Admin', email: 'glownglancebiz@gmail.com', role: 'Super Admin' }];
+    const deleted: string[] = [];
+    const { database } = makeDatabase(async (text, values) => {
+      if (text.includes('FROM admin_sessions')) return { rows: [operatorRow], rowCount: 1 };
+      if (text.includes('SELECT 1 FROM admin_users WHERE id = $1 AND email = $2')) {
+        const match = rows.find((row) => row.id === values[0] && row.email === values[1]);
+        return { rows: match ? [{ ok: 1 }] : [], rowCount: match ? 1 : 0 };
+      }
+      if (text.includes('DELETE FROM admin_users')) {
+        deleted.push(String(values[0]));
+        return { rows: [{ id: values[0] }], rowCount: 1 };
+      }
+      if (text.includes('UPDATE admin_users SET')) {
+        const target = rows.find((row) => row.id === values[0]);
+        if (!target) return { rows: [], rowCount: 0 };
+        // The set clause names the columns, and the values follow the id in the
+        // same order, so the two are read together.
+        const assigned = (text.match(/SET (.*?) WHERE id = \$1/s)?.[1] ?? '').split(',').map((entry) => entry.trim().split(' ')[0]);
+        const columns: Record<string, unknown> = {};
+        assigned.forEach((column, position) => { columns[column] = values[position + 1]; });
+        if (typeof columns.role === 'string') target.role = columns.role;
+        if (typeof columns.name === 'string') target.name = columns.name;
+        return { rows: [target], rowCount: 1 };
+      }
+      if (text.includes('FROM admin_users')) return { rows, rowCount: rows.length };
+      return { rows: [], rowCount: 0 };
+    });
+    return { database, rows, deleted };
+  }
+
+  it('refuses to delete the owner account, however the request arrives', async () => {
+    const { database, deleted } = ownerConsole();
+    const admin = createAdminHandlers(database);
+
+    const result = await admin.handle({ method: 'DELETE', segments: ['users', ownerId], token });
+
+    // This is the account a deployment is opened with once every password has
+    // been rotated away, so a console session cannot remove it.
+    expect(result.status).toBe(400);
+    expect(result.body.error).toBe('owner_protected');
+    expect(deleted).toEqual([]);
+  });
+
+  it('refuses to move the owner account to another role', async () => {
+    const { database, rows } = ownerConsole();
+    const admin = createAdminHandlers(database);
+
+    const result = await admin.handle({ method: 'PATCH', segments: ['users', ownerId], body: { role: 'Store Manager' }, token });
+
+    expect(result.status).toBe(400);
+    expect(result.body.error).toBe('owner_protected');
+    expect(rows.find((row) => row.id === ownerId)?.role).toBe('Super Admin');
+  });
+
+  it('still lets the owner name be corrected, because that is not a grant', async () => {
+    const { database, rows } = ownerConsole();
+    const admin = createAdminHandlers(database);
+
+    const result = await admin.handle({ method: 'PATCH', segments: ['users', ownerId], body: { name: 'Super Admin' }, token });
+
+    expect(result.status).toBe(200);
+    expect(rows.find((row) => row.id === ownerId)?.name).toBe('Super Admin');
+  });
+
+  it('deletes an ordinary team member as before', async () => {
+    const { database, deleted } = ownerConsole();
+    const admin = createAdminHandlers(database);
+    const colleague = '00000000-0000-4000-8000-000000000003';
+
+    const result = await admin.handle({ method: 'DELETE', segments: ['users', colleague], token });
+
+    // The protection is on the owner account alone, not a general freeze.
+    expect(result.status).toBe(200);
+    expect(deleted).toEqual([colleague]);
   });
 });

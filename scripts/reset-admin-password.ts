@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { createInterface } from 'node:readline';
 import { Client } from 'pg';
-import { demoPassword, hashPassword, recoverablePasswordError } from '../src/server/admin/passwords.js';
+import { hashPassword, passwordPolicyError } from '../src/server/admin/passwords.js';
 import {
   clientConfig,
   describeResolvedDatabase,
@@ -18,20 +18,26 @@ import {
  * The password is never accepted as a command-line argument, never printed and
  * never written to disk: it comes from ADMIN_RESET_PASSWORD or from a masked
  * prompt. Every live session for the accounts is destroyed, because the point of
- * a reset is usually that the old password is no longer trustworthy.
+ * a reset is usually that the old password is no longer trustworthy. Resetting
+ * the owner account also restarts its weekly rotation, so the password set here
+ * stays good for a week rather than being replaced on the next scheduled check.
  *
  * Production, one account:
  *   npx tsx scripts/reset-admin-password.ts --email admin@glowngrace.in
  *
  * Production, every account:
- *   ADMIN_RESET_PASSWORD=demo123 npx tsx scripts/reset-admin-password.ts --all
+ *   ADMIN_RESET_PASSWORD=... npx tsx scripts/reset-admin-password.ts --all
  *
  * Local development:
  *   npx tsx scripts/reset-admin-password.ts --all --allow-local
  *
+ * A fresh database has one account, admin@glowngrace.in, seeded with a random
+ * password nobody holds. This script is how that account is first claimed, and
+ * how any locked-out account is recovered afterwards.
+ *
  * Add --yes to skip the confirmation. The password is held to the same
- * standard as the console's recovery action, which is what lets the published
- * sample password be restored without weakening every other form.
+ * standard as every other form, because there is no demo credential left to
+ * make an exception for.
  */
 
 function argument(name: string) {
@@ -89,15 +95,11 @@ async function resolvePassword() {
 }
 
 function checkPasswordPolicy(password: string) {
-  // Deliberately the recovery rule, not the ordinary one. This script exists for
-  // the case where the console is unreachable, and refusing the published
-  // sample password here would make it impossible to put a demo deployment back
-  // the way it was documented.
-  const problem = recoverablePasswordError(password);
+  // The ordinary policy, the same one every form in the product is held to.
+  // There is no published sample password to allow any more, which is the point
+  // of removing the demo accounts.
+  const problem = passwordPolicyError(password);
   if (problem) throw new Error(`${problem} Nothing was changed.`);
-  if (password === demoPassword) {
-    console.log('\nWarning: this is the published sample password. Anyone who has read the README can sign in.');
-  }
 }
 
 async function main() {
@@ -186,8 +188,12 @@ async function main() {
     // from one set through the console.
     const passwordHash = await hashPassword(password);
 
+    // The rotation clock restarts with the password. The owner account is
+    // replaced every 7 days by a schedule, so a reset that left the old stamp in
+    // place could see a password chosen by hand replaced by a generated one the
+    // next day, before anybody had read it.
     await client.query(
-      'UPDATE admin_users SET password_hash = $1, updated_at = NOW() WHERE id = ANY($2::uuid[])',
+      'UPDATE admin_users SET password_hash = $1, password_rotated_at = NOW(), updated_at = NOW() WHERE id = ANY($2::uuid[])',
       [passwordHash, accounts.map((account) => account.id)],
     );
 

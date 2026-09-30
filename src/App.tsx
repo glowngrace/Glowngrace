@@ -15,6 +15,7 @@ import {
   ShopPage,
 } from './pages/Pages';
 import { LoginPage } from './pages/AuthPage';
+import { SignupPage } from './pages/SignupPage';
 import { ResetPasswordPage } from './pages/ResetPasswordPage';
 import {
   AdminPortal,
@@ -68,7 +69,8 @@ function AppRoutes() {
           <Route path="/about" element={<PageGate path="/about"><AboutPage /></PageGate>} />
           <Route path="/contact" element={<PageGate path="/contact"><ContactPage /></PageGate>} />
           <Route path="/login" element={<LoginPage />} />
-        <Route path="/reset-password" element={<ResetPasswordPage />} />
+          <Route path="/signup" element={<SignupPage />} />
+          <Route path="/reset-password" element={<ResetPasswordPage />} />
           <Route path="/wishlist" element={<WishlistPage {...pageProps} />} />
           <Route path="/candidate" element={<CandidatePortal />} />
           <Route path="/partner" element={<PartnerPortal />} />

@@ -568,7 +568,7 @@ h3 { font-size: 1.25rem; }
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
 
-/* Sign-in and demo account screens */
+/* Sign-in, registration and password recovery */
 .login-section { display: grid; min-height: min(760px, calc(100vh - 125px)); grid-template-columns: 1fr 1fr; }
 .login-photo { position: relative; display: flex; min-height: 570px; align-items: end; overflow: hidden; background: #80655a; color: #fff; }
 .login-photo::after { position: absolute; inset: 0; background: linear-gradient(0deg, rgb(35 25 22 / 75%), transparent 76%); content: ''; }
@@ -582,20 +582,6 @@ h3 { font-size: 1.25rem; }
 .login-panel-inner > .eyebrow { color: var(--gold); }
 .login-panel-inner > h1 { margin: 4px 0; font-family: var(--serif); font-size: clamp(2.7rem, 5vw, 3.7rem); font-weight: 500; line-height: 1.08; }
 .login-intro { margin: 5px 0 20px; color: var(--muted); font-size: .92rem; }
-.demo-accounts { margin: 18px 0; padding: 14px 15px; border: 1px solid var(--line); background: var(--cream); }
-.demo-accounts summary { display: flex; justify-content: space-between; gap: 12px; color: var(--gold); cursor: pointer; font-size: .74rem; letter-spacing: .12em; list-style: none; text-transform: uppercase; }
-.demo-accounts summary::-webkit-details-marker { display: none; }
-.demo-accounts[open] summary > span { transform: rotate(45deg); }
-.demo-accounts > p { margin: 8px 0; color: var(--muted); font-size: .78rem; }
-.demo-account-list { display: grid; gap: 7px; margin-top: 10px; }
-.demo-account { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 11px; border: 1px solid var(--line); background: #fffdfa; cursor: pointer; text-align: left; transition: border-color .2s ease, transform .2s ease; }
-.demo-account:hover { transform: translateY(-1px); border-color: var(--gold-pale); }
-.demo-account > span:first-child { display: grid; gap: 1px; }
-.demo-account strong { font-family: var(--serif); font-size: 1rem; font-weight: 600; line-height: 1.2; }
-.demo-account small { color: var(--muted); font-size: .73rem; }
-.demo-account-arrow { color: var(--gold); font-size: 1rem; }
-.demo-accounts .demo-password-note { margin: 10px 0 0; }
-.demo-password-note code { padding: 2px 5px; background: #f1e8e1; color: var(--ink); font-family: var(--sans); }
 .login-form { display: grid; gap: 9px; }
 .login-form label { margin-top: 6px; color: #51453f; font-size: .78rem; font-weight: 500; letter-spacing: .04em; }
 .login-form input { width: 100%; min-height: 49px; padding: 12px 14px; border: 1px solid #dfd4cd; background: #fff; color: var(--ink); font-family: var(--sans); font-size: .95rem; }
@@ -611,8 +597,23 @@ h3 { font-size: 1.25rem; }
 .login-footnote { margin: 17px 0 5px; color: var(--muted); font-size: .82rem; text-align: center; }
 .login-footnote a, .login-back-link { color: var(--rose-deep); text-decoration: underline; text-underline-offset: 3px; }
 .login-back-link { display: block; margin-top: 14px; font-size: .8rem; text-align: center; }
-.demo-security-note { margin: 22px 0 0; color: #81766f; font-size: .72rem; line-height: 1.65; text-align: center; }
-.demo-security-note code { padding: 2px 5px; background: #f1e8e1; color: var(--ink); font-family: var(--sans); }
+.login-security-note { margin: 22px 0 0; color: #81766f; font-size: .72rem; line-height: 1.65; text-align: center; }
+
+/* Role picker on the registration form. A fieldset of radios rather than a
+   select, because the role is the one choice that decides what somebody sees
+   after approval and it deserves to be read, not inferred. */
+.role-picker { margin: 0 0 6px; padding: 0; border: 0; }
+.role-picker legend { margin-bottom: 8px; color: #51453f; font-size: .78rem; font-weight: 500; letter-spacing: .04em; }
+.role-options { display: grid; gap: 7px; }
+.role-option { display: flex; align-items: start; gap: 10px; padding: 10px 12px; border: 1px solid #dfd4cd; background: #fff; cursor: pointer; transition: border-color .2s ease, background-color .2s ease; }
+.role-option:hover { border-color: var(--gold-pale); }
+.role-option:has(input:checked) { border-color: var(--gold); background: var(--cream); }
+.role-option:has(input:focus-visible) { outline: 1px solid var(--gold); outline-offset: 1px; }
+.role-option input { flex: none; width: auto; min-height: 0; margin: 2px 0 0; padding: 0; accent-color: var(--gold); }
+.role-option > span { display: grid; gap: 1px; }
+.role-option strong { font-family: var(--serif); font-size: .95rem; font-weight: 600; line-height: 1.25; }
+.role-option small { color: var(--muted); font-size: .73rem; line-height: 1.4; }
+.login-optional { color: var(--muted); font-weight: 400; letter-spacing: 0; text-transform: lowercase; }
 
 /* Candidate, salon partner, and administrator dashboards */
 .portal-page { display: grid; min-height: 720px; grid-template-columns: 260px minmax(0, 1fr); background: var(--cream); }
@@ -639,7 +640,6 @@ h3 { font-size: 1.25rem; }
 .portal-topbar > div { display: flex; align-items: center; gap: 12px; }
 .portal-breadcrumb { color: var(--muted); font-size: .76rem; }
 .portal-breadcrumb span { padding: 0 7px; color: var(--gold); }
-.demo-preview-label { padding: 4px 7px; background: var(--cream-deep); color: var(--gold); font-size: .6rem; letter-spacing: .1em; }
 .portal-avatar { display: grid; width: 34px; height: 34px; place-items: center; border: 1px solid var(--gold-pale); border-radius: 50%; background: var(--blush); color: var(--rose-deep); font-family: var(--serif); font-size: .9rem; font-weight: 600; }
 .portal-content { max-width: 1120px; margin: 0 auto; padding: clamp(28px, 5vw, 54px); }
 .portal-content-heading { margin-bottom: 26px; }
@@ -690,6 +690,7 @@ h3 { font-size: 1.25rem; }
 .portal-locked, .wishlist-page { padding-block: clamp(55px, 8vw, 95px); text-align: center; }
 .portal-locked h1, .wishlist-page h1 { margin: 7px 0 9px; font-family: var(--serif); font-size: clamp(2.6rem, 6vw, 4rem); font-weight: 500; }
 .portal-locked p, .wishlist-page > p { margin: 0 auto 20px; color: var(--muted); font-size: .92rem; }
+.portal-locked-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
 .wishlist-page .gold-rule { margin-inline: auto; }
 .portal-saved-products { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 17px; margin-top: 32px; text-align: left; }
 .wishlist-card { padding-bottom: 15px; border: 1px solid var(--line); background: #fffdfa; }
@@ -1151,6 +1152,7 @@ button.admin-stat:hover { border-color: var(--a-rose); transform: translateY(-2p
 .admin-locked { min-height: 70vh; padding: 90px 24px; text-align: center; }
 .admin-locked h1 { margin: 8px auto; font-family: var(--serif); font-size: clamp(2.3rem, 5vw, 3.8rem); font-weight: 500; }
 .admin-locked p { margin: 0 auto 20px; color: var(--muted); }
+.admin-locked-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
 .admin-boot { display: flex; flex-direction: column; align-items: center; gap: 6px; }
 .admin-boot h1 { margin: 14px auto 4px; }
 .admin-boot p { margin: 0; }
@@ -1286,7 +1288,6 @@ button.admin-stat:hover { border-color: var(--a-rose); transform: translateY(-2p
   .portal-sidebar-bottom { display: flex; justify-content: space-between; margin: 0 -15px; padding: 9px 17px; }
   .portal-topbar { min-height: 53px; padding: 9px 16px; }
   .portal-breadcrumb { font-size: .7rem; }
-  .demo-preview-label { font-size: .55rem; }
   .portal-avatar { width: 30px; height: 30px; }
   .portal-content { padding: 27px 16px 42px; }
   .portal-content-heading { margin-bottom: 21px; }

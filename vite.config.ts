@@ -22,6 +22,16 @@ export default defineConfig(({ mode }) => {
       // A full console page has to resolve a dozen requests before its first
       // assertion can match, which is slow on a loaded CI runner.
       testTimeout: 30000,
+      // The default 'forks' pool pays for a fresh Node process per test file, and
+      // the jsdom environment on top of it takes several seconds to build. Under
+      // full parallelism the pool gives up waiting for a worker before the
+      // slowest file has finished starting, which fails three of the twelve files
+      // with "[vitest-pool-runner]: Timeout waiting for worker to respond" even
+      // though every one of them passes when it is run on its own.
+      // Worker threads reuse this process instead, which starts fast enough to
+      // stay inside the pool's own startup deadline, and per-file isolation is
+      // kept so a test still cannot see another file's globals.
+      pool: 'threads',
     },
   };
 });
