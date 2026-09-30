@@ -19,6 +19,90 @@ const storePage = {
   content: '#000000',
 };
 
+const e2eAdmin = {
+  id: 'e2e-admin',
+  name: 'Glow & Grace Admin',
+  email: 'admin@glowngrace.in',
+  role: 'Store Administrator',
+  avatar: '',
+  status: 'Active',
+  createdAt: '2026-01-01',
+};
+
+/**
+ * Issues a console session without contacting the API.
+ *
+ * Playwright checks the most recently registered route first, so registration
+ * order below is what gives each stub the right precedence: the catch-all is
+ * registered first, then the session, then anything a test supplies.
+ */
+async function stubAdminSession(page: import('@playwright/test').Page) {
+  await page.route('**/api/admin/session', async (route) => {
+    if (route.request().method() === 'DELETE') {
+      return route.fulfill({ json: { message: 'Signed out of the console.' } });
+    }
+    return route.fulfill({
+      json: {
+        token: 'e2e-session-token',
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+        user: e2eAdmin,
+      },
+    });
+  });
+}
+
+/**
+ * Every read the console store loads on mount. Without these the store's single
+ * parallel load rejects, the console never finishes loading, and a test that
+ * only cares about one panel fails for an unrelated reason.
+ */
+async function stubAdminReads(page: import('@playwright/test').Page) {
+  const reads: Record<string, unknown> = {
+    me: { user: e2eAdmin },
+    products: { products: [] },
+    orders: { orders: [] },
+    jobs: { records: [] },
+    candidates: { records: [] },
+    partners: { records: [] },
+    customers: { records: [] },
+    reviews: { records: [] },
+    users: { users: [], roles: ['Store Administrator'] },
+    pages: { pages: [] },
+    'demo-data': { datasets: [] },
+    summary: { orders: 0, products: 0, jobs: 0, candidates: 0, partners: 0, customers: 0, reviews: 0, pages: [], hiddenDatasets: [] },
+    settings: {
+      settings: {
+        profile: { storeName: 'Glow & Grace', tagline: '', email: '', phone: '', address: '' },
+        delivery: { freeAbove: 0, deliveryFee: 0, gst: 0, returns: 0 },
+        notifications: {},
+        preview: { livePreview: false },
+      },
+      updatedAt: null,
+    },
+  };
+
+  await page.route('**/api/admin/**', (route) => {
+    if (route.request().method() !== 'GET') return route.continue();
+    const path = route.request().url().replace(/^.*\/api\/admin\//, '').split('?')[0] ?? '';
+    const payload = reads[path];
+    return payload ? route.fulfill({ json: payload }) : route.continue();
+  });
+}
+
+/**
+ * `extra` runs after the base stubs and before navigating, so a test can
+ * override a single endpoint and still have that override win.
+ */
+async function signInAsAdmin(page: import('@playwright/test').Page, extra?: () => Promise<unknown>) {
+  await stubAdminReads(page);
+  await stubAdminSession(page);
+  await extra?.();
+  await page.goto('/login');
+  await page.getByText('Explore a demo account').click();
+  await page.getByRole('button', { name: /Administrator Platform overview/i }).click();
+  await page.getByRole('button', { name: 'Sign in to your account' }).click();
+}
+
 /**
  * Hold a request open until the returned function is called. Racing a fixed
  * delay is flaky on slower emulated devices, and a stalled request is the more
@@ -38,13 +122,6 @@ function holdRequest() {
     // Let the held request complete.
     release: () => unblock?.(),
   };
-}
-
-async function signInAsAdmin(page: import('@playwright/test').Page) {
-  await page.goto('/login');
-  await page.getByText('Explore a demo account').click();
-  await page.getByRole('button', { name: /Administrator Platform overview/i }).click();
-  await page.getByRole('button', { name: 'Sign in to your account' }).click();
 }
 
 test.describe('application loading feedback', () => {
@@ -119,7 +196,8 @@ test.describe('application loading feedback', () => {
 test.describe('settings page visibility controls', () => {
   test('only the switchable pages are offered', async ({ page }) => {
     const pageRoutes: string[] = [];
-    await page.route('**/api/admin/pages', async (route) => {
+    // Registered through `extra` so it outranks the base read stub below.
+    await signInAsAdmin(page, () => page.route('**/api/admin/pages', async (route) => {
       pageRoutes.push(route.request().method());
       await route.fulfill({
         json: {
@@ -130,9 +208,8 @@ test.describe('settings page visibility controls', () => {
           ],
         },
       });
-    });
+    }));
 
-    await signInAsAdmin(page);
     if (test.info().project.name === 'mobile-chromium') {
       await page.getByRole('button', { name: 'Toggle navigation' }).click();
     }
@@ -157,8 +234,7 @@ test.describe('settings page visibility controls', () => {
 
 test.describe('bulk upload templates', () => {
   test('the products template downloads as a real xlsx workbook', async ({ page }) => {
-    await page.route('**/api/admin/bulk/**', (route) => route.fulfill({ json: { ok: true, imported: 0 } }));
-    await signInAsAdmin(page);
+    await signInAsAdmin(page, () => page.route('**/api/admin/bulk/**', (route) => route.fulfill({ json: { ok: true, imported: 0 } })));
     if (test.info().project.name === 'mobile-chromium') {
       await page.getByRole('button', { name: 'Toggle navigation' }).click();
     }
@@ -183,8 +259,7 @@ test.describe('bulk upload templates', () => {
   });
 
   test('the template button reports progress while the workbook is built', async ({ page }) => {
-    await page.route('**/api/admin/bulk/**', (route) => route.fulfill({ json: { ok: true, imported: 0 } }));
-    await signInAsAdmin(page);
+    await signInAsAdmin(page, () => page.route('**/api/admin/bulk/**', (route) => route.fulfill({ json: { ok: true, imported: 0 } })));
     if (test.info().project.name === 'mobile-chromium') {
       await page.getByRole('button', { name: 'Toggle navigation' }).click();
     }

@@ -11,6 +11,8 @@ import { PageGate, StorefrontPagesProvider } from './components/StorefrontPages'
 import { products } from './data/catalog';
 import { signInDemo } from './auth/demo-auth';
 import { AdminPortal } from './pages/PortalPages';
+import { LoginPage } from './pages/AuthPage';
+import { ResetPasswordPage } from './pages/ResetPasswordPage';
 import { ProductPage } from './pages/Pages';
 
 function FavoriteCardHarness() {
@@ -44,6 +46,109 @@ function stubAdminApi() {
   localStorage.setItem('glow-grace-admin-token', 'test-token');
   return fetchMock;
 }
+
+describe('console sign-in and session lifetime', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    localStorage.clear();
+  });
+
+  function LoginHarness() {
+    return (
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/admin" element={<p>Console landing</p>} />
+        <Route path="/candidate" element={<p>Sample portal landing</p>} />
+        <Route path="/" element={<p>Storefront landing</p>} />
+      </Routes>
+    );
+  }
+
+  it('signs an administrator in with their own password even when it is not the sample one', async () => {
+    const user = { id: '9', name: 'Kanchan Iyer', email: 'kanchan@glowngrace.in', role: 'Store Administrator', avatar: '', status: 'Active', createdAt: '2026-01-01' };
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ token: 'server-issued-token', expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(), user }),
+    }) as unknown as Response));
+
+    render(
+      <MemoryRouter initialEntries={['/login']}>
+        <LoginHarness />
+      </MemoryRouter>,
+    );
+
+    await userEvent.type(screen.getByLabelText('Email address'), 'kanchan@glowngrace.in');
+    await userEvent.type(screen.getByLabelText('Password'), 'a-password-the-admin-chose');
+    await userEvent.click(screen.getByRole('button', { name: 'Sign in to your account' }));
+
+    // A real server sign-in is the authority. It must not then be second-guessed
+    // against the four sample accounts, which is what produced the misleading
+    // "did not match a demo account" error for anyone whose password is not
+    // the sample password.
+    expect(await screen.findByText('Console landing')).toBeVisible();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(localStorage.getItem('glow-grace-admin-token')).toBe('server-issued-token');
+  });
+
+  it('falls back to the sample accounts when the address has no console account', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false,
+      status: 401,
+      json: async () => ({ error: 'invalid_credentials', message: 'no console account' }),
+    }) as unknown as Response));
+
+    render(
+      <MemoryRouter initialEntries={['/login']}>
+        <LoginHarness />
+      </MemoryRouter>,
+    );
+
+    await userEvent.type(screen.getByLabelText('Email address'), 'candidate@glowngrace.in');
+    await userEvent.type(screen.getByLabelText('Password'), 'demo123');
+    await userEvent.click(screen.getByRole('button', { name: 'Sign in to your account' }));
+
+    // The portal sample accounts are not console accounts, so they still sign in.
+    expect(await screen.findByText('Sample portal landing')).toBeVisible();
+    expect(localStorage.getItem('glow-grace-demo-account')).toContain('candidate');
+  });
+
+  it('signs the operator out on its own when the session runs out', async () => {
+    stubAdminApi();
+    // An expiry just around the corner: the console must react to the countdown
+    // rather than wait for a request to come back 401.
+    localStorage.setItem('glow-grace-admin-session-expires-at', new Date(Date.now() + 80).toISOString());
+    signInDemo('admin@glowngrace.in', 'demo123');
+
+    render(
+      <MemoryRouter initialEntries={['/admin']}>
+        <AdminPortal />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('Your session has ended.')).toBeVisible();
+    expect(localStorage.getItem('glow-grace-admin-token')).toBeNull();
+    expect(localStorage.getItem('glow-grace-admin-session-expires-at')).toBeNull();
+  });
+
+  it('ends the stored session when the server rejects the token', async () => {
+    stubAdminApi();
+    signInDemo('admin@glowngrace.in', 'demo123');
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false,
+      status: 401,
+      json: async () => ({ error: 'unauthenticated', message: 'Sign in to the console to continue.' }),
+    }) as unknown as Response));
+
+    render(
+      <MemoryRouter initialEntries={['/admin']}>
+        <AdminPortal />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('Your session has ended.')).toBeVisible();
+    expect(localStorage.getItem('glow-grace-admin-token')).toBeNull();
+  });
+});
 
 describe('storefront interface', () => {
   afterEach(() => {
@@ -393,5 +498,142 @@ describe('storefront interface', () => {
     fireEvent.click(within(card).getByRole('button', { name: /add velvet matte.*wishlist/i }));
     expect(screen.getByRole('button', { name: /remove velvet matte.*wishlist/i })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('button', { name: 'Open shopping bag, 0 items' })).toBeVisible();
+  });
+});
+
+describe('forgotten password and reset', () => {
+  function passwordRoutes() {
+    return (
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/reset-password" element={<ResetPasswordPage />} />
+        <Route path="/" element={<h1>Back at the storefront</h1>} />
+      </Routes>
+    );
+  }
+
+it('shows what the server said instead of blaming the demo account', async () => {
+    // The original bug: a bare catch turned every failure, including a wrong
+    // password, into "this demo account is not available", which sent people
+    // resetting a password that had never been the problem.
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false,
+      status: 401,
+      json: async () => ({ error: 'invalid_credentials', message: 'That email and password do not match a console account.' }),
+    }) as unknown as Response));
+
+    render(<MemoryRouter initialEntries={['/login']}>{passwordRoutes()}</MemoryRouter>);
+
+    // A real console administrator whose address is not also a sample portal
+    // account. Every answer to them has to come from the server.
+    await userEvent.type(screen.getByLabelText('Email address'), 'deepak@glowngrace.in');
+    await userEvent.type(screen.getByLabelText('Password'), 'the-wrong-password');
+    await userEvent.click(screen.getByRole('button', { name: 'Sign in to your account' }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('That email and password do not match a console account.');
+    expect(alert).not.toHaveTextContent(/demo account/i);
+  });
+
+  it('surfaces a server outage rather than inventing a reason', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false,
+      status: 503,
+      json: async () => ({ error: 'unavailable', message: 'The console database is unavailable. Try again shortly.' }),
+    }) as unknown as Response));
+
+    render(<MemoryRouter initialEntries={['/login']}>{passwordRoutes()}</MemoryRouter>);
+
+    // admin@glowngrace.in is also a sample portal account. Even so, a 503 must
+    // report the outage, never "your password is wrong, try demo123". The wrong
+    // password keeps the portal fallback from swallowing the outage.
+    await userEvent.type(screen.getByLabelText('Email address'), 'admin@glowngrace.in');
+    await userEvent.type(screen.getByLabelText('Password'), 'oops-not-the-password');
+    await userEvent.click(screen.getByRole('button', { name: 'Sign in to your account' }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('The console database is unavailable.');
+    expect(alert).not.toHaveTextContent('demo123');
+  });
+
+  it('confirms a reset request without saying whether the account exists', async () => {
+    const calls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      calls.push(String(url));
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ message: 'If that address has a console account, a reset link is waiting for it.' }),
+      } as unknown as Response;
+    }));
+
+    render(<MemoryRouter initialEntries={['/login']}>{passwordRoutes()}</MemoryRouter>);
+
+    await userEvent.click(screen.getByText('Forgotten your password?'));
+    await userEvent.type(screen.getByLabelText('Email to reset'), 'admin@glowngrace.in');
+    await userEvent.click(screen.getByRole('button', { name: 'Send me a reset link' }));
+
+    expect(await screen.findByText(/If that address has a console account/)).toBeVisible();
+    expect(calls.some((url) => url.includes('/password-reset'))).toBe(true);
+  });
+
+  it('sets a new password from a reset link and then sends the person to sign in', async () => {
+    const sent: unknown[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
+      sent.push(JSON.parse(String(init.body)));
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ message: 'Password updated. You can sign in with it now.' }),
+      } as unknown as Response;
+    }));
+
+    render(<MemoryRouter initialEntries={['/reset-password']}>{passwordRoutes()}</MemoryRouter>);
+
+    await userEvent.type(screen.getByLabelText('Reset code'), 'a'.repeat(64));
+    await userEvent.type(screen.getByLabelText('New password'), 'brand-new-2026');
+    await userEvent.type(screen.getByLabelText('Confirm new password'), 'brand-new-2026');
+    await userEvent.click(screen.getByRole('button', { name: 'Set my new password' }));
+
+    expect(await screen.findByText('Password updated. You can sign in with it now.')).toBeVisible();
+    expect(sent[0]).toEqual({ token: 'a'.repeat(64), newPassword: 'brand-new-2026' });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Go to sign in' }));
+    expect(await screen.findByLabelText('Email address')).toBeVisible();
+  });
+
+  it('refuses to submit a reset when the two new passwords differ', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+
+    render(<MemoryRouter initialEntries={['/reset-password']}>{passwordRoutes()}</MemoryRouter>);
+
+    await userEvent.type(screen.getByLabelText('Reset code'), 'a'.repeat(64));
+    await userEvent.type(screen.getByLabelText('New password'), 'brand-new-2026');
+    await userEvent.type(screen.getByLabelText('Confirm new password'), 'brand-new-2027');
+    await userEvent.click(screen.getByRole('button', { name: 'Set my new password' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/do not match|match/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('reports an expired reset link without asking for the old password', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false,
+      status: 400,
+      json: async () => ({ error: 'invalid_reset_token', message: 'That reset link has expired or has already been used. Ask for a new one.' }),
+    }) as unknown as Response));
+
+    render(<MemoryRouter initialEntries={['/reset-password']}>{passwordRoutes()}</MemoryRouter>);
+
+    await userEvent.type(screen.getByLabelText('Reset code'), 'b'.repeat(64));
+    await userEvent.type(screen.getByLabelText('New password'), 'brand-new-2026');
+    await userEvent.type(screen.getByLabelText('Confirm new password'), 'brand-new-2026');
+    await userEvent.click(screen.getByRole('button', { name: 'Set my new password' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('That reset link has expired or has already been used.');
+    // No "current password" field exists on this page, and asking for one is the
+    // thing that made the original flow impossible.
+    expect(screen.queryByLabelText(/current password/i)).toBeNull();
   });
 });

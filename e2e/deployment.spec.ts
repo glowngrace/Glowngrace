@@ -11,6 +11,7 @@ const deploymentRoutes: Array<{ path: string; heading: string | RegExp }> = [
   { path: '/about', heading: 'Our Story' },
   { path: '/contact', heading: 'Get in Touch' },
   { path: '/login', heading: 'Sign in' },
+  { path: '/reset-password', heading: 'Set a new password' },
   { path: '/wishlist', heading: 'Your Wishlist' },
   { path: '/candidate', heading: 'Sign in to continue.' },
   { path: '/partner', heading: 'Sign in to continue.' },
