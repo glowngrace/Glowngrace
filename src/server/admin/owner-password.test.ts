@@ -5,7 +5,7 @@ import {
   rotateOwnerPasswordIfDue,
   startOwnerPasswordRotation,
 } from './owner-password';
-import { generateStrongPassword, passwordPolicy, superAdminRotationDays, verifyPassword } from './passwords';
+import { generateStrongPassword, maxPasswordHoldDays, passwordHoldError, passwordPolicy, superAdminRotationDays, verifyPassword } from './passwords';
 import { superAdminEmail, superAdminRole } from '../../auth/roles';
 import type { Database, QueryResult } from '../handlers';
 
@@ -18,18 +18,37 @@ type OwnerRow = {
   role: string;
   password_hash: string;
   password_rotated_at: Date | null;
+  password_hold_until: Date | null;
 };
 
 const ownerId = '00000000-0000-4000-8000-0000000000f1';
 
 /**
+ * The fragment that identifies the "is a rotation due" query.
+ *
+ * Named rather than repeated inline because the fake below has to recognise that
+ * one query and no other, and a test that asserts on a literal that has since
+ * been reformatted is a test that fails for the wrong reason.
+ */
+const dueCheck = 'password_hold_until IS NOT NULL AND password_hold_until <= $2';
+
+/**
  * A database holding one owner row, one session and the outbox.
  *
  * The point of these tests is what the rotation writes, so the fake keeps the
- * values it is given rather than answering with shapes alone.
+ * values it is given rather than answering with shapes alone. The due check is
+ * evaluated against the row rather than answered from a fixed answer, so the
+ * hold rule is tested as behaviour instead of as a string.
  */
-function ownerDatabase(rotatedAt: Date | null) {
-  const rows: OwnerRow[] = [{ id: ownerId, email: superAdminEmail, role: superAdminRole, password_hash: 'scrypt$old$hash', password_rotated_at: rotatedAt }];
+function ownerDatabase(rotatedAt: Date | null, holdUntil: Date | null = null) {
+  const rows: OwnerRow[] = [{
+    id: ownerId,
+    email: superAdminEmail,
+    role: superAdminRole,
+    password_hash: 'scrypt$old$hash',
+    password_rotated_at: rotatedAt,
+    password_hold_until: holdUntil,
+  }];
   const outbox: Array<{ kind: string; recipient: string; subject: string; body: string }> = [];
   const queries: string[] = [];
   let sessions = 2;
@@ -51,16 +70,29 @@ function ownerDatabase(rotatedAt: Date | null) {
       if (text.includes('UPDATE admin_users SET password_hash')) {
         rows[0].password_hash = String(values[0]);
         rows[0].password_rotated_at = values[1] as Date;
+        // The rotation spends the hold, so a hold left behind cannot go on
+        // exempting the password that replaced it.
+        rows[0].password_hold_until = null;
         return { rows: [], rowCount: 1 };
       }
-      // The due check and the existence check share this shape.
-      if (text.includes('password_rotated_at <= $2')) {
-        const cutoff = values[1] as Date;
-        const due = rows[0].password_rotated_at === null || rows[0].password_rotated_at.getTime() <= cutoff.getTime();
+      if (text.includes(dueCheck)) {
+        const at = values[1] as Date;
+        const weeklyCutoff = values[2] as Date;
+        const row = rows[0];
+        const due = row.password_hold_until !== null
+          ? row.password_hold_until.getTime() <= at.getTime()
+          : row.password_rotated_at === null || row.password_rotated_at.getTime() <= weeklyCutoff.getTime();
         return { rows: due ? [{ id: ownerId }] : [], rowCount: due ? 1 : 0 };
       }
+      // The existence check and the rotation's own SELECT share this shape. The
+      // rows are copied out rather than handed over, because a real result set is
+      // a snapshot: without this the rotation would read back the same object its
+      // own UPDATE has just mutated, and a column it had already read would appear
+      // to change underneath it.
       if (text.includes('FROM admin_users')) {
-        return rows.length > 0 ? { rows, rowCount: rows.length } : { rows: [], rowCount: 0 };
+        return rows.length > 0
+          ? { rows: rows.map((row) => ({ ...row })), rowCount: rows.length }
+          : { rows: [], rowCount: 0 };
       }
       return { rows: [], rowCount: 0 };
     }),
@@ -188,7 +220,7 @@ describe('owner password rotation', () => {
     expect(result).toEqual({ rotated: false, reason: 'missing' });
     expect(outbox).toHaveLength(0);
     // It still looked, rather than deciding from an assumption.
-    expect(asked.some((query) => query.includes('password_rotated_at <= $2'))).toBe(true);
+    expect(asked.some((query) => query.includes(dueCheck))).toBe(true);
   });
 
   it('checks once a day so a server that was down catches up on its first tick', () => {
@@ -245,3 +277,97 @@ async function readOutbox(database: Database) {
   const result = await database.query("SELECT body FROM email_outbox WHERE kind = 'owner-credentials'");
   return String(result.rows[0]?.body ?? '');
 }
+
+describe('holding a password that a person chose', () => {
+  const holdUntil = new Date(now.getTime() + 9 * DAY_MS);
+
+  it('leaves the password alone for the whole window, however old it is', async () => {
+    // The rotation stamp is deliberately far in the past. Without the hold this
+    // row would be rotated on the very next tick, which is the failure the hold
+    // exists to prevent: a password set by hand being replaced a day later,
+    // before whoever asked for it has used it.
+    const longAgo = new Date(now.getTime() - 60 * DAY_MS);
+    const { database, rows, outbox } = ownerDatabase(longAgo, holdUntil);
+
+    const result = await rotateOwnerPasswordIfDue(database, now);
+
+    expect(result).toEqual({ rotated: false, reason: 'not-due' });
+    expect(rows[0].password_hash).toBe('scrypt$old$hash');
+    expect(rows[0].password_rotated_at?.toISOString()).toBe(longAgo.toISOString());
+    // Nothing was generated, so nothing was mailed: an outbox row here would
+    // deliver a password that is not the one stored.
+    expect(outbox).toHaveLength(0);
+  });
+
+  it('still holds it on the last day, and not a moment sooner', async () => {
+    const tomorrow = new Date(now.getTime() + DAY_MS);
+    const { database, outbox } = ownerDatabase(new Date(now.getTime() - 60 * DAY_MS), tomorrow);
+
+    expect(await rotateOwnerPasswordIfDue(database, now)).toEqual({ rotated: false, reason: 'not-due' });
+    expect(outbox).toHaveLength(0);
+  });
+
+  it('rotates on the first check after the window closes', async () => {
+    const { database, rows, outbox } = ownerDatabase(new Date(now.getTime() - 60 * DAY_MS), holdUntil);
+
+    const result = await rotateOwnerPasswordIfDue(database, new Date(holdUntil.getTime() + 60_000));
+
+    expect(result.rotated).toBe(true);
+    expect(outbox).toHaveLength(1);
+    // A brand new password, and the one that was held stops opening anything.
+    expect(rows[0].password_hash).not.toBe('scrypt$old$hash');
+    expect(await verifyPassword('scrypt$old$hash', rows[0].password_hash)).toBe(false);
+  });
+
+  it('spends the hold, so it cannot exempt the password that replaced it', async () => {
+    const { database, rows } = ownerDatabase(new Date(now.getTime() - 60 * DAY_MS), holdUntil);
+
+    const result = await rotateOwnerPasswordIfDue(database, new Date(holdUntil.getTime() + 60_000));
+
+    expect(result.rotated && result.holdSpentUntil).toBe(holdUntil.toISOString());
+    expect(rows[0].password_hold_until).toBeNull();
+  });
+
+  it('goes back to the weekly clock once the hold is spent', async () => {
+    const { database, rows } = ownerDatabase(new Date(now.getTime() - 60 * DAY_MS), holdUntil);
+    await rotateOwnerPasswordIfDue(database, new Date(holdUntil.getTime() + 60_000));
+
+    // Rotated, so the stamp is now. Six days later it is not due, which is only
+    // true because the hold was cleared rather than left in the past.
+    const sixDaysOn = new Date(holdUntil.getTime() + 6 * DAY_MS);
+    expect(await rotateOwnerPasswordIfDue(database, sixDaysOn)).toEqual({ rotated: false, reason: 'not-due' });
+
+    // And a week after the rotation it is due again.
+    const eightDaysOn = new Date(holdUntil.getTime() + 8 * DAY_MS);
+    expect((await rotateOwnerPasswordIfDue(database, eightDaysOn)).rotated).toBe(true);
+    expect(rows[0].password_hold_until).toBeNull();
+  });
+
+  it('reports no hold for an account that was never held', async () => {
+    const { database } = ownerDatabase(new Date(now.getTime() - superAdminRotationDays * DAY_MS - 60_000));
+
+    const result = await rotateOwnerPassword(database, now);
+
+    expect(result.rotated && result.holdSpentUntil).toBeNull();
+  });
+
+  it('rejects a hold that has already passed, rather than storing it', () => {
+    expect(passwordHoldError(new Date(now.getTime() - DAY_MS), now)).toMatch(/already passed/);
+    expect(passwordHoldError(new Date(now.getTime()), now)).toMatch(/already passed/);
+  });
+
+  it('rejects a hold so far out it has stopped being a hold', () => {
+    const tooFar = new Date(now.getTime() + (maxPasswordHoldDays + 1) * DAY_MS);
+    expect(passwordHoldError(tooFar, now)).toMatch(new RegExp(`at most ${maxPasswordHoldDays} days`));
+  });
+
+  it('accepts a window inside the limit, and reads the boundary as a rejection', () => {
+    expect(passwordHoldError(new Date(now.getTime() + DAY_MS), now)).toBeNull();
+    expect(passwordHoldError(new Date(now.getTime() + maxPasswordHoldDays * DAY_MS), now)).toBeNull();
+    expect(passwordHoldError(new Date(now.getTime() + (maxPasswordHoldDays * DAY_MS) + 1000), now)).toMatch(/at most/);
+  });
+
+  it('refuses a date it cannot read, instead of guessing', () => {
+    expect(passwordHoldError(new Date('next tuesday'), now)).toMatch(/not a date/);
+  });
+});

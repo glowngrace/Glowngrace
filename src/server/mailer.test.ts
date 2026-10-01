@@ -9,6 +9,7 @@ import {
   type MailConfig,
   type OutboxMessage,
 } from './mailer';
+import { retiredSuperAdminEmail, superAdminEmail } from '../auth/roles';
 import type { Database } from './handlers';
 
 const config: MailConfig = {
@@ -23,7 +24,7 @@ const config: MailConfig = {
 const ownerMessage: OutboxMessage = {
   id: 'm1',
   kind: 'owner-credentials',
-  recipient: 'glownglancebiz@gmail.com',
+  recipient: superAdminEmail,
   subject: 'Your new Glow & Grace owner password',
   body: 'Password: a-generated-password',
 };
@@ -69,7 +70,16 @@ describe('smtp configuration', () => {
 describe('what may be emailed', () => {
   it('sends the owner credential to the owner address', () => {
     expect(isDeliverable(ownerMessage)).toBe(true);
-    expect(isDeliverable({ ...ownerMessage, recipient: 'GLOWNGLANCEBIZ@gmail.com' })).toBe(true);
+    expect(isDeliverable({ ...ownerMessage, recipient: superAdminEmail.toUpperCase() })).toBe(true);
+  });
+
+  it('refuses the address the owner account used to be spelled with', () => {
+    // The owner address was misspelled until this branch and the row was renamed
+    // to match. A credential addressed to the old spelling would reach a mailbox
+    // that is not the one holding the console, and would arrive looking exactly
+    // like a delivery that worked - so it has to be refused rather than sent.
+    expect(retiredSuperAdminEmail).not.toBe(superAdminEmail);
+    expect(isDeliverable({ ...ownerMessage, recipient: retiredSuperAdminEmail })).toBe(false);
   });
 
   it('refuses a password addressed to anybody else', () => {
@@ -80,8 +90,8 @@ describe('what may be emailed', () => {
   });
 
   it('refuses every other kind of message, whatever it contains', () => {
-    expect(isDeliverable({ kind: 'password-reset', recipient: 'glownglancebiz@gmail.com' } as never)).toBe(false);
-    expect(isDeliverable({ kind: 'signup', recipient: 'glownglancebiz@gmail.com' } as never)).toBe(false);
+    expect(isDeliverable({ kind: 'password-reset', recipient: superAdminEmail } as never)).toBe(false);
+    expect(isDeliverable({ kind: 'signup', recipient: superAdminEmail } as never)).toBe(false);
   });
 });
 
@@ -93,7 +103,7 @@ describe('delivering a message', () => {
     expect(outcome).toEqual({ delivered: true, id: 'm1' });
     expect(sendMail).toHaveBeenCalledWith({
       from: 'postmaster@example.com',
-      to: 'glownglancebiz@gmail.com',
+      to: superAdminEmail,
       subject: ownerMessage.subject,
       text: ownerMessage.body,
     });
@@ -135,7 +145,7 @@ describe('delivering a message', () => {
 describe('the delivery pass', () => {
   it('only ever picks up the owner credential', async () => {
     const { database, query } = outboxDatabase([
-      { id: 'm1', kind: 'owner-credentials', recipient: 'glownglancebiz@gmail.com', subject: 's', body: 'b' },
+      { id: 'm1', kind: 'owner-credentials', recipient: superAdminEmail, subject: 's', body: 'b' },
       { id: 'm2', kind: 'signup', recipient: 'reha@example.com', subject: 's', body: 'b' },
       { id: 'm3', kind: 'password-reset', recipient: 'deepak@glowngrace.in', subject: 's', body: 'b' },
     ]);
@@ -146,7 +156,7 @@ describe('the delivery pass', () => {
     expect(result.attempted).toBe(1);
     expect(result.delivered).toBe(1);
     expect(sendMail).toHaveBeenCalledTimes(1);
-    expect(sendMail.mock.calls[0][0].to).toBe('glownglancebiz@gmail.com');
+    expect(sendMail.mock.calls[0][0].to).toBe(superAdminEmail);
     // The kind is a parameter rather than an interpolation, so the query cannot
     // carry one in.
     expect(String(query.mock.calls[0][0])).toContain('$1');
@@ -157,8 +167,8 @@ describe('the delivery pass', () => {
     // was down across two rotations, both rows would otherwise be pending, and the
     // older one holds a password that has already been replaced.
     const { database, query } = outboxDatabase([
-      { id: 'older', kind: 'owner-credentials', recipient: 'glownglancebiz@gmail.com', subject: 's', body: 'stale' },
-      { id: 'newer', kind: 'owner-credentials', recipient: 'glownglancebiz@gmail.com', subject: 's', body: 'live' },
+      { id: 'older', kind: 'owner-credentials', recipient: superAdminEmail, subject: 's', body: 'stale' },
+      { id: 'newer', kind: 'owner-credentials', recipient: superAdminEmail, subject: 's', body: 'live' },
     ]);
     const sendMail = vi.fn(async () => ({ messageId: '1' }));
 
@@ -171,7 +181,7 @@ describe('the delivery pass', () => {
 
   it('marks a sent message so it is never sent twice', async () => {
     const { database, marked } = outboxDatabase([
-      { id: 'm1', kind: 'owner-credentials', recipient: 'glownglancebiz@gmail.com', subject: 's', body: 'b' },
+      { id: 'm1', kind: 'owner-credentials', recipient: superAdminEmail, subject: 's', body: 'b' },
     ]);
     const sendMail = vi.fn(async () => ({ messageId: '1' }));
 
@@ -182,7 +192,7 @@ describe('the delivery pass', () => {
 
   it('leaves a failed message queued, because it is the only copy of the password', async () => {
     const { database, marked } = outboxDatabase([
-      { id: 'm1', kind: 'owner-credentials', recipient: 'glownglancebiz@gmail.com', subject: 's', body: 'b' },
+      { id: 'm1', kind: 'owner-credentials', recipient: superAdminEmail, subject: 's', body: 'b' },
     ]);
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     try {
@@ -199,7 +209,7 @@ describe('the delivery pass', () => {
 
   it('leaves the message queued when there is no transport, so nothing is lost', async () => {
     const { database, marked } = outboxDatabase([
-      { id: 'm1', kind: 'owner-credentials', recipient: 'glownglancebiz@gmail.com', subject: 's', body: 'b' },
+      { id: 'm1', kind: 'owner-credentials', recipient: superAdminEmail, subject: 's', body: 'b' },
     ]);
 
     const result = await deliverPendingMail(database, { config: null });
@@ -211,8 +221,8 @@ describe('the delivery pass', () => {
 
   it('keeps going past a failure so one bad message cannot block the rest', async () => {
     const { database } = outboxDatabase([
-      { id: 'm1', kind: 'owner-credentials', recipient: 'glownglancebiz@gmail.com', subject: 's', body: 'b' },
-      { id: 'm2', kind: 'owner-credentials', recipient: 'glownglancebiz@gmail.com', subject: 's', body: 'b' },
+      { id: 'm1', kind: 'owner-credentials', recipient: superAdminEmail, subject: 's', body: 'b' },
+      { id: 'm2', kind: 'owner-credentials', recipient: superAdminEmail, subject: 's', body: 'b' },
     ]);
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     try {
@@ -249,7 +259,7 @@ describe('the form the password writers call', () => {
 describe('the delivery schedule', () => {
   it('can be started and stopped without holding the process open', async () => {
     const { database, marked } = outboxDatabase([
-      { id: 'm1', kind: 'owner-credentials', recipient: 'glownglancebiz@gmail.com', subject: 's', body: 'b' },
+      { id: 'm1', kind: 'owner-credentials', recipient: superAdminEmail, subject: 's', body: 'b' },
     ]);
     const sendMail = vi.fn(async () => ({ messageId: '1' }));
 

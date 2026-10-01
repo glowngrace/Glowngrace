@@ -383,6 +383,55 @@ async function retirePublishedAdminPassword(database: Database) {
 }
 
 /**
+ * The five colleagues the console used to be seeded with, all sharing the one
+ * published password.
+ *
+ * Kept as a named list rather than a SQL `IN` clause because what happens to each
+ * of these rows is decided one at a time.
+ */
+export const publishedDemoAdminEmails = [
+  'deepak@glowngrace.in',
+  'aditi@glowngrace.in',
+  'rohit@glowngrace.in',
+  'neha@glowngrace.in',
+  'karan@glowngrace.in',
+] as const;
+
+/**
+ * Removes the seeded colleagues that are still sitting on the published password,
+ * and leaves alone the ones that have been claimed.
+ *
+ * db/migrations/010 used to delete these five by address, on the reasoning that a
+ * demo row is nothing an operator would keep. Production disproved that:
+ * `deepak@glowngrace.in` had been claimed with a password somebody chose, and a
+ * delete by address takes the account and its history with it, unasked. The
+ * reasoning that already protected `admin@glowngrace.in` applies here unchanged,
+ * so it is applied here: a row is only removed while the password it holds still
+ * verifies against the published one.
+ *
+ * A claimed row therefore survives with the password its owner chose, and an
+ * unclaimed one goes, which is the whole point - after this, no account anywhere is
+ * reachable with a credential that was printed in a README. Anything still signed
+ * in with the published password has its sessions destroyed in the same call.
+ */
+async function retirePublishedDemoAccounts(database: Database) {
+  for (const email of publishedDemoAdminEmails) {
+    const found = await database.query(
+      'SELECT id, password_hash FROM admin_users WHERE email = $1',
+      [email],
+    );
+    const row = found.rows[0] as { id: string; password_hash: string } | undefined;
+    if (!row) continue;
+    if (!await verifyPassword(removedDemoPassword, String(row.password_hash))) continue;
+
+    await database.query('DELETE FROM admin_users WHERE id = $1', [row.id]);
+    // A session opened with the published password is worthless now, and the row
+    // it belonged to is gone anyway.
+    await database.query('DELETE FROM admin_sessions WHERE user_id = $1', [row.id]);
+  }
+}
+
+/**
  * Brings a freshly migrated database up to the console's starting point: the
  * storefront page list, the preview collections and the one bootstrap
  * administrator. Running it twice is a no-op, so it doubles as the
@@ -438,6 +487,7 @@ export async function seedAdminData(database: Database) {
     [await hashPassword(generateStrongPassword())],
   );
   await retirePublishedAdminPassword(database);
+  await retirePublishedDemoAccounts(database);
   // The owner account, which is rotated on a schedule rather than ever being
   // chosen by hand. `password_rotated_at` is stamped here so the first rotation
   // is a week after the account appears, not a second after the server boots.
