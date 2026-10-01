@@ -1,7 +1,8 @@
 import 'dotenv/config';
 import { createInterface } from 'node:readline';
 import { Client } from 'pg';
-import { hashPassword, passwordPolicyError } from '../src/server/admin/passwords.js';
+import { hashPassword, passwordHoldError, passwordPolicyError } from '../src/server/admin/passwords.js';
+import { superAdminEmail } from '../src/auth/roles.js';
 import {
   clientConfig,
   describeResolvedDatabase,
@@ -16,14 +17,20 @@ import {
  * nobody can get in through the console to do it themselves.
  *
  * The password is never accepted as a command-line argument, never printed and
- * never written to disk: it comes from ADMIN_RESET_PASSWORD or from a masked
- * prompt. Every live session for the accounts is destroyed, because the point of
- * a reset is usually that the old password is no longer trustworthy. Resetting
- * the owner account also restarts its weekly rotation, so the password set here
- * stays good for a week rather than being replaced on the next scheduled check.
+ * never written to disk: it comes from OWNER_PINNED_PASSWORD or
+ * ADMIN_RESET_PASSWORD, or from a masked prompt. Every live session for the
+ * accounts is destroyed, because the point of a reset is usually that the old
+ * password is no longer trustworthy. Resetting the owner account also restarts its
+ * weekly rotation, so the password set here stays good for a week rather than
+ * being replaced on the next scheduled check - or, with --hold-until, for the
+ * length of the hold.
  *
  * Production, one account:
  *   npx tsx scripts/reset-admin-password.ts --email admin@glowngrace.in
+ *
+ * Production, the owner account, held until a known date:
+ *   OWNER_PINNED_PASSWORD=... npx tsx scripts/reset-admin-password.ts \
+ *     --email glowngracebiz@gmail.com --hold-until 2026-10-10T23:59:59Z
  *
  * Production, every account:
  *   ADMIN_RESET_PASSWORD=... npx tsx scripts/reset-admin-password.ts --all
@@ -83,9 +90,18 @@ function ask(question: string) {
 }
 
 async function resolvePassword() {
-  const fromEnv = process.env.ADMIN_RESET_PASSWORD;
+  // Two names for the same thing, because the owner password has a second,
+  // time-boxed job and `OWNER_PINNED_PASSWORD` says what it is for. The
+  // password itself is only ever read from the environment or typed at a masked
+  // prompt: it is never an argument, so it cannot land in a shell history, a
+  // process listing, or a CI log.
+  const fromEnv = process.env.OWNER_PINNED_PASSWORD ?? process.env.ADMIN_RESET_PASSWORD;
   if (fromEnv !== undefined) {
-    console.log('Password read from ADMIN_RESET_PASSWORD.');
+    console.log(
+      process.env.OWNER_PINNED_PASSWORD !== undefined
+        ? 'Password read from OWNER_PINNED_PASSWORD.'
+        : 'Password read from ADMIN_RESET_PASSWORD.',
+    );
     return fromEnv;
   }
   const first = await askHidden('New password (input hidden): ');
@@ -102,6 +118,36 @@ function checkPasswordPolicy(password: string) {
   if (problem) throw new Error(`${problem} Nothing was changed.`);
 }
 
+/**
+ * Works out the moment a hold should end, or refuses the request.
+ *
+ * Only the owner account is eligible, and that restriction is the point rather
+ * than a limitation: `password_hold_until` is read by the owner's rotation and
+ * by nothing else, so a hold set on any other row would be a column that says
+ * "do not touch this" to a schedule that never looks at it. Silently accepting
+ * that would hand back a password everybody believes is pinned and that is in
+ * fact rotated away a week later with nobody told.
+ */
+function resolveHold(email: string, every: boolean, now: Date) {
+  const requested = argument('hold-until');
+  if (requested === undefined) return null;
+
+  if (every) {
+    throw new Error('--hold-until is for a single account. The rotation that would honour it only ever watches the owner.');
+  }
+  if (email !== superAdminEmail) {
+    throw new Error(
+      `--hold-until only applies to the owner account ${superAdminEmail}, because that is the only password the rotation schedule replaces. `
+      + `Nothing was changed.`,
+    );
+  }
+
+  const until = new Date(requested);
+  const problem = passwordHoldError(until, now);
+  if (problem) throw new Error(`${problem} Nothing was changed.`);
+  return until;
+}
+
 async function main() {
   const every = hasFlag('all');
   const email = (argument('email') ?? '').trim().toLowerCase();
@@ -111,6 +157,10 @@ async function main() {
   if (every && email) {
     throw new Error('Pass either --email or --all, not both.');
   }
+
+  // Resolved before the connection is opened, so a mistyped date fails on the
+  // command line rather than after a prompt and a confirmation.
+  const holdUntil = resolveHold(email, every, new Date());
 
   // A local run has to be asked for by name. Without the flag, a development
   // shell whose connection string has gone missing would silently fall back to
@@ -173,6 +223,14 @@ async function main() {
     );
     console.log(`\nLive sessions that will be signed out: ${liveSessions.rows[0]?.total ?? 0}`);
 
+    if (holdUntil) {
+      // Stated before the confirmation, because this is the one decision that
+      // silently disables a safety net: the password below is not rotated for the
+      // rest of this window, and whoever confirms has to know that.
+      console.log(`\nPassword hold: the rotation will leave this password alone until ${holdUntil.toISOString()}.`);
+      console.log('After that moment the normal 7-day rotation resumes and a new password is generated and mailed to the owner.');
+    }
+
     if (!hasFlag('yes')) {
       const answer = await ask(`\nReset the password for ${accounts.length} account${accounts.length === 1 ? '' : 's'}? Type "reset" to continue: `);
       if (answer !== 'reset') {
@@ -192,9 +250,15 @@ async function main() {
     // replaced every 7 days by a schedule, so a reset that left the old stamp in
     // place could see a password chosen by hand replaced by a generated one the
     // next day, before anybody had read it.
+    //
+    // `password_hold_until` is written in the same statement so the two cannot
+    // disagree. With a hold in place the rotation ignores the stamp entirely and
+    // waits for the date; without one the stamp is what governs, and a hold left
+    // over from a previous run is cleared rather than allowed to keep exempting a
+    // password nobody is watching for.
     await client.query(
-      'UPDATE admin_users SET password_hash = $1, password_rotated_at = NOW(), updated_at = NOW() WHERE id = ANY($2::uuid[])',
-      [passwordHash, accounts.map((account) => account.id)],
+      'UPDATE admin_users SET password_hash = $1, password_rotated_at = NOW(), password_hold_until = $3, updated_at = NOW() WHERE id = ANY($2::uuid[])',
+      [passwordHash, accounts.map((account) => account.id), holdUntil],
     );
 
     // Every session, including any this reset was made from.
@@ -219,6 +283,14 @@ async function main() {
     console.log(`\nPassword updated for ${accounts.length} account${accounts.length === 1 ? '' : 's'}.`);
     console.log(`Sessions signed out: ${liveSessions.rows[0]?.total ?? 0} (remaining: ${remaining.rows[0]?.total ?? 0}).`);
     console.log('Unused reset links for these accounts have been cancelled.');
+    if (holdUntil) {
+      // The operator has to leave knowing this password has an end date and a
+      // replacement they did not choose, because from then on they do not have
+      // the owner password at all.
+      console.log(`\nHeld until ${holdUntil.toISOString()}. The rotation checks once a day, so the reset lands`);
+      console.log('on the first check after that moment rather than at that moment exactly.');
+      console.log('The replacement is written to email_outbox, which is where the console reads it from.');
+    }
   } finally {
     await client.end().catch(() => undefined);
   }

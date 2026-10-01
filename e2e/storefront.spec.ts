@@ -165,8 +165,11 @@ test('signing in as a candidate opens the matching dashboard and its tabs', asyn
   await expect(profileMenu.getByRole('link', { name: 'Go to my space' })).toHaveAttribute('href', '/candidate');
   await page.getByRole('button', { name: 'Profile menu for Anjali Verma' }).click();
   await expect(page.getByRole('heading', { name: 'My applications' })).toBeVisible();
-  await expect(page.getByRole('navigation', { name: 'Dashboard sections' }).getByRole('button', { name: 'Training & certificates' })).toBeVisible();
-  await page.getByRole('navigation', { name: 'Dashboard sections' }).getByRole('button', { name: 'Saved openings' }).click();
+  // The candidate portal labels its own navigation, rather than borrowing the
+  // console's "Dashboard sections" landmark and leaving a screen-reader user to
+  // find out which of the two they are in.
+  await expect(page.getByRole('navigation', { name: 'Candidate sections' }).getByRole('button', { name: 'Training & certificates' })).toBeVisible();
+  await page.getByRole('navigation', { name: 'Candidate sections' }).getByRole('button', { name: 'Saved openings' }).click();
   await expect(page.getByRole('heading', { name: 'Saved openings' })).toBeVisible();
   await page.getByRole('button', { name: 'Profile menu for Anjali Verma' }).click();
   await profileMenu.getByRole('button', { name: 'Sign out' }).click();

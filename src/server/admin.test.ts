@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createAdminHandlers, seedAdminData } from './admin';
-import { hashPassword, sessionDurationMinutes, sessionExpiry, verifyPassword } from './admin/passwords';
+import { createAdminHandlers, publishedDemoAdminEmails, seedAdminData } from './admin';
+import { hashPassword, removedDemoPassword, sessionDurationMinutes, sessionExpiry, verifyPassword } from './admin/passwords';
+import { retiredSuperAdminEmail, superAdminEmail } from '../auth/roles';
 import type { Database, QueryResult } from './handlers';
 
 const activeAdminRow = {
@@ -473,7 +474,7 @@ describe('admin demo seeding', () => {
     const { database, query } = makeDatabase();
     await seedAdminData(database);
 
-    const ownerInsert = query.mock.calls.find(([text, values]) => String(text).includes('INSERT INTO admin_users') && (values as unknown[]).includes('glownglancebiz@gmail.com'));
+    const ownerInsert = query.mock.calls.find(([text, values]) => String(text).includes('INSERT INTO admin_users') && (values as unknown[]).includes(superAdminEmail));
     if (!ownerInsert) throw new Error('The owner account was never seeded.');
     const values = ownerInsert[1] as unknown[];
     expect(values).toContain('Super Admin');
@@ -491,13 +492,13 @@ describe('admin demo seeding', () => {
     // no account at all, so the first one has to be delivered like every later
     // rotation is.
     const { database, query } = makeDatabase(async (text, values) => (
-      text.includes('INSERT INTO admin_users') && (values as unknown[]).includes('glownglancebiz@gmail.com')
+      text.includes('INSERT INTO admin_users') && (values as unknown[]).includes(superAdminEmail)
         ? { rows: [], rowCount: 1 }
         : { rows: [], rowCount: 0 }
     ));
     await seedAdminData(database);
 
-    const ownerInsert = query.mock.calls.find(([text, values]) => String(text).includes('INSERT INTO admin_users') && (values as unknown[]).includes('glownglancebiz@gmail.com'));
+    const ownerInsert = query.mock.calls.find(([text, values]) => String(text).includes('INSERT INTO admin_users') && (values as unknown[]).includes(superAdminEmail));
     if (!ownerInsert) throw new Error('The owner account was never seeded.');
     const storedHash = String((ownerInsert[1] as unknown[])[3]);
 
@@ -505,7 +506,7 @@ describe('admin demo seeding', () => {
     if (!mail) throw new Error('The first owner password was never delivered.');
     const [text, values] = mail as [string, unknown[]];
     expect(text).toContain("'owner-credentials'");
-    expect(values[0]).toBe('glownglancebiz@gmail.com');
+    expect(values[0]).toBe(superAdminEmail);
     // The password in the message is the one the stored hash was made from, so
     // the link in it actually signs in.
     const sent = /^Password: (.+)$/m.exec(String(values[2]));
@@ -549,7 +550,7 @@ describe('admin demo seeding', () => {
   it('does not re-mail the first owner password on a later boot', async () => {
     // The insert conflicts, so the account kept the password it already had.
     const { database, query } = makeDatabase(async (text, values) => (
-      text.includes('INSERT INTO admin_users') && (values as unknown[]).includes('glownglancebiz@gmail.com')
+      text.includes('INSERT INTO admin_users') && (values as unknown[]).includes(superAdminEmail)
         ? { rows: [], rowCount: 0 }
         : { rows: [], rowCount: 0 }
     ));
@@ -572,14 +573,80 @@ describe('admin demo seeding', () => {
         ...(values as unknown[]).filter((value): value is string => typeof value === 'string' && value.includes('@')),
       ])
       .flat();
-    expect(seededAddresses).toEqual(expect.arrayContaining(['admin@glowngrace.in', 'glownglancebiz@gmail.com']));
+    expect(seededAddresses).toEqual(expect.arrayContaining(['admin@glowngrace.in', superAdminEmail]));
     for (const address of ['deepak@glowngrace.in', 'aditi@glowngrace.in', 'rohit@glowngrace.in', 'neha@glowngrace.in', 'karan@glowngrace.in']) {
       expect(seededAddresses).not.toContain(address);
     }
   });
 
-  it('writes payment_method in the column slot the orders constraint checks', async () => {
-    const { database, query } = makeDatabase();
+  it('deletes a seeded colleague that is still on the published password', async () => {
+    // The shape production was in: four rows nobody had claimed, and one an
+    // operator had already taken over.
+    const demoHash = await hashPassword(removedDemoPassword);
+    const claimedHash = await hashPassword('a-password-deepak-chose');
+    const rows = new Map<string, { id: string; email: string; password_hash: string }>([
+      ['deepak@glowngrace.in', { id: 'user-deepak', email: 'deepak@glowngrace.in', password_hash: claimedHash }],
+      ['aditi@glowngrace.in', { id: 'user-aditi', email: 'aditi@glowngrace.in', password_hash: demoHash }],
+      ['rohit@glowngrace.in', { id: 'user-rohit', email: 'rohit@glowngrace.in', password_hash: demoHash }],
+      ['neha@glowngrace.in', { id: 'user-neha', email: 'neha@glowngrace.in', password_hash: demoHash }],
+      ['karan@glowngrace.in', { id: 'user-karan', email: 'karan@glowngrace.in', password_hash: demoHash }],
+    ]);
+    const deleted: string[] = [];
+    const sessionsCleared: string[] = [];
+    const { database } = makeDatabase(async (text, values) => {
+      if (text.includes('SELECT id, password_hash FROM admin_users WHERE email = $1')) {
+        const row = rows.get(String(values[0]));
+        return { rows: row ? [row] : [], rowCount: row ? 1 : 0 };
+      }
+      if (text.includes('DELETE FROM admin_users')) {
+        deleted.push(String(values[0]));
+        return { rows: [], rowCount: 1 };
+      }
+      if (text.includes('DELETE FROM admin_sessions WHERE user_id = $1')) {
+        sessionsCleared.push(String(values[0]));
+        return { rows: [], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+
+    await seedAdminData(database);
+
+    // The four unclaimed rows go, and every one of their sessions with them.
+    expect(deleted).toEqual(['user-aditi', 'user-rohit', 'user-neha', 'user-karan']);
+    expect(sessionsCleared).toEqual(expect.arrayContaining(['user-aditi', 'user-rohit', 'user-neha', 'user-karan']));
+    // The claimed account is not touched, and it keeps the password its owner set.
+    // This is the whole reason the deletion is a per-row check and not an `IN`
+    // clause: deepak@glowngrace.in was real on production.
+    expect(deleted).not.toContain('user-deepak');
+    expect(rows.get('deepak@glowngrace.in')?.password_hash).toBe(claimedHash);
+    expect(await verifyPassword('a-password-deepak-chose', String(rows.get('deepak@glowngrace.in')?.password_hash))).toBe(true);
+  });
+
+  it('leaves every seeded colleague alone once they all hold a real password', async () => {
+    const claimedHash = await hashPassword('a-password-somebody-chose');
+    const rows = new Map<string, { id: string; email: string; password_hash: string }>(publishedDemoAdminEmails.map((email, index) => [
+      email,
+      { id: `user-${index}`, email, password_hash: claimedHash },
+    ]));
+    const deleted: string[] = [];
+    const { database } = makeDatabase(async (text, values) => {
+      if (text.includes('SELECT id, password_hash FROM admin_users WHERE email = $1')) {
+        const row = rows.get(String(values[0]));
+        return { rows: row ? [row] : [], rowCount: row ? 1 : 0 };
+      }
+      if (text.includes('DELETE FROM admin_users')) {
+        deleted.push(String(values[0]));
+        return { rows: [], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+
+    await seedAdminData(database);
+
+    expect(deleted).toEqual([]);
+  });
+
+  it('writes payment_method in the column slot the orders constraint checks', async () => {    const { database, query } = makeDatabase();
     await seedAdminData(database);
 
     const orderInsert = query.mock.calls.find(([text]) => String(text).includes('INSERT INTO orders'));
@@ -1000,7 +1067,7 @@ describe('public role-based registration', () => {
     // does not treat this boot as the moment the owner password was issued.
     const rows: Array<Record<string, unknown>> = [
       { ...seededAdmin },
-      { ...seededAdmin, id: '00000000-0000-4000-8000-0000000000f1', name: 'Glow & Grace Super Admin', email: 'glownglancebiz@gmail.com', role: 'Super Admin' },
+      { ...seededAdmin, id: '00000000-0000-4000-8000-0000000000f1', name: 'Glow & Grace Super Admin', email: superAdminEmail, role: 'Super Admin' },
     ];
     const outbox: Array<{ recipient: string; subject: string; body: string }> = [];
     const queries: string[] = [];
@@ -1208,7 +1275,7 @@ describe('owner account protection', () => {
    * account they are trying to get rid of.
    */
   function ownerConsole() {
-    const rows = [operatorRow, { ...activeAdminRow, id: ownerId, name: 'Glow & Grace Super Admin', email: 'glownglancebiz@gmail.com', role: 'Super Admin' }];
+    const rows = [operatorRow, { ...activeAdminRow, id: ownerId, name: 'Glow & Grace Super Admin', email: superAdminEmail, role: 'Super Admin' }];
     const deleted: string[] = [];
     const { database } = makeDatabase(async (text, values) => {
       if (text.includes('FROM admin_sessions')) return { rows: [operatorRow], rowCount: 1 };
@@ -1282,5 +1349,24 @@ describe('owner account protection', () => {
     // The protection is on the owner account alone, not a general freeze.
     expect(result.status).toBe(200);
     expect(deleted).toEqual([colleague]);
+  });
+
+  it('does not protect an account still sitting on the address the owner used to be spelled with', async () => {
+    // The owner address was misspelled until this branch, and db/migrations/012
+    // renames the row. If any deployment is still holding the old spelling, that
+    // account is an ordinary team member: it is not the way back in after every
+    // credential has been rotated, so it must not be mistaken for one and
+    // protected from the cleanup it needs.
+    const { database, deleted, rows } = ownerConsole();
+    rows[1].email = retiredSuperAdminEmail;
+    const admin = createAdminHandlers(database);
+
+    const result = await admin.handle({ method: 'DELETE', segments: ['users', ownerId], token });
+
+    expect(result.status).toBe(200);
+    expect(deleted).toEqual([ownerId]);
+    // And the misspelling is exactly what makes it a different account, so this
+    // test cannot pass just because the protection was switched off.
+    expect(retiredSuperAdminEmail).not.toBe(superAdminEmail);
   });
 });

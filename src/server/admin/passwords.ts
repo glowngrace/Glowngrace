@@ -83,6 +83,34 @@ export const sessionDurationMinutes = 5;
  */
 export const superAdminRotationDays = 7;
 
+/**
+ * The longest a hand-chosen password may be held past the weekly rotation.
+ *
+ * A hold exists for a handover, a demo or an incident - a window somebody needs a
+ * known password for. It is not a way to switch the rotation off, so it is capped
+ * rather than left open-ended: past this the script refuses instead of writing a
+ * date far enough out that nobody is still watching when it arrives.
+ */
+export const maxPasswordHoldDays = 30;
+
+/**
+ * Why a requested password hold cannot be granted, or `null` when it can.
+ *
+ * A hold in the past is rejected rather than ignored, because the alternative -
+ * quietly storing a date that has already gone - produces an account that is due
+ * for rotation on the very next tick, which is the opposite of what the operator
+ * asking for a hold intends.
+ */
+export function passwordHoldError(until: Date, now: Date = new Date()) {
+  if (Number.isNaN(until.getTime())) return 'That is not a date I can read. Use an ISO 8601 timestamp, for example 2026-10-10T23:59:59Z.';
+  if (until.getTime() <= now.getTime()) return 'That moment has already passed, so there is nothing to hold.';
+  const days = (until.getTime() - now.getTime()) / (24 * 60 * 60 * 1000);
+  if (days > maxPasswordHoldDays) {
+    return `A password can be held for at most ${maxPasswordHoldDays} days. Rotate it, or set it again nearer the time you need it.`;
+  }
+  return null;
+}
+
 const GENERATED_PASSWORD_LENGTH = 24;
 const GENERATED_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%&*?';
 

@@ -38,9 +38,27 @@ export type ConsoleRole = (typeof consoleRoles)[number];
 export type PortalRole = (typeof portalRoles)[number];
 export type AccountRole = (typeof signupRoles)[number];
 
-/** The role that owns the deployment, and the one address it is reached at. */
+/**
+ * The role that owns the deployment, and the one address it is reached at.
+ *
+ * The address was `glownglancebiz@gmail.com` until this branch, which is a
+ * misspelling of the real one and matched no account in any database: the weekly
+ * rotation looked for a row that was not there and did nothing. It is spelled
+ * correctly here, and db/migrations/012 renames the row in any database that
+ * still holds the old one.
+ */
 export const superAdminRole = 'Super Admin';
-export const superAdminEmail = 'glownglancebiz@gmail.com';
+export const superAdminEmail = 'glowngracebiz@gmail.com';
+
+/**
+ * The address the owner account used to be reached at.
+ *
+ * Kept only so the migration and the tests can talk about the old value. Nothing
+ * authenticates against it, and it must never be treated as a second owner: two
+ * addresses for one account is how a deployment ends up with a way in that
+ * nobody rotates.
+ */
+export const retiredSuperAdminEmail = 'glownglancebiz@gmail.com';
 
 /** One line of help per role, so the form explains itself instead of a list. */
 export const roleDescriptions: Record<ConsoleRole | PortalRole, string> = {

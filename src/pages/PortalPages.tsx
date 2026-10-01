@@ -68,7 +68,7 @@ function PortalShell({ role, account, subheading, tabs, initialTab }: { role: Po
       <aside className="portal-sidebar">
         <Link className="brand portal-brand" to="/"><img src="/images/logo_mark.png" alt="" /><span><strong>Glow <i>&</i> Grace</strong><small>BEAUTY · CAREERS · COMMUNITY</small></span></Link>
         <div className="portal-user"><img src={profileImage} alt="" /><span><strong>{account.name}</strong><small>{subheading}</small></span></div>
-        <nav aria-label="Dashboard sections" className="portal-nav">{tabs.map((tab) => <button type="button" key={tab.id} aria-current={activeTab === tab.id ? 'page' : undefined} className={activeTab === tab.id ? 'portal-nav-button active' : 'portal-nav-button'} onClick={() => setActiveTab(tab.id)}><span aria-hidden="true">✦</span>{tab.label}</button>)}</nav>
+        <nav aria-label={`${role} sections`} className="portal-nav">{tabs.map((tab) => <button type="button" key={tab.id} aria-current={activeTab === tab.id ? 'page' : undefined} className={activeTab === tab.id ? 'portal-nav-button active' : 'portal-nav-button'} onClick={() => setActiveTab(tab.id)}><span aria-hidden="true">✦</span>{tab.label}</button>)}</nav>
         <div className="portal-sidebar-bottom"><Link to="/">← Back to the beauty house</Link><button type="button" onClick={logout}>Sign out</button></div>
       </aside>
       <div className="portal-workspace">

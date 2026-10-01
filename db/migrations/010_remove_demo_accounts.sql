@@ -19,18 +19,23 @@
 -- the first request after the migration, which is the same moment the application
 -- would otherwise be seeding anyway.
 --
--- The other five seeded colleagues have no such history: they are demo rows and
--- nothing an operator would keep, so they go by address, every time.
-DELETE FROM admin_users WHERE email IN (
-  'deepak@glowngrace.in',
-  'aditi@glowngrace.in',
-  'rohit@glowngrace.in',
-  'neha@glowngrace.in',
-  'karan@glowngrace.in'
-);
+-- The other five seeded colleagues used to be deleted here, by address, on the
+-- grounds that they were demo rows and nothing an operator would keep. Production
+-- says otherwise: deepak@glowngrace.in had been claimed with a password somebody
+-- chose, and deleting the row by address would have destroyed a real account
+-- without asking. The same argument that sent `admin@glowngrace.in` to the code
+-- applies to all five of them, so the deletion moved there too, and it happens per
+-- row and only when the row still verifies against the published password.
+--
+-- Nothing is deleted by this file. A database that has already run the old version
+-- of it has lost those rows, which is why local is down to `admin@glowngrace.in`
+-- and the owner; re-running this file changes nothing, and a database that still
+-- holds them is cleaned up by the first request after the migration.
 
 -- The sessions that were minted against the shared password are worthless now
--- and would otherwise keep working until they lapsed.
+-- and would otherwise keep working until they lapsed. Sessions whose account is
+-- gone are removed here; sessions belonging to an account that survives are left
+-- alone, so this cannot sign out a real operator who has just claimed a row.
 DELETE FROM admin_sessions WHERE user_id NOT IN (SELECT id FROM admin_users);
 
 -- "Placements Coordinator" was a typo, and a role name is what a person is
