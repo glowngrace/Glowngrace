@@ -1292,11 +1292,11 @@ export function createAdminHandlers(database: Database) {
         // columns and a spreadsheet cannot carry image bytes. The console form does
         // upload them, so they are read and stored here instead of being dropped.
         const uploaded = productImageUploads.safeParse((request.body as Record<string, unknown> | undefined)?.images);
-        if (!uploaded.success) return fail(400, 'invalid_product_image', 'Each image must be a valid JPEG, PNG or WebP file no larger than 1200 × 1200 px or 300 KB.');
+        if (!uploaded.success) return fail(400, 'invalid_product_image', 'Each image must be a valid JPEG, PNG or WebP file no larger than 1200 x 1200 px or 300 KB.');
         // Validated before the product row exists, so a rejected upload cannot
         // leave a catalogue entry with no gallery behind it.
         const { images: validImages, invalid } = parseProductImages(uploaded.data ?? []);
-        if (invalid) return fail(400, 'invalid_product_image', 'Each image must be a valid JPEG, PNG or WebP file no larger than 1200 × 1200 px or 300 KB.');
+        if (invalid) return fail(400, 'invalid_product_image', 'Each image must be a valid JPEG, PNG or WebP file no larger than 1200 x 1200 px or 300 KB.');
         const result = await database.query(
           `INSERT INTO products (name, category, brand, sku, price, mrp, stock, image, description,
                                  slug, meta_title, meta_description, shades, highlights,
@@ -1380,7 +1380,7 @@ export function createAdminHandlers(database: Database) {
         // deleted them by accident; the form now sends kept references instead.
         if (update.images !== undefined) {
           const replaced = await setProductImages(productId, update.images);
-          if (!replaced) return fail(400, 'invalid_product_image', 'Each image must be a valid JPEG, PNG or WebP file no larger than 1200 × 1200 px or 300 KB.');
+          if (!replaced) return fail(400, 'invalid_product_image', 'Each image must be a valid JPEG, PNG or WebP file no larger than 1200 x 1200 px or 300 KB.');
         }
         const saved = await readProduct(productId);
         if (!saved) return fail(404, 'not_found', 'That product is no longer in the catalogue.');
