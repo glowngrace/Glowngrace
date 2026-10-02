@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import { products, type Product } from '../data/catalog.js';
 import { checkoutTaxRate, deliveryOptions } from '../data/checkout.js';
+import { sanitizeRichText } from '../lib/rich-text.js';
 import { isMissingSchema } from './schema.js';
 
 export type QueryResult = { rows: Array<Record<string, unknown>>; rowCount: number | null };
@@ -42,6 +43,51 @@ const contactSchema = z.object({
 const newsletterSchema = z.object({
   email: z.string().trim().email().max(254),
 });
+/**
+ * Product tag lists are stored as one comma-separated string.
+ *
+ * `job_vacancies.skills` already works this way, so a product's shades and
+ * highlights follow it rather than introducing a join table for two short lists
+ * that are only ever read and written whole.
+ */
+export function joinProductTags(tags: string[]) {
+  return tags.map((tag) => tag.trim()).filter((tag) => tag !== '').join(', ');
+}
+
+export function splitProductTags(value: unknown): string[] {
+  return String(value ?? '')
+    .split(',')
+    .map((tag) => tag.trim())
+    .filter((tag) => tag !== '');
+}
+
+/**
+ * A product slug is optional, and an absent or blank one is the common case, so
+ * the pattern is only enforced on a value that is actually there.
+ */
+export const productSlugSchema = z.string().trim().max(180).refine(
+  (value) => value === '' || /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value),
+  'Use lowercase words joined by hyphens.',
+);
+
+/**
+ * Shades and highlights reach the server in two shapes: an array from the console
+ * tag inputs, and one comma-separated cell from a bulk upload sheet. Both are
+ * accepted and normalise to an array here, so no caller has to know which.
+ */
+export const productTagsSchema = z.preprocess(
+  (value) => (typeof value === 'string' ? splitProductTags(value) : value),
+  z.array(z.string().trim().min(1).max(60)).max(20),
+);
+
+/**
+ * Product copy is edited with the console's rich text editor, so it arrives as
+ * HTML. It is reduced to the allowed tags here on the way in, which means what is
+ * stored is already safe and the product page never has to trust it. Plain text
+ * from a spreadsheet passes through as itself, with its line breaks kept.
+ */
+export const productRichTextSchema = z.string().trim().max(3000).transform(sanitizeRichText);
+
 const productSchema = z.object({
   name: z.string().trim().min(2).max(180),
   category: z.enum(['Makeup', 'Skincare', 'Fragrance', 'Gifting']),
@@ -58,6 +104,16 @@ const productSchema = z.object({
     height: z.number().int().min(1).max(1200),
   })).min(1).max(10),
   description: z.string().trim().min(1).max(3000),
+  slug: productSlugSchema.optional().default(''),
+  metaTitle: z.string().trim().max(180).optional().default(''),
+  metaDescription: z.string().trim().max(500).optional().default(''),
+  shades: productTagsSchema.optional().default([]),
+  highlights: productTagsSchema.optional().default([]),
+  featuresAndSpecification: productRichTextSchema.optional().default(''),
+  measurement: productRichTextSchema.optional().default(''),
+  materialAndCare: productRichTextSchema.optional().default(''),
+  additionalDetails: productRichTextSchema.optional().default(''),
+  itemDetails: productRichTextSchema.optional().default(''),
 }).refine((product) => product.mrp >= product.price, { path: ['mrp'] });
 
 export function mapProduct(row: Record<string, unknown>): Product {
@@ -79,6 +135,16 @@ export function mapProduct(row: Record<string, unknown>): Product {
     description: String(row.description),
     published: row.published === undefined ? true : Boolean(row.published),
     featured: Boolean(row.featured),
+    slug: row.slug ? String(row.slug) : undefined,
+    metaTitle: row.meta_title ? String(row.meta_title) : undefined,
+    metaDescription: row.meta_description ? String(row.meta_description) : undefined,
+    shades: splitProductTags(row.shades),
+    highlights: splitProductTags(row.highlights),
+    featuresAndSpecification: row.features_and_specification ? String(row.features_and_specification) : undefined,
+    measurement: row.measurement ? String(row.measurement) : undefined,
+    materialAndCare: row.material_and_care ? String(row.material_and_care) : undefined,
+    additionalDetails: row.additional_details ? String(row.additional_details) : undefined,
+    itemDetails: row.item_details ? String(row.item_details) : undefined,
   };
 }
 
@@ -184,7 +250,10 @@ export function createHandlers(database: Database) {
     const result = await database.query(
       `SELECT product.id, product.name, product.category, product.brand, product.sku, product.price,
               product.mrp, product.stock, product.rating, product.reviews, product.badge,
-              product.image, product.description, ${flags}
+              product.image, product.description, product.slug, product.meta_title,
+              product.meta_description, product.shades, product.highlights,
+              product.features_and_specification, product.measurement, product.material_and_care,
+              product.additional_details, product.item_details, ${flags}
               COALESCE(
                 (SELECT json_agg('/api/products/' || product.id || '/images/' || image.position ORDER BY image.position)
                  FROM product_images AS image WHERE image.product_id = product.id),
@@ -213,16 +282,25 @@ export function createHandlers(database: Database) {
     const returning = publishing ? ', published, featured' : '';
     return database.query(
       `WITH created_product AS (
-         INSERT INTO products (name, category, brand, sku, price, mrp, stock, image, description${flags})
-         VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6, $7, $8, $9${published})
-         RETURNING id, name, category, brand, sku, price, mrp, stock, rating, reviews, badge, image, description${returning}
+         INSERT INTO products (name, category, brand, sku, price, mrp, stock, image, description,
+                               slug, meta_title, meta_description, shades, highlights,
+                               features_and_specification, measurement, material_and_care,
+                               additional_details, item_details${flags})
+         VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6, $7, $8, $9,
+                 NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), $13, $14,
+                 NULLIF($15, ''), NULLIF($16, ''), NULLIF($17, ''),
+                 NULLIF($18, ''), NULLIF($19, '')${published})
+         RETURNING id, name, category, brand, sku, price, mrp, stock, rating, reviews, badge, image, description,
+                   slug, meta_title, meta_description, shades, highlights,
+                   features_and_specification, measurement, material_and_care,
+                   additional_details, item_details${returning}
        ),
        created_images AS (
          INSERT INTO product_images (product_id, position, filename, mime_type, image_data, width, height)
          SELECT created_product.id, image.position, image.filename, image.mime_type,
                 decode(image.data, 'base64'), image.width, image.height
          FROM created_product
-         CROSS JOIN jsonb_to_recordset($10::jsonb) AS image(
+         CROSS JOIN jsonb_to_recordset($20::jsonb) AS image(
            position INTEGER, filename VARCHAR(180), mime_type VARCHAR(32),
            data TEXT, width INTEGER, height INTEGER
          )
@@ -238,6 +316,10 @@ export function createHandlers(database: Database) {
       [
         product.name, product.category, product.brand, product.sku, product.price, product.mrp,
         product.stock, product.images[0].filename, product.description,
+        product.slug, product.metaTitle, product.metaDescription,
+        joinProductTags(product.shades), joinProductTags(product.highlights),
+        product.featuresAndSpecification, product.measurement, product.materialAndCare,
+        product.additionalDetails, product.itemDetails,
         JSON.stringify(validImages.map((image) => ({
           position: image.position,
           filename: image.filename,

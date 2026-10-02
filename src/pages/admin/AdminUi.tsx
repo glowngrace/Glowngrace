@@ -243,7 +243,7 @@ export function ChipRow({ options, value, onChange, label }: { options: string[]
   );
 }
 
-export function TagInput({ tags, onChange, placeholder = 'Add and press Enter' }: { tags: string[]; onChange: (next: string[]) => void; placeholder?: string }) {
+export function TagInput({ tags, onChange, placeholder = 'Add and press Enter', label }: { tags: string[]; onChange: (next: string[]) => void; placeholder?: string; label: string }) {
   const [draft, setDraft] = useState('');
 
   function commit() {
@@ -267,6 +267,9 @@ export function TagInput({ tags, onChange, placeholder = 'Add and press Enter' }
       <input
         type="text"
         value={draft}
+        // The surrounding fieldset and its legend group the tags, but a legend
+        // does not name the box they are typed into, so the input needs its own.
+        aria-label={label}
         placeholder={placeholder}
         onChange={(event) => setDraft(event.target.value)}
         onBlur={commit}

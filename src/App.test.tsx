@@ -330,7 +330,9 @@ describe('storefront interface', () => {
     fireEvent.change(screen.getByLabelText('Original price (₹)'), { target: { value: '120' } });
     fireEvent.change(screen.getByLabelText('Stock quantity'), { target: { value: '5' } });
     await user.upload(screen.getByLabelText('Product images'), new File(['image'], 'test-product.png', { type: 'image/png' }));
-    fireEvent.change(screen.getByLabelText('Description'), { target: { value: 'A test product description.' } });
+     const description = screen.getByRole('textbox', { name: 'Description' });
+     description.innerHTML = 'A test product description.';
+     fireEvent.input(description);
     fireEvent.submit(screen.getByRole('button', { name: 'Save product' }).closest('form')!);
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/admin/products', expect.objectContaining({ method: 'POST' })));

@@ -155,7 +155,9 @@ describe('products API handler', () => {
     expect(sql).toContain('INSERT INTO product_images');
     expect(sql).toContain("decode(image.data, 'base64')");
     expect(values?.[7]).toBe('serum.png');
-    expect(JSON.parse(String(values?.[9]))).toMatchObject([{ filename: 'serum.png', position: 0 }]);
+    // The image set is the last bound value, so it is addressed from the end:
+    // adding a product column must not silently move it out from under a fixed index.
+    expect(JSON.parse(String(values?.at(-1)))).toMatchObject([{ filename: 'serum.png', position: 0 }]);
   });
 
   it('accepts up to 10 images at any dimensions within the maximum', async () => {
@@ -188,7 +190,7 @@ describe('products API handler', () => {
 
     const result = await createHandlers(database).products('POST', { ...productPayload, images });
     expect(result).toMatchObject({ status: 201, body: { product: { images: expect.arrayContaining(['/api/products/10/images/9']) } } });
-    const savedImages = JSON.parse(String(query.mock.calls[0][1]?.[9])) as Array<{ position: number; width: number; height: number }>;
+    const savedImages = JSON.parse(String(query.mock.calls[0][1]?.at(-1))) as Array<{ position: number; width: number; height: number }>;
     expect(savedImages).toHaveLength(10);
     expect(savedImages[0]).toMatchObject({ position: 0, width: 800, height: 600 });
     expect(savedImages[9]).toMatchObject({ position: 9 });

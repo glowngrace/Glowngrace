@@ -18,7 +18,14 @@ const missing = (code: '42P01' | '42703', message: string) => queryFailure(code,
 function unmigratedDatabase(queryImpl: (text: string, values: unknown[]) => Promise<QueryResult> | QueryResult) {
   const query = vi.fn(async (text: string, values: unknown[] = []) => {
     if (text.includes('site_pages')) return missing('42P01', 'relation "site_pages" does not exist');
-    if (text.includes('product.published') || text.includes('description, published')) {
+    if (text.includes('product.published')) {
+      return missing('42703', 'column product.published does not exist');
+    }
+    // The products table here predates `published`, so an INSERT that names it
+    // must fail. Matched on the statement being an INSERT rather than on the
+    // surrounding text, because the legacy read path spells the same column as
+    // `TRUE AS published` and is expected to get through.
+    if (text.includes('INSERT INTO products') && /(^|[\s,(])published\s*,/.test(text)) {
       return missing('42703', 'column product.published does not exist');
     }
     if (text.includes('admin_users') || text.includes('admin_sessions')) {
@@ -93,7 +100,9 @@ describe('storefront against a database that predates the console migrations', (
 
       expect(result.status).toBe(201);
       const fallback = String(query.mock.calls.at(-1)?.[0]);
-      expect(fallback).toContain('INSERT INTO products (name, category, brand, sku, price, mrp, stock, image, description)');
+      expect(fallback).toMatch(/INSERT INTO products \(name, category, brand, sku, price, mrp, stock, image, description,/);
+      // The point of the retry: the first INSERT named `published`, which this
+      // database does not have, so the fallback must not name it either.
       expect(fallback).not.toContain('published');
     } finally {
       consoleError.mockRestore();

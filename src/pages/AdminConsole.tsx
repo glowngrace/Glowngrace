@@ -1154,7 +1154,7 @@ function JobForm({
               <label className="admin-field admin-span-2">Experience required<input name="experience" defaultValue={editing?.experience ?? ''} placeholder="e.g. 2+ years in a salon" /></label>
               <fieldset className="admin-field admin-span-2">
                 <legend>Skills</legend>
-                <TagInput tags={skills} onChange={setSkills} placeholder="e.g. Bridal makeup" />
+                <TagInput tags={skills} onChange={setSkills} label="Skill" placeholder="e.g. Bridal makeup" />
               </fieldset>
               <label className="admin-field admin-span-2">Description<textarea name="description" rows={5} required defaultValue={editing?.description ?? ''} placeholder="What makes this role lovely?" /></label>
             </div>
