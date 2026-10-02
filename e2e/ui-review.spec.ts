@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { auditPage } from './support/audit';
 
 /**
  * A walk through the pages this branch changed, checking the things a unit test
@@ -293,56 +294,7 @@ test('every changed page holds together on this screen', async ({ page }) => {
     const errors = watchConsole(page);
     await page.goto(path);
     await page.waitForLoadState('networkidle');
-
-    // Nothing may push the page sideways.
-    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
-    expect(overflow, `${path} scrolls horizontally by ${overflow}px`).toBeLessThanOrEqual(1);
-
-    const audit = await page.evaluate(() => {
-      const visible = (node: HTMLElement) => {
-        const style = getComputedStyle(node);
-        if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
-        const rect = node.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0;
-      };
-      return {
-        // Text that is cut off by its own box and cannot be revealed by scrolling:
-        // the failure that hides a validation message or half a price.
-        clipped: Array.from(document.querySelectorAll<HTMLElement>('p, li, label, button, h1, h2, td, th, span'))
-          .filter((node) => node.textContent?.trim() && node.getAttribute('aria-hidden') !== 'true' && visible(node))
-          // A one-pixel box is the screen-reader-only pattern - a label kept for
-          // assistive technology and deliberately hidden from the eye - so its
-          // "clipping" is the point, not a fault.
-          .filter((node) => node.clientWidth > 1 && node.clientHeight > 1)
-          .filter((node) => {
-            const style = getComputedStyle(node);
-            if (style.overflow !== 'hidden' && style.overflowX !== 'hidden' && style.textOverflow !== 'ellipsis') return false;
-            return node.scrollWidth > node.clientWidth + 2 || node.scrollHeight > node.clientHeight + 2;
-          })
-          .map((node) => `${node.textContent?.trim().slice(0, 30)} (${node.clientWidth}x${node.clientHeight} box, ${node.scrollWidth}x${node.scrollHeight} content)`),
-        missingAlt: Array.from(document.images)
-          .filter((image) => visible(image) && !image.hasAttribute('alt'))
-          .map((image) => image.getAttribute('src') ?? '?'),
-        h1: Array.from(document.querySelectorAll('h1')).map((node) => node.textContent?.trim() ?? ''),
-        unlabelled: Array.from(document.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>('input, select, textarea'))
-          .filter((node) => visible(node) && node.type !== 'hidden' && node.type !== 'radio')
-          .filter((node) => !node.labels?.length && !node.getAttribute('aria-label') && !node.getAttribute('aria-labelledby'))
-          .map((node) => node.outerHTML.slice(0, 70)),
-        // A control smaller than this is hard to hit on a touch screen.
-        tinyTargets: Array.from(document.querySelectorAll<HTMLElement>('button, a[href], input[type="radio"]'))
-          .filter((node) => visible(node))
-          .filter((node) => {
-            const rect = node.getBoundingClientRect();
-            return rect.width < 20 || rect.height < 20;
-          })
-          .map((node) => `${node.textContent?.trim().slice(0, 25) || node.getAttribute('aria-label') || node.tagName} ${Math.round(node.getBoundingClientRect().width)}x${Math.round(node.getBoundingClientRect().height)}`),
-      };
-    });
-
-    expect(audit.clipped, `${path} clips text it should show`).toEqual([]);
-    expect(audit.missingAlt, `${path} has images without alt text`).toEqual([]);
-    expect(audit.unlabelled, `${path} has form fields with no label`).toEqual([]);
-    expect(audit.h1.length, `${path} has ${audit.h1.length} h1 elements`).toBe(1);
+    await auditPage(page, path);
     expect(errors, `${path} logged console errors`).toEqual([]);
   }
 });

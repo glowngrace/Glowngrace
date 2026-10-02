@@ -39,6 +39,11 @@ export const sitePageSeeds: SitePageSeed[] = [
   { slug: 'candidate', label: 'Candidate portal', path: '/candidate', position: 12 },
   { slug: 'partner', label: 'Partner portal', path: '/partner', position: 13 },
   { slug: 'admin', label: 'Admin console', path: '/admin', position: 14 },
+  // A profile is only ever reached from the directory above, and it is gated on
+  // `/partners` so hiding the directory hides every profile with it. It sits at
+  // the end because `ON CONFLICT DO NOTHING` means an already-migrated database
+  // keeps the positions it was seeded with.
+  { slug: 'partner-profile', label: 'Partner profile', path: '/partners/:partnerSlug', position: 15 },
 ];
 
 type SeedRow = Array<string | number | null>;

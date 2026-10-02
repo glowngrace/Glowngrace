@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { Product } from '../data/catalog.js';
-import { mapProduct, parseProductImages } from './handlers.js';
+import { joinProductTags, mapProduct, parseProductImages, productRichTextSchema, productSlugSchema, productTagsSchema, type ParsedProductImage } from './handlers.js';
+import { sanitizeRichText } from '../lib/rich-text.js';
 import {
   collectionByKey,
   mapRow,
@@ -156,6 +157,32 @@ const signupSchema = z.object({
   phone: z.string().trim().max(24).optional().default(''),
 });
 
+/** A newly uploaded product image, still base64 in the request body. */
+const productImageUpload = z.object({
+  filename: z.string().trim().min(1).max(180).regex(/^[^\\/]+$/),
+  mimeType: z.enum(['image/jpeg', 'image/png', 'image/webp']),
+  data: z.string().max(409600),
+  width: z.number().int().min(1).max(1200),
+  height: z.number().int().min(1).max(1200),
+});
+
+/**
+ * One entry in a product's gallery, as the console sends it.
+ *
+ * Alongside a fresh upload, an entry may be the URL of an image the product
+ * already has. That is what lets the edit form show the saved gallery, reorder it
+ * and drop one entry without re-encoding bytes the browser never held: a kept URL
+ * has its stored row copied through untouched by `setProductImages`.
+ *
+ * A create cannot keep anything, so it takes uploads only.
+ */
+const productImageWrite = z.union([
+  productImageUpload,
+  z.string().trim().regex(/^\/api\/products\/\d+\/images\/\d+$/, 'That is not an image URL of a product.'),
+]);
+
+const productImageUploads = z.array(productImageUpload).max(10).optional();
+
 const productUpdateSchema = z.object({
   name: z.string().trim().min(2).max(180).optional(),
   category: z.enum(['Makeup', 'Skincare', 'Fragrance', 'Gifting']).optional(),
@@ -167,16 +194,25 @@ const productUpdateSchema = z.object({
   rating: z.coerce.number().min(0).max(5).optional(),
   reviews: z.coerce.number().int().min(0).max(999999).optional(),
   badge: z.string().trim().max(40).optional(),
-  description: z.string().trim().min(1).max(3000).optional(),
+  description: productRichTextSchema.optional(),
+  slug: productSlugSchema.optional(),
+  metaTitle: z.string().trim().max(180).optional(),
+  metaDescription: productRichTextSchema.optional(),
+  shades: productTagsSchema.optional(),
+  highlights: productTagsSchema.optional(),
+  featuresAndSpecification: productRichTextSchema.optional(),
+  measurement: productRichTextSchema.optional(),
+  materialAndCare: productRichTextSchema.optional(),
+  additionalDetails: productRichTextSchema.optional(),
+  itemDetails: productRichTextSchema.optional(),
   published: flag.optional(),
   featured: flag.optional(),
-  images: z.array(z.object({
-    filename: z.string().trim().min(1).max(180).regex(/^[^\\/]+$/),
-    mimeType: z.enum(['image/jpeg', 'image/png', 'image/webp']),
-    data: z.string().max(409600),
-    width: z.number().int().min(1).max(1200),
-    height: z.number().int().min(1).max(1200),
-  })).max(10).optional(),
+  /**
+   * The complete gallery, or `undefined` to leave it alone. A present array is
+   * authoritative, which is why the console only sends one when the operator
+   * actually changed the gallery.
+   */
+  images: z.array(productImageWrite).max(10).optional(),
 });
 
 export const productCreateSchema = z.object({
@@ -187,13 +223,23 @@ export const productCreateSchema = z.object({
   price: z.coerce.number().int().positive().max(99999999),
   mrp: z.coerce.number().int().positive().max(99999999),
   stock: z.coerce.number().int().min(0).max(999999),
-  description: z.string().trim().min(1).max(3000),
+  description: z.string().trim().min(1, 'A description is required.').max(3000).transform(sanitizeRichText),
   published: flag.default(true),
   featured: flag.default(false),
   rating: z.coerce.number().min(0).max(5).optional().default(0),
   reviews: z.coerce.number().int().min(0).max(999999).optional().default(0),
   badge: z.string().trim().max(40).optional().default(''),
   image: z.string().trim().max(180).optional().default(''),
+  slug: productSlugSchema.optional().default(''),
+  metaTitle: z.string().trim().max(180).optional().default(''),
+  metaDescription: productRichTextSchema.optional().default(''),
+  shades: productTagsSchema.optional().default([]),
+  highlights: productTagsSchema.optional().default([]),
+  featuresAndSpecification: productRichTextSchema.optional().default(''),
+  measurement: productRichTextSchema.optional().default(''),
+  materialAndCare: productRichTextSchema.optional().default(''),
+  additionalDetails: productRichTextSchema.optional().default(''),
+  itemDetails: productRichTextSchema.optional().default(''),
 });
 
 const orderUpdateSchema = z.object({
@@ -323,6 +369,9 @@ const orderSelect = `SELECT order_record.id, order_record.order_number, order_re
 
 const productSelect = `SELECT product.id, product.name, product.category, product.brand, product.sku, product.price,
   product.mrp, product.stock, product.rating, product.reviews, product.badge, product.image, product.description,
+  product.slug, product.meta_title, product.meta_description, product.shades, product.highlights,
+  product.features_and_specification, product.measurement, product.material_and_care,
+  product.additional_details, product.item_details,
   product.published, product.featured,
   COALESCE(
     (SELECT json_agg('/api/products/' || product.id || '/images/' || image.position ORDER BY image.position)
@@ -626,20 +675,57 @@ export function createAdminHandlers(database: Database) {
     return result.rows[0] ? mapProduct(result.rows[0]) : null;
   }
 
-  async function replaceProductImages(
-    productId: number,
-    images: Array<{ filename: string; mimeType: 'image/jpeg' | 'image/png' | 'image/webp'; data: string; width: number; height: number }>,
-  ) {
-    const { images: valid, invalid } = parseProductImages(images);
-    if (invalid) return false;
-    await database.query('DELETE FROM product_images WHERE product_id = $1', [productId]);
-    for (const image of valid) {
+  async function insertProductImages(productId: number, images: ParsedProductImage[]) {
+    for (const image of images) {
       await database.query(
         `INSERT INTO product_images (product_id, position, filename, mime_type, image_data, width, height)
          VALUES ($1, $2, $3, $4, decode($5, 'base64'), $6, $7)`,
         [productId, image.position, image.filename, image.mimeType, image.data, image.width, image.height],
       );
     }
+  }
+
+  /**
+   * Rewrites a product's gallery to exactly the set it was given.
+   *
+   * The set is authoritative, so an entry the console left out really was removed.
+   * That is only safe because a kept URL is a real reference: its stored row is
+   * copied through instead of being dropped, which is what used to go wrong. An
+   * edit form that could only send freshly picked files replaced the whole gallery
+   * with them, so adding one image silently deleted the rest.
+   *
+   * Nothing is deleted until the whole set has been resolved and validated, so a
+   * rejected edit leaves the existing gallery intact.
+   */
+  async function setProductImages(productId: number, images: Array<z.infer<typeof productImageWrite>>) {
+    const existing = await database.query(
+      'SELECT position, filename, mime_type, image_data, width, height FROM product_images WHERE product_id = $1',
+      [productId],
+    );
+    const stored = new Map(existing.rows.map((row) => [Number(row.position), row]));
+
+    const wanted: Array<{ filename: string; mimeType: string; data: string; width: number; height: number }> = [];
+    for (const item of images) {
+      if (typeof item !== 'string') {
+        wanted.push(item);
+        continue;
+      }
+      const row = stored.get(Number(item.slice(item.lastIndexOf('/') + 1)));
+      // A URL for a row that is gone, or for another product, cannot be honoured.
+      if (!row) return false;
+      wanted.push({
+        filename: text(row.filename),
+        mimeType: text(row.mime_type),
+        data: Buffer.from(row.image_data as Buffer).toString('base64'),
+        width: Number(row.width),
+        height: Number(row.height),
+      });
+    }
+
+    const { images: valid, invalid } = parseProductImages(wanted);
+    if (invalid) return false;
+    await database.query('DELETE FROM product_images WHERE product_id = $1', [productId]);
+    await insertProductImages(productId, valid);
     return true;
   }
 
@@ -1026,13 +1112,26 @@ export function createAdminHandlers(database: Database) {
           continue;
         }
         const result = await database.query(
-          `INSERT INTO products (name, category, brand, sku, price, mrp, stock, image, description, published, featured, rating, reviews, badge)
-           VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6, $7, $8, $9, $10, $11, $12, $13, NULLIF($14, ''))
+          `INSERT INTO products (name, category, brand, sku, price, mrp, stock, image, description,
+                                 slug, meta_title, meta_description, shades, highlights,
+                                 features_and_specification, measurement, material_and_care,
+                                 additional_details, item_details,
+                                 published, featured, rating, reviews, badge)
+           VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6, $7, $8, $9,
+                   NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), $13, $14,
+                   NULLIF($15, ''), NULLIF($16, ''), NULLIF($17, ''),
+                   NULLIF($18, ''), NULLIF($19, ''),
+                   $20, $21, $22, $23, NULLIF($24, ''))
            RETURNING id`,
           [
             product.name, product.category, product.brand, product.sku, product.price, product.mrp, product.stock,
             product.image || `${product.name.toLowerCase().replaceAll(/[^a-z0-9]+/g, '-')}.jpg`,
-            product.description, product.published, product.featured, product.rating, product.reviews, product.badge,
+            product.description,
+            product.slug, product.metaTitle, product.metaDescription,
+            joinProductTags(product.shades), joinProductTags(product.highlights),
+            product.featuresAndSpecification, product.measurement, product.materialAndCare,
+            product.additionalDetails, product.itemDetails,
+            product.published, product.featured, product.rating, product.reviews, product.badge,
           ],
         );
         created.push(String(result.rows[0]?.id ?? ''));
@@ -1188,16 +1287,41 @@ export function createAdminHandlers(database: Database) {
         if (!parsed.success) return fail(400, 'invalid_product', 'Check the product details and try again.', { errors: fieldErrors(parsed.error) });
         const product = parsed.data;
         if (product.mrp < product.price) return fail(400, 'invalid_product', 'The original price must be at least the selling price.');
+        // `productCreateSchema` deliberately carries no `images` key, because the
+        // bulk upload template and this schema are asserted to be the same set of
+        // columns and a spreadsheet cannot carry image bytes. The console form does
+        // upload them, so they are read and stored here instead of being dropped.
+        const uploaded = productImageUploads.safeParse((request.body as Record<string, unknown> | undefined)?.images);
+        if (!uploaded.success) return fail(400, 'invalid_product_image', 'Each image must be a valid JPEG, PNG or WebP file no larger than 1200 × 1200 px or 300 KB.');
+        // Validated before the product row exists, so a rejected upload cannot
+        // leave a catalogue entry with no gallery behind it.
+        const { images: validImages, invalid } = parseProductImages(uploaded.data ?? []);
+        if (invalid) return fail(400, 'invalid_product_image', 'Each image must be a valid JPEG, PNG or WebP file no larger than 1200 × 1200 px or 300 KB.');
         const result = await database.query(
-          `INSERT INTO products (name, category, brand, sku, price, mrp, stock, image, description, published, featured, rating, reviews, badge)
-           VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6, $7, $8, $9, $10, $11, $12, $13, NULLIF($14, '')) RETURNING id`,
+          `INSERT INTO products (name, category, brand, sku, price, mrp, stock, image, description,
+                                 slug, meta_title, meta_description, shades, highlights,
+                                 features_and_specification, measurement, material_and_care,
+                                 additional_details, item_details,
+                                 published, featured, rating, reviews, badge)
+           VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6, $7, $8, $9,
+                   NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), $13, $14,
+                   NULLIF($15, ''), NULLIF($16, ''), NULLIF($17, ''),
+                   NULLIF($18, ''), NULLIF($19, ''),
+                   $20, $21, $22, $23, NULLIF($24, '')) RETURNING id`,
           [
             product.name, product.category, product.brand, product.sku, product.price, product.mrp, product.stock,
             product.image || `${product.name.toLowerCase().replaceAll(/[^a-z0-9]+/g, '-')}.jpg`,
-            product.description, product.published, product.featured, product.rating, product.reviews, product.badge,
+            product.description,
+            product.slug, product.metaTitle, product.metaDescription,
+            joinProductTags(product.shades), joinProductTags(product.highlights),
+            product.featuresAndSpecification, product.measurement, product.materialAndCare,
+            product.additionalDetails, product.itemDetails,
+            product.published, product.featured, product.rating, product.reviews, product.badge,
           ],
         );
-        const created = await readProduct(Number(result.rows[0]?.id));
+        const createdId = Number(result.rows[0]?.id);
+        if (validImages.length > 0) await insertProductImages(createdId, validImages);
+        const created = await readProduct(createdId);
         if (!created) return fail(500, 'server_error', 'The product could not be saved.');
         return { status: 201, body: { product: created, message: 'Product added to the catalogue.' } };
       }
@@ -1224,21 +1348,38 @@ export function createAdminHandlers(database: Database) {
         if (update.reviews !== undefined) columns.reviews = update.reviews;
         if (update.badge !== undefined) columns.badge = update.badge || null;
         if (update.description !== undefined) columns.description = update.description;
+        if (update.slug !== undefined) columns.slug = update.slug || null;
+        if (update.metaTitle !== undefined) columns.meta_title = update.metaTitle || null;
+        if (update.metaDescription !== undefined) columns.meta_description = update.metaDescription || null;
+        if (update.shades !== undefined) columns.shades = joinProductTags(update.shades);
+        if (update.highlights !== undefined) columns.highlights = joinProductTags(update.highlights);
+        if (update.featuresAndSpecification !== undefined) columns.features_and_specification = update.featuresAndSpecification || null;
+        if (update.measurement !== undefined) columns.measurement = update.measurement || null;
+        if (update.materialAndCare !== undefined) columns.material_and_care = update.materialAndCare || null;
+        if (update.additionalDetails !== undefined) columns.additional_details = update.additionalDetails || null;
+        if (update.itemDetails !== undefined) columns.item_details = update.itemDetails || null;
         if (update.published !== undefined) columns.published = update.published;
         if (update.featured !== undefined) columns.featured = update.featured;
-        if (Object.keys(columns).length === 0) return fail(400, 'empty_update', 'Change at least one detail before saving.');
+        // A gallery-only edit carries no scalar column and is still a real edit, so
+        // this guard only fires when nothing at all was addressed.
+        if (Object.keys(columns).length === 0 && update.images === undefined) return fail(400, 'empty_update', 'Change at least one detail before saving.');
         const names = Object.keys(columns);
-        try {
-          await database.query(
-            `UPDATE products SET ${names.map((name, position) => `${name} = $${position + 2}`).join(', ')}, updated_at = NOW() WHERE id = $1`,
-            [productId, ...names.map((name) => columns[name])],
-          );
-        } catch (error) {
-          if (isUniqueViolation(error)) return fail(409, 'duplicate_sku', 'That SKU is already in the catalogue. Use a unique SKU or leave it blank.');
-          throw error;
+        if (names.length > 0) {
+          try {
+            await database.query(
+              `UPDATE products SET ${names.map((name, position) => `${name} = $${position + 2}`).join(', ')}, updated_at = NOW() WHERE id = $1`,
+              [productId, ...names.map((name) => columns[name])],
+            );
+          } catch (error) {
+            if (isUniqueViolation(error)) return fail(409, 'duplicate_sku', 'That SKU is already in the catalogue. Use a unique SKU or leave it blank.');
+            throw error;
+          }
         }
-        if (update.images && update.images.length > 0) {
-          const replaced = await replaceProductImages(productId, update.images);
+        // Only rewritten when the console actually sent a gallery. An earlier
+        // length check meant a form that could not re-encode the saved images
+        // deleted them by accident; the form now sends kept references instead.
+        if (update.images !== undefined) {
+          const replaced = await setProductImages(productId, update.images);
           if (!replaced) return fail(400, 'invalid_product_image', 'Each image must be a valid JPEG, PNG or WebP file no larger than 1200 × 1200 px or 300 KB.');
         }
         const saved = await readProduct(productId);

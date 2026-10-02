@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
-import { categories, jobs, partners, productImageUrl } from '../data/catalog';
+import { categories, jobs, partners, productImageUrl, type Product } from '../data/catalog';
 import { submitContactRequest } from '../lib/api';
 import { useCart } from '../components/CartContext';
 import { useProductCatalog } from '../components/ProductCatalogContext';
 import { Loader, PageLoader } from '../components/Loader';
 import { ProductGrid } from '../components/ProductCard';
+import { RichText } from '../components/RichText';
 
 type PageProps = { favorites: number[]; toggleFavorite: (productId: number) => void };
 const money = (amount: number) => `₹${amount.toLocaleString('en-IN')}`;
@@ -88,9 +89,9 @@ export function HomePage({ favorites, toggleFavorite }: PageProps) {
           <SectionHeading eyebrow="Good company, good craft" title="Our partner parlours" copy="Meet the independent beauty houses bringing a little more care to Lucknow." />
           <div className="partner-grid">
             {partners.map((partner) => (
-              <article className="partner-card" key={partner.name}>
-                <Link to="/partners" className="partner-image"><img src={`/images/${partner.image}`} alt={`${partner.name} salon`} loading="lazy" /><span>Meet the parlour ↗</span></Link>
-                <div className="partner-card-copy"><span className="eyebrow">{partner.specialty}</span><h3>{partner.name}</h3><p>{partner.location} <span className="rating">★ {partner.rating}</span></p></div>
+              <article className="partner-card" key={partner.slug}>
+                <Link to={`/partners/${partner.slug}`} className="partner-image"><img src={`/images/${partner.image}`} alt={`${partner.name} salon`} loading="lazy" /><span>Meet the parlour ↗</span></Link>
+                <div className="partner-card-copy"><span className="eyebrow">{partner.specialty}</span><h3>{partner.name}</h3><p>{partner.location} <span className="rating">★ {partner.rating.toFixed(1)}</span></p></div>
               </article>
             ))}
           </div>
@@ -185,6 +186,26 @@ function PageBanner({ eyebrow, title, copy }: { eyebrow: string; title: string; 
   return <section className="page-banner"><div className="page-container"><span className="eyebrow">{eyebrow}</span><h1>{title}</h1><span className="gold-rule" /><p>{copy}</p></div></section>;
 }
 
+/** The "Product Information" block on the product page, one card per section. */
+const productInformationSections = [
+  { key: 'featuresAndSpecification', label: 'Features & Specification' },
+  { key: 'measurement', label: 'Measurement' },
+  { key: 'materialAndCare', label: 'Material & Care' },
+  { key: 'additionalDetails', label: 'Additional Details' },
+  { key: 'itemDetails', label: 'Item Details' },
+] as const satisfies ReadonlyArray<{ key: keyof Product; label: string }>;
+
+/**
+ * Stock is optional, so a product that has not been given a count simply does not
+ * claim to be in stock. Zero is the one case that has to block the add-to-bag.
+ */
+function stockNotice(stock: number | undefined): { text: string; tone: string } | null {
+  if (stock === undefined) return null;
+  if (stock <= 0) return { text: 'Out of stock', tone: 'is-out' };
+  if (stock <= 5) return { text: `Only ${stock} left`, tone: 'is-low' };
+  return { text: 'In stock', tone: 'is-in' };
+}
+
 export function ProductPage({ favorites, toggleFavorite }: PageProps) {
   const { products, loading } = useProductCatalog();
   const { productId } = useParams();
@@ -195,7 +216,7 @@ export function ProductPage({ favorites, toggleFavorite }: PageProps) {
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const [hasMoreDescription, setHasMoreDescription] = useState(false);
   const [isImageExpanded, setIsImageExpanded] = useState(false);
-  const descriptionRef = useRef<HTMLParagraphElement>(null);
+  const descriptionRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     setImage(product?.image ?? '');
     setQuantity(1);
@@ -225,6 +246,7 @@ export function ProductPage({ favorites, toggleFavorite }: PageProps) {
     return <section className="section"><div className="page-container empty-state"><span className="eyebrow">A little detour</span><h1>That beauty has gone missing.</h1><Link className="button button-dark" to="/shop">Back to the collection</Link></div></section>;
   }
   const related = products.filter((item) => item.category === product.category && item.id !== product.id).slice(0, 4);
+  const availability = stockNotice(product.stock);
 
   return (
     <>
@@ -234,37 +256,72 @@ export function ProductPage({ favorites, toggleFavorite }: PageProps) {
             <button className="product-feature-image" type="button" aria-label={`View larger image of ${product.name}`} onClick={() => setIsImageExpanded(true)}><img src={productImageUrl(image || product.image)} alt={product.name} /></button>
             <div className="gallery-thumbnails">{(product.images?.length ? product.images : [product.image, ...(product.category === 'Makeup' ? ['cat_makeup.jpg', 'p_glow_kit.jpg'] : [])]).filter((file, index, list) => list.indexOf(file) === index).map((file) => <button type="button" key={file} aria-label={`View ${file}`} aria-pressed={(image || product.image) === file} onClick={() => setImage(file)}><img src={productImageUrl(file)} alt="" /></button>)}</div>
           </div>
-          <div className="product-detail-copy">
+<div className="product-detail-copy">
             <nav className="product-breadcrumb" aria-label="Breadcrumb"><Link to="/">Home</Link><span>/</span><Link to="/shop">Shop</Link><span>/</span><span>{product.category}</span></nav>
+            <div className="detail-eyebrow">
+              {product.brand && <span className="eyebrow">{product.brand}</span>}
+              {product.badge && <span className="detail-badge">{product.badge}</span>}
+            </div>
             <h1>{product.name}</h1>
             <div className="detail-rating"><span className="detail-stars" aria-label={`${product.rating.toFixed(1)} out of 5 stars`}>{Array.from({ length: 5 }, (_value, index) => <span key={index} aria-hidden="true" className={index < Math.round(product.rating) ? 'is-filled' : ''}>★</span>)}</span><span>{product.rating.toFixed(1)} · {product.reviews} reviews</span></div>
-            <div className="detail-price"><strong>{money(product.price)}</strong>{product.mrp > product.price && <del>{money(product.mrp)}</del>}</div>
-            <p ref={descriptionRef} className={`detail-description${descriptionExpanded ? '' : ' is-collapsed'}`}>{product.description}</p>
+            <div className="detail-price">
+              <strong>{money(product.price)}</strong>
+              {product.mrp > product.price && <del>{money(product.mrp)}</del>}
+              {product.mrp > product.price && <span className="detail-save">{Math.round((1 - product.price / product.mrp) * 100)}% off</span>}
+            </div>
+            {availability && <p className={`detail-stock ${availability.tone}`}>{availability.text}</p>}
+            <div ref={descriptionRef} className="detail-description-wrap"><RichText html={product.description} className={`detail-description${descriptionExpanded ? '' : ' is-collapsed'}`} /></div>
             {hasMoreDescription && <button className="description-toggle" type="button" aria-expanded={descriptionExpanded} onClick={() => setDescriptionExpanded((expanded) => !expanded)}>{descriptionExpanded ? 'Read less' : 'Read more'}</button>}
+            {product.highlights && product.highlights.length > 0 && (
+              <ul className="detail-highlights">{product.highlights.map((highlight) => <li key={highlight}>{highlight}</li>)}</ul>
+            )}
+            {product.shades && product.shades.length > 0 && (
+              <div className="detail-shades"><span className="detail-shades-label">Shades</span><ul>{product.shades.map((shade) => <li key={shade}><span aria-hidden="true" />{shade}</li>)}</ul></div>
+            )}
             <div className="product-detail-actions">
               <div className="product-quantity" aria-label="Quantity">
                 <button type="button" aria-label="Decrease quantity" disabled={quantity <= 1} onClick={() => setQuantity((current) => Math.max(1, current - 1))}>−</button>
                 <span aria-live="polite">{quantity}</span>
                 <button type="button" aria-label="Increase quantity" disabled={quantity >= 99} onClick={() => setQuantity((current) => Math.min(99, current + 1))}>+</button>
               </div>
-              <button className="button button-dark" type="button" onClick={() => add(product, quantity)}>Add to bag · {money(product.price)}</button>
+              <button className="button button-dark" type="button" disabled={product.stock === 0} onClick={() => add(product, quantity)}>{product.stock === 0 ? 'Out of stock' : `Add to bag · ${money(product.price)}`}</button>
               <button className="button button-light detail-wishlist" type="button" aria-pressed={favorites.includes(product.id)} aria-label={favorites.includes(product.id) ? 'Remove from your wishlist' : 'Save to your wishlist'} onClick={() => toggleFavorite(product.id)}>{favorites.includes(product.id) ? '♥' : '♡'}</button>
             </div>
-            <div className="product-accordions">
-              <details>
-                <summary>Description <span aria-hidden="true">+</span></summary>
-                <p>{product.description}</p>
-              </details>
-              <details>
-                <summary>How to use <span aria-hidden="true">+</span></summary>
-                <p>Follow the directions on the product packaging. If you have questions about how this product fits your routine, <Link to="/contact">ask our team</Link>.</p>
-              </details>
-              <details>
-                <summary>Shipping &amp; returns <span aria-hidden="true">+</span></summary>
-                <p>Choose from the available delivery options at checkout. Cash on delivery is available for eligible orders. For help with an order or return, <Link to="/contact">contact our team</Link>.</p>
-              </details>
-            </div>
+            {product.sku && <p className="detail-sku">Item code <span>{product.sku}</span></p>}
             <div className="delivery-note"><strong>A little note on delivery</strong><span>Need a recommendation? <Link to="/contact">We’re happy to help.</Link></span></div>
+          </div>
+        </div>
+      </section>
+
+      <section className="section section-soft product-information">
+        <div className="page-container">
+          <SectionHeading eyebrow="Everything you need to know" title="Product Information" />
+          <div className="product-information-grid">
+            <article className="product-information-block">
+              <h3>Description</h3>
+              <RichText html={product.description} />
+            </article>
+            {productInformationSections.map((section) => {
+              const html = product[section.key];
+              // A section the console has not filled in is left out rather than
+              // shown as an empty card. Description, Safety Information and
+              // Ingredient are always there, so the block is never empty itself.
+              if (!html?.replace(/<[^>]*>/g, '').trim() && !html?.includes('<br')) return null;
+              return (
+                <article className="product-information-block" key={section.key}>
+                  <h3>{section.label}</h3>
+                  <RichText html={html} />
+                </article>
+              );
+            })}
+            <article className="product-information-block">
+              <h3>Safety Information</h3>
+              <p>Follow the directions on the product packaging. Keep out of reach of children. If you have questions about how this product fits your routine, <Link to="/contact">ask our team</Link>.</p>
+            </article>
+            <article className="product-information-block">
+              <h3>Ingredient</h3>
+              <p>Every Glow &amp; Grace formula is cruelty-free and made with care. The full ingredient list is printed on the pack, and our team will happily read it out to you.</p>
+            </article>
           </div>
         </div>
       </section>
@@ -281,7 +338,7 @@ export function PartnersPage() {
   return (
     <>
       <PageBanner eyebrow="Good company, good craft" title="Partner Parlours" copy="Independent beauty houses with a shared belief in thoughtful service, talented teams and genuine care." />
-      <section className="section"><div className="page-container partner-directory">{partners.map((partner) => <article className="directory-card" key={partner.name}><img src={`/images/${partner.image}`} alt={`${partner.name} salon`} loading="lazy" /><div className="directory-info"><span className="eyebrow">{partner.specialty}</span><h2>{partner.name}</h2><p>{partner.location}</p><p><span className="rating">★ {partner.rating}</span> · Verified Glow &amp; Grace partner</p><Link className="underlined-link" to="/contact?topic=Salon%20partnership">Ask about this parlour <span>↗</span></Link></div></article>)}</div></section>
+      <section className="section"><div className="page-container partner-directory">{partners.map((partner) => <article className="directory-card" key={partner.slug}><Link to={`/partners/${partner.slug}`}><img src={`/images/${partner.image}`} alt={`${partner.name} salon`} loading="lazy" /></Link><div className="directory-info"><span className="eyebrow">{partner.specialty}</span><h2>{partner.name}</h2><p>{partner.location}</p><p><span className="rating">★ {partner.rating.toFixed(1)}</span> · Verified Glow &amp; Grace partner</p><div className="directory-actions"><Link className="underlined-link" to={`/partners/${partner.slug}`}>See the full profile <span>↗</span></Link><Link className="underlined-link" to="/contact?topic=Salon%20partnership">Ask about this parlour <span>↗</span></Link></div></div></article>)}</div></section>
       <section className="section section-soft"><div className="page-container split-feature"><div><span className="eyebrow">For salon owners</span><span className="gold-rule" /><h2>Good people make a beautiful business.</h2><p>Find skilled professionals, stock authentic retail favourites and put your salon in front of the right people. We make it easy to grow together.</p><ul className="benefit-list"><li>A vetted pool of beauty professionals</li><li>Wholesale pricing on the full retail edit</li><li>Training and placement support</li></ul><Link className="button button-dark" to="/contact?topic=Salon%20partnership">Become a partner</Link></div><img src="/images/partner3.jpg" alt="Inside one of our partner beauty parlours" loading="lazy" /></div></section>
     </>
   );

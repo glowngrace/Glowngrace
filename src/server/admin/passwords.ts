@@ -72,7 +72,7 @@ export const removedDemoPassword = 'demo123';
  * stay signed into the back office for the length of a working day, so the
  * session simply ends and the operator signs in again.
  */
-export const sessionDurationMinutes = 5;
+export const sessionDurationMinutes = 10;
 
 /**
  * How often the owner account's password is replaced.

@@ -56,6 +56,7 @@ const previewPages = [
   { slug: 'candidate', label: 'Candidate portal', path: '/candidate', position: 12 },
   { slug: 'partner', label: 'Partner portal', path: '/partner', position: 13 },
   { slug: 'admin', label: 'Admin console', path: '/admin', position: 14 },
+  { slug: 'partner-profile', label: 'Partner profile', path: '/partners/:partnerSlug', position: 15 },
 ];
 
 function sendFunction(response: ServerResponse, pathname: string) {

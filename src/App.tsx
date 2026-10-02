@@ -24,6 +24,7 @@ import {
   WishlistPage,
 } from './pages/PortalPages';
 import { CheckoutPage, OrderConfirmationPage } from './pages/CheckoutPage';
+import { PartnerDetailPage } from './pages/PartnerDetailPage';
 
 const FAVORITES_STORAGE_KEY = 'glow-grace-wishlist';
 
@@ -65,6 +66,8 @@ function AppRoutes() {
           <Route path="/checkout" element={<CheckoutPage />} />
           <Route path="/order-confirmation" element={<OrderConfirmationPage />} />
           <Route path="/partners" element={<PageGate path="/partners"><PartnersPage /></PageGate>} />
+          {/* Gated on /partners so hiding the directory hides its profiles too. */}
+          <Route path="/partners/:partnerSlug" element={<PageGate path="/partners"><PartnerDetailPage /></PageGate>} />
           <Route path="/careers" element={<PageGate path="/careers"><CareersPage /></PageGate>} />
           <Route path="/about" element={<PageGate path="/about"><AboutPage /></PageGate>} />
           <Route path="/contact" element={<PageGate path="/contact"><ContactPage /></PageGate>} />

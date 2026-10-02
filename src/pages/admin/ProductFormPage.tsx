@@ -3,6 +3,7 @@ import { type ProductImageUpload } from '../../lib/api';
 import type { Product } from '../../data/catalog';
 import { productCategories } from './AdminData';
 import { ChipRow, Icon, PageHead, Panel, PanelHead, Stars, TagInput, Toggle } from './AdminUi';
+import { RichTextField } from './RichTextField';
 
 const productImageMaxBytes = 300 * 1024;
 const maxImages = 10;
@@ -45,9 +46,29 @@ async function encodeProductImage(file: File): Promise<ProductImageUpload> {
   return { filename: file.name, mimeType: file.type, data: dataUrl.slice(separator + 1), width, height };
 }
 
-type SelectedImage = { key: string; name: string; previewUrl: string; file?: File };
+type SelectedImage = { key: string; name: string; previewUrl: string; file?: File; reference?: string };
 
 type LibraryImage = { name: string; src: string };
+
+/**
+ * The images a product already has, as the console received them.
+ *
+ * The browser was never given these bytes, so an edit cannot re-upload them. Each
+ * one is kept as the URL it is served from and sent back to be referenced, which
+ * is how the gallery survives an edit that adds a single new image.
+ */
+function keptImages(references: string[]): SelectedImage[] {
+  return references.map((reference, index) => ({
+    key: `kept-${reference}`,
+    name: `Saved image ${index + 1}`,
+    previewUrl: reference,
+    reference,
+  }));
+}
+
+function galleryKey(image: SelectedImage) {
+  return image.reference ? `kept:${image.reference}` : `new:${image.key}`;
+}
 
 export function ProductFormPage({
   library,
@@ -64,12 +85,14 @@ export function ProductFormPage({
 }) {
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
-  const [images, setImages] = useState<SelectedImage[]>([]);
+  const [images, setImages] = useState<SelectedImage[]>(() => keptImages(editing?.images ?? []));
+  // What the gallery looked like on arrival, so an untouched gallery is never sent.
+  const initialGallery = useRef((editing?.images ?? []).map((reference) => `kept:${reference}`));
   const [dragging, setDragging] = useState(false);
-  const [shades, setShades] = useState<string[]>([]);
+  const [shades, setShades] = useState<string[]>(editing?.shades ?? []);
   const [published, setPublished] = useState(editing ? editing.published !== false : true);
   const [featured, setFeatured] = useState(editing?.featured === true);
-  const [highlights, setHighlights] = useState<string[]>([]);
+  const [highlights, setHighlights] = useState<string[]>(editing?.highlights ?? []);
   const [preview, setPreview] = useState({
     name: editing?.name ?? '',
     price: editing ? String(editing.price) : '',
@@ -168,11 +191,29 @@ export function ProductFormPage({
         mrp: Number(values.get('mrp')),
         stock: Number(values.get('stock')),
         description: String(values.get('description') ?? '').trim(),
+        slug: String(values.get('slug') ?? '').trim(),
+        metaTitle: String(values.get('metaTitle') ?? '').trim(),
+        metaDescription: String(values.get('metaDescription') ?? '').trim(),
+        shades,
+        highlights,
+        featuresAndSpecification: String(values.get('featuresAndSpecification') ?? '').trim(),
+        measurement: String(values.get('measurement') ?? '').trim(),
+        materialAndCare: String(values.get('materialAndCare') ?? '').trim(),
+        additionalDetails: String(values.get('additionalDetails') ?? '').trim(),
+        itemDetails: String(values.get('itemDetails') ?? '').trim(),
         published,
         featured,
       };
-      if (images.length > 0) {
-        payload.images = await Promise.all(images.map((image) => encodeProductImage(image.file as File)));
+      // A kept image is sent as the URL it is served from rather than as bytes, so
+      // saving an unrelated field cannot drop the images the operator never
+      // touched. An unchanged gallery is left out entirely.
+      const currentGallery = images.map(galleryKey);
+      const galleryChanged = currentGallery.length !== initialGallery.current.length
+        || currentGallery.some((key, index) => key !== initialGallery.current[index]);
+      if (galleryChanged) {
+        payload.images = await Promise.all(images.map((image) => (
+          image.reference ? image.reference : encodeProductImage(image.file as File)
+        )));
       }
       const saved = await onSave(payload, editing?.id);
       if (!saved) setSaving(false);
@@ -193,20 +234,12 @@ export function ProductFormPage({
         crumb={editing ? `Edit ${editing.name}` : 'Add product'}
         title={editing ? 'Edit product' : 'Add a product'}
         sub={editing ? 'Update this product and how it appears in the store.' : 'Add a new product to your catalogue.'}
-        actions={
-          <>
-            <button className="admin-btn admin-btn-light" type="button" onClick={onCancel} disabled={saving}>Cancel</button>
-            <button className="admin-btn admin-btn-dark" type="submit" form="admin-product-form" disabled={saving}>
-              {saving ? 'Saving…' : editing ? 'Save changes' : 'Add product'}
-            </button>
-          </>
-        }
       />
 
       <form className="admin-product-layout" id="admin-product-form" aria-label={editing ? 'Edit a product' : 'Add a product'} onSubmit={submit}>
         <div className="admin-product-main">
           <Panel>
-            <PanelHead title="Product information" sub="The essentials shoppers see first" />
+            <PanelHead title="Essentials" sub="The essentials shoppers see first" />
             <div className="admin-grid-2">
               <label className="admin-field admin-span-2">Product name<input name="name" required defaultValue={editing?.name ?? ''} placeholder="e.g. Velvet Matte Luxe Liquid Lipstick" onChange={(event) => updatePreview('name', event.target.value)} /></label>
               <label className="admin-field">Brand<input name="brand" defaultValue={editing?.brand ?? ''} placeholder="e.g. Glow &amp; Grace" /></label>
@@ -243,7 +276,7 @@ export function ProductFormPage({
               <p><strong>Drag and drop images here</strong></p>
               <p className="admin-muted">or choose from your computer</p>
               <button className="admin-btn admin-btn-light" type="button" onClick={() => imageInput.current?.click()}>Choose images</button>
-              <small id="product-image-guidance">JPEG, PNG or WebP · max 1200 × 1200 px · max 300 KB each · up to {maxImages} images{editing ? ' · leave empty to keep the current images' : ''}</small>
+              <small id="product-image-guidance">JPEG, PNG or WebP · max 1200 × 1200 px · max 300 KB each · up to {maxImages} images{editing ? ' · images already saved are listed below, and removing one deletes it' : ''}</small>
             </div>
 
             {images.length > 0 && (
@@ -279,17 +312,44 @@ export function ProductFormPage({
           </Panel>
 
           <Panel>
+            <PanelHead title="Search &amp; SEO" />
+            <div className="admin-stack">
+              <label className="admin-field">URL slug<input name="slug" defaultValue={editing?.slug ?? ''} placeholder="velvet-matte-luxe-lipstick" /></label>
+              <label className="admin-field">Meta title<input name="metaTitle" defaultValue={editing?.metaTitle ?? ''} placeholder={preview.name || 'Product name'} /></label>
+              <RichTextField name="metaDescription" label="Meta description" rows={3} defaultValue={editing?.metaDescription ?? ''} placeholder="A short, search-friendly summary." hint="Search engines show this instead of the description." />
+            </div>
+          </Panel>
+
+          <Panel>
             <PanelHead title="Organisation" sub="How this product is grouped" />
             <div className="admin-stack">
               <fieldset className="admin-field">
                 <legend>Shades / variants</legend>
-                <TagInput tags={shades} onChange={setShades} placeholder="e.g. Nude Silk" />
+                <TagInput tags={shades} onChange={setShades} label="Shade or variant name" placeholder="e.g. Nude Silk" />
               </fieldset>
               <fieldset className="admin-field">
                 <legend>Highlights</legend>
-                <TagInput tags={highlights} onChange={setHighlights} placeholder="e.g. Long-lasting" />
+                <TagInput tags={highlights} onChange={setHighlights} label="Highlight" placeholder="e.g. Long-lasting" />
               </fieldset>
-              <label className="admin-field">Description<textarea name="description" rows={5} required defaultValue={editing?.description ?? ''} placeholder="A considered description of the product." /></label>
+              <RichTextField
+                name="description"
+                label="Description"
+                required
+                rows={5}
+                defaultValue={editing?.description ?? ''}
+                placeholder="A considered description of the product."
+              />
+            </div>
+          </Panel>
+
+          <Panel>
+            <PanelHead title="Product information" sub="The sections shown under Product Information" />
+            <div className="admin-stack">
+              <RichTextField name="featuresAndSpecification" label="Features & Specification" rows={4} defaultValue={editing?.featuresAndSpecification ?? ''} placeholder="One point per line, or use the toolbar to format it." />
+              <RichTextField name="measurement" label="Measurement" rows={3} defaultValue={editing?.measurement ?? ''} placeholder="Size (L x W x H): 5 cm x 5 cm x 3 cm" />
+              <RichTextField name="materialAndCare" label="Material & Care" rows={3} defaultValue={editing?.materialAndCare ?? ''} placeholder="Material and how to care for it." />
+              <RichTextField name="additionalDetails" label="Additional Details" rows={3} defaultValue={editing?.additionalDetails ?? ''} placeholder="Country of origin, batch number, or anything else worth showing." />
+              <RichTextField name="itemDetails" label="Item Details" rows={3} defaultValue={editing?.itemDetails ?? ''} placeholder="Item code, weight, and what is included in the box." />
             </div>
           </Panel>
         </div>
@@ -331,15 +391,6 @@ export function ProductFormPage({
                 <span><strong>Featured</strong><small>Pin to the home page edit</small></span>
                 <Toggle label="Featured" checked={featured} onChange={setFeatured} />
               </div>
-            </div>
-          </Panel>
-
-          <Panel>
-            <PanelHead title="Search &amp; SEO" />
-            <div className="admin-stack">
-              <label className="admin-field">URL slug<input name="slug" placeholder="velvet-matte-luxe-lipstick" /></label>
-              <label className="admin-field">Meta title<input name="metaTitle" placeholder={preview.name || 'Product name'} /></label>
-              <label className="admin-field">Meta description<textarea name="metaDescription" rows={3} placeholder="A short, search-friendly summary." /></label>
             </div>
           </Panel>
 

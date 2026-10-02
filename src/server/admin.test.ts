@@ -245,6 +245,411 @@ describe('admin product update route', () => {
   });
 });
 
+/**
+ * The console could lose a product's entire gallery in two different ways: a
+ * create never wrote `product_images` at all, and an edit replaced every row with
+ * only the files picked in that one session, so adding a single image silently
+ * deleted the rest. These tests keep `product_images` as a real table inside the
+ * fake, because what matters is which images survive the round trip rather than
+ * which statements happened to be issued.
+ */
+describe('admin product images', () => {
+  /** A minimal but genuinely decodable PNG, distinguishable by its last byte. */
+  function png(salt: number) {
+    const bytes = Buffer.alloc(24);
+    bytes.set([137, 80, 78, 71, 13, 10, 26, 10]);
+    bytes.write('IHDR', 12, 'ascii');
+    bytes.writeUInt32BE(1200, 16);
+    bytes.writeUInt32BE(1200, 20);
+    bytes.writeUInt8(salt, 23);
+    return bytes;
+  }
+
+  const upload = (filename: string, salt: number) => ({
+    filename,
+    mimeType: 'image/png' as const,
+    data: png(salt).toString('base64'),
+    width: 1200,
+    height: 1200,
+  });
+
+  type StoredImage = { position: number; filename: string; mime_type: string; image_data: Buffer; width: number; height: number };
+
+  function imageDatabase(startWith: StoredImage[] = []) {
+    const product = {
+      id: 77,
+      name: 'K.B. Compact Powder',
+      category: 'Makeup',
+      brand: 'Kajal Bhatt',
+      sku: 'GG-SKM-1001',
+      price: 649,
+      mrp: 849,
+      stock: 24,
+      rating: '4.5',
+      reviews: 18,
+      badge: 'Bestseller',
+      image: 'compact.jpg',
+      description: 'A soft compact powder for an even finish.',
+      published: true,
+      featured: false,
+    };
+    const gallery: StoredImage[] = [...startWith];
+    const url = (position: number) => `/api/products/${product.id}/images/${position}`;
+
+    const query = vi.fn(async (text: string, values: unknown[] = []): Promise<QueryResult> => {
+      if (text.includes('FROM admin_sessions')) return { rows: [activeAdminRow], rowCount: 1 };
+      // Mirrors the `json_agg` the real SELECT builds, so the response body the
+      // console reads back reflects what the table actually holds.
+      if (text.includes('FROM products AS product')) {
+        return { rows: [{ ...product, images: gallery.map((image) => url(image.position)) }], rowCount: 1 };
+      }
+      // Checked before the read below: this DELETE carries the same FROM clause.
+      if (text.includes('DELETE FROM product_images')) {
+        gallery.length = 0;
+        return { rows: [], rowCount: 0 };
+      }
+      if (text.includes('FROM product_images WHERE product_id')) return { rows: gallery.map((image) => ({ ...image })), rowCount: gallery.length };
+      if (text.includes('INSERT INTO product_images')) {
+        gallery.push({
+          position: Number(values[1]),
+          filename: String(values[2]),
+          mime_type: String(values[3]),
+          image_data: Buffer.from(String(values[4]), 'base64'),
+          width: Number(values[5]),
+          height: Number(values[6]),
+        });
+        return { rows: [], rowCount: 1 };
+      }
+      if (text.includes('INSERT INTO products')) return { rows: [{ id: product.id }], rowCount: 1 };
+      if (text.includes('UPDATE products')) {
+        const setClause = text.slice(text.indexOf('SET '), text.indexOf(' WHERE '));
+        // `values[0]` is the id bound to `$1`, so the first SET column is `$2`.
+        [...setClause.matchAll(/(\w+) = \$\d+/g)].forEach((match, index) => {
+          (product as unknown as Record<string, unknown>)[match[1]] = values[index + 1];
+        });
+        return { rows: [], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    return { database: { query } satisfies Database, query, gallery, product };
+  }
+
+  const stored = (position: number, filename: string, salt: number): StoredImage => ({
+    position,
+    filename,
+    mime_type: 'image/png',
+    image_data: png(salt),
+    width: 1200,
+    height: 1200,
+  });
+
+  const details = { name: 'K.B. Compact Powder', category: 'Makeup', price: 649, mrp: 849, stock: 24, description: 'A soft compact powder for an even finish.' };
+
+  it('stores the images uploaded while adding a product', async () => {
+    const { database, gallery } = imageDatabase();
+
+    const result = await createAdminHandlers(database).handle({
+      method: 'POST',
+      segments: ['products'],
+      body: { ...details, images: [upload('cover.png', 1), upload('angle.png', 2)] },
+      token,
+    });
+
+    expect(result.status).toBe(201);
+    // The bug: the form demanded an image and the server wrote no row at all.
+    expect(gallery.map((image) => image.filename)).toEqual(['cover.png', 'angle.png']);
+    expect((result.body.product as { images: string[] }).images).toEqual([
+      '/api/products/77/images/0',
+      '/api/products/77/images/1',
+    ]);
+  });
+
+  it('refuses an undecodable upload without leaving a product behind', async () => {
+    const { database, query, gallery } = imageDatabase();
+
+    const result = await createAdminHandlers(database).handle({
+      method: 'POST',
+      segments: ['products'],
+      body: { ...details, images: [{ filename: 'broken.png', mimeType: 'image/png', data: Buffer.from('not a png').toString('base64'), width: 1200, height: 1200 }] },
+      token,
+    });
+
+    expect(result).toMatchObject({ status: 400, body: { error: 'invalid_product_image' } });
+    expect(query.mock.calls.some(([text]) => String(text).includes('INSERT INTO products'))).toBe(false);
+    expect(gallery).toHaveLength(0);
+  });
+
+  it('keeps the saved gallery when an edit adds one more image', async () => {
+    const { database, gallery } = imageDatabase([stored(0, 'cover.png', 1), stored(1, 'angle.png', 2)]);
+
+    const result = await createAdminHandlers(database).handle({
+      method: 'PATCH',
+      segments: ['products', '77'],
+      // The console can only re-encode the new file, so it references the two it kept.
+      body: { stock: 30, images: ['/api/products/77/images/0', upload('back.png', 3)] },
+      token,
+    });
+
+    expect(result.status).toBe(200);
+    // The bug: only `back.png` survived and the other two were deleted.
+    expect(gallery.map((image) => image.filename)).toEqual(['cover.png', 'back.png']);
+    expect(gallery[0].image_data.equals(png(1))).toBe(true);
+    expect(gallery.map((image) => image.position)).toEqual([0, 1]);
+  });
+
+  it('leaves the gallery completely alone when an edit does not touch it', async () => {
+    const { database, query, gallery } = imageDatabase([stored(0, 'cover.png', 1), stored(1, 'angle.png', 2)]);
+
+    const result = await createAdminHandlers(database).handle({
+      method: 'PATCH',
+      segments: ['products', '77'],
+      body: { price: 599 },
+      token,
+    });
+
+    expect(result).toMatchObject({ status: 200, body: { product: { price: 599 } } });
+    expect(gallery.map((image) => image.filename)).toEqual(['cover.png', 'angle.png']);
+    // Nothing rewrites the gallery: reading the product is fine, because its
+    // SELECT carries a `product_images` subquery, but no row is fetched for a
+    // rewrite and none is written back.
+    expect(query.mock.calls.some(([text]) => /DELETE FROM product_images|INSERT INTO product_images|SELECT position, filename/.test(String(text)))).toBe(false);
+  });
+
+  it('refuses a reference to an image that is no longer stored, keeping the gallery', async () => {
+    const { database, query, gallery } = imageDatabase([stored(0, 'cover.png', 1)]);
+
+    const result = await createAdminHandlers(database).handle({
+      method: 'PATCH',
+      segments: ['products', '77'],
+      body: { images: ['/api/products/77/images/7'] },
+      token,
+    });
+
+    expect(result).toMatchObject({ status: 400, body: { error: 'invalid_product_image' } });
+    // Validated before anything is deleted, so a bad reference is not destructive.
+    expect(query.mock.calls.some(([text]) => String(text).includes('DELETE FROM product_images'))).toBe(false);
+    expect(gallery.map((image) => image.filename)).toEqual(['cover.png']);
+  });
+
+  it('empties the gallery only when the console sends an empty set on purpose', async () => {
+    const { database, gallery } = imageDatabase([stored(0, 'cover.png', 1), stored(1, 'angle.png', 2)]);
+
+    const result = await createAdminHandlers(database).handle({
+      method: 'PATCH',
+      segments: ['products', '77'],
+      body: { images: [] },
+      token,
+    });
+
+    expect(result.status).toBe(200);
+    expect(gallery).toHaveLength(0);
+  });
+});
+
+/**
+ * The console showed a slug, two SEO fields and two tag lists on the product form
+ * for a long time without ever saving them, so these check that each route into
+ * the catalogue actually writes them: a single add, a bulk sheet, and an edit.
+ */
+describe('admin product detail fields', () => {
+  const details = { name: 'K.B. Compact Powder', category: 'Makeup', price: 649, mrp: 849, stock: 24, description: 'A soft compact powder for an even finish.' };
+
+  function detailDatabase() {
+    const stored: Record<string, unknown> = {
+      id: 77, ...details, published: true, featured: false, images: [],
+      measurement: '30 ml x 45 mm', material_and_care: 'Glass bottle',
+    };
+    const query = vi.fn(async (text: string, values: unknown[] = []): Promise<QueryResult> => {
+      if (text.includes('FROM admin_sessions')) return { rows: [activeAdminRow], rowCount: 1 };
+      if (text.includes('FROM products AS product')) return { rows: [{ ...stored }], rowCount: 1 };
+      if (text.includes('INSERT INTO products')) {
+        // The column list names every destination, so the bound values are mapped
+        // back by name rather than by a fixed index.
+        const columns = text.slice(text.indexOf('(') + 1, text.indexOf(')')).split(',').map((name) => name.trim());
+        columns.forEach((column, index) => { stored[column] = values[index]; });
+        return { rows: [{ id: 77 }], rowCount: 1 };
+      }
+      if (text.includes('UPDATE products')) {
+        const setClause = text.slice(text.indexOf('SET '), text.indexOf(' WHERE '));
+        [...setClause.matchAll(/(\w+) = \$\d+/g)].forEach((match, index) => { stored[match[1]] = values[index + 1]; });
+        return { rows: [], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    return { database: { query } satisfies Database, query, stored };
+  }
+
+  const detail = { slug: 'kb-compact-powder', metaTitle: 'K.B. Compact Powder', metaDescription: 'A soft compact powder for an even finish.', shades: ['Rose Nude', 'Amber Glow'], highlights: ['Long-lasting'] };
+
+  it('saves the slug, SEO fields and tag lists when a product is added', async () => {
+    const { database, stored } = detailDatabase();
+
+    const result = await createAdminHandlers(database).handle({
+      method: 'POST', segments: ['products'], body: { ...details, ...detail }, token,
+    });
+
+    expect(result.status).toBe(201);
+    expect(stored).toMatchObject({
+      slug: 'kb-compact-powder',
+      meta_title: 'K.B. Compact Powder',
+      meta_description: 'A soft compact powder for an even finish.',
+      // Tags are stored as one comma-separated column, the way `skills` already is.
+      shades: 'Rose Nude, Amber Glow',
+      highlights: 'Long-lasting',
+    });
+  });
+
+  it('accepts the same tag lists as one spreadsheet cell during a bulk import', async () => {
+    const { database, stored } = detailDatabase();
+
+    const result = await createAdminHandlers(database).handle({
+      method: 'POST',
+      segments: ['bulk'],
+      // A spreadsheet row is all strings, so a cell of "Rose Nude, Amber Glow" is
+      // what the template actually delivers for the shades column.
+      body: { dataset: 'products', rows: [{ ...details, ...detail, shades: 'Rose Nude, Amber Glow', highlights: 'Long-lasting' }] },
+      token,
+    });
+
+    expect(result.status).toBe(201);
+    expect(stored.shades).toBe('Rose Nude, Amber Glow');
+    expect(stored.slug).toBe('kb-compact-powder');
+  });
+
+  it('saves an edit that only changes the slug, meta and tag fields', async () => {
+    const { database, stored } = detailDatabase();
+
+    const result = await createAdminHandlers(database).handle({
+      method: 'PATCH', segments: ['products', '77'], body: { ...detail }, token,
+    });
+
+    expect(result.status).toBe(200);
+    expect(stored).toMatchObject({
+      slug: 'kb-compact-powder',
+      meta_title: 'K.B. Compact Powder',
+      meta_description: 'A soft compact powder for an even finish.',
+      shades: 'Rose Nude, Amber Glow',
+      highlights: 'Long-lasting',
+    });
+  });
+
+  it('leaves a blank slug alone, because most products have none yet', async () => {
+    const { database, stored } = detailDatabase();
+
+    const result = await createAdminHandlers(database).handle({
+      method: 'PATCH', segments: ['products', '77'], body: { slug: '' }, token,
+    });
+
+    expect(result.status).toBe(200);
+    expect(stored.slug).toBeNull();
+  });
+
+  it('refuses a slug that is not lowercase words joined by hyphens', async () => {
+    const { database, stored } = detailDatabase();
+
+    const result = await createAdminHandlers(database).handle({
+      method: 'PATCH', segments: ['products', '77'], body: { slug: 'K.B. Compact Powder' }, token,
+    });
+
+    expect(result.status).toBe(400);
+    expect((result.body.errors as Record<string, string>).slug).toMatch(/lowercase words/i);
+    expect(stored.slug).toBeUndefined();
+  });
+
+  it('clears the tag lists when they are emptied', async () => {
+    const { database, stored } = detailDatabase();
+
+    const result = await createAdminHandlers(database).handle({
+      method: 'PATCH', segments: ['products', '77'], body: { shades: [], highlights: [] }, token,
+    });
+
+    expect(result.status).toBe(200);
+    expect(stored.shades).toBe('');
+    expect(stored.highlights).toBe('');
+  });
+
+  const information = { featuresAndSpecification: '12% vitamin C\nHyaluronic acid', measurement: '30 ml x 45 mm', materialAndCare: 'Glass bottle', additionalDetails: 'Made in India', itemDetails: 'Item code GG-SKM-1001' };
+
+  it('saves every Product Information section the console can edit', async () => {
+    const { database, stored } = detailDatabase();
+
+    const result = await createAdminHandlers(database).handle({
+      method: 'POST', segments: ['products'], body: { ...details, ...information }, token,
+    });
+
+    expect(result.status).toBe(201);
+    expect(stored).toMatchObject({
+      // Copy is stored as HTML, so a typed line break is kept as a break.
+      features_and_specification: '12% vitamin C<br>Hyaluronic acid',
+      measurement: '30 ml x 45 mm',
+      material_and_care: 'Glass bottle',
+      additional_details: 'Made in India',
+      item_details: 'Item code GG-SKM-1001',
+    });
+  });
+
+  it('blanks a Product Information section instead of keeping stale copy', async () => {
+    const { database, stored } = detailDatabase();
+
+    const result = await createAdminHandlers(database).handle({
+      method: 'PATCH', segments: ['products', '77'], body: { measurement: '', materialAndCare: '' }, token,
+    });
+
+    expect(result.status).toBe(200);
+    expect(stored.measurement).toBeNull();
+    expect(stored.material_and_care).toBeNull();
+  });
+
+  it('strips markup that is not on the allow list before it is stored', async () => {
+    const { database, stored } = detailDatabase();
+
+    const result = await createAdminHandlers(database).handle({
+      method: 'POST',
+      segments: ['products'],
+      // A script pasted into a product field must not reach the database.
+      body: { ...details, ...information, materialAndCare: 'Glass bottle<script>alert(1)</script><b onclick="x()">Handle with care</b>' },
+      token,
+    });
+
+    expect(result.status).toBe(201);
+    expect(stored.material_and_care).toBe('Glass bottle<b>Handle with care</b>');
+  });
+
+  it('refuses an empty description, which the console marks required', async () => {
+    const { database } = detailDatabase();
+
+    const result = await createAdminHandlers(database).handle({
+      method: 'POST', segments: ['products'], body: { ...details, description: '   ' }, token,
+    });
+
+    expect(result.status).toBe(400);
+  });
+
+  it('reads the saved sections back onto the product', async () => {
+    const { database } = detailDatabase();
+
+    const result = await createAdminHandlers(database).handle({ method: 'GET', segments: ['products'], token });
+
+    expect(result.status).toBe(200);
+    // Snake_case columns have to come back as the camelCase names the form reads.
+    const [product] = (result.body.products as Array<Record<string, unknown>>);
+    expect(product.measurement).toBe('30 ml x 45 mm');
+    expect(product.materialAndCare).toBe('Glass bottle');
+  });
+
+  it('carries the Product Information sections through a bulk import', async () => {
+    const { database, stored } = detailDatabase();
+
+    const result = await createAdminHandlers(database).handle({
+      method: 'POST', segments: ['bulk'], body: { dataset: 'products', rows: [{ ...details, ...information }] }, token,
+    });
+
+    expect(result.status).toBe(201);
+    expect(stored.material_and_care).toBe('Glass bottle');
+    expect(stored.additional_details).toBe('Made in India');
+  });
+});
+
 describe('storefront page visibility', () => {
   const pageRows = [
     { slug: 'home', label: 'Home', path: '/', visible: true, position: 0 },
@@ -397,11 +802,11 @@ describe('admin team password route', () => {
 });
 
 describe('admin session lifetime', () => {
-  it('expires five minutes after sign-in and reports the moment to the client', async () => {
+  it('expires ten minutes after sign-in and reports the moment to the client', async () => {
     // The exact window is asserted on the helper, where the clock is fixed.
     const issuedAt = new Date('2026-03-01T09:00:00.000Z');
-    expect(sessionExpiry(issuedAt).toISOString()).toBe('2026-03-01T09:05:00.000Z');
-    expect(sessionDurationMinutes).toBe(5);
+    expect(sessionExpiry(issuedAt).toISOString()).toBe('2026-03-01T09:10:00.000Z');
+    expect(sessionDurationMinutes).toBe(10);
 
     const { database, query } = makeDatabase(async (text) => {
       if (text.includes('FROM admin_users WHERE email')) {
@@ -425,8 +830,8 @@ describe('admin session lifetime', () => {
     const expiresAt = Date.parse(body.expiresAt);
     const lifetime = expiresAt - before;
     expect(Number.isNaN(expiresAt)).toBe(false);
-    expect(lifetime).toBeGreaterThan(4 * 60 * 1000);
-    expect(lifetime).toBeLessThanOrEqual(5 * 60 * 1000 + 5000);
+    expect(lifetime).toBeGreaterThan(9 * 60 * 1000);
+    expect(lifetime).toBeLessThanOrEqual(10 * 60 * 1000 + 5000);
 
     // The stored row must carry the same deadline the client was told about.
     const insert = query.mock.calls.find(([text]) => String(text).includes('INSERT INTO admin_sessions'));
