@@ -84,13 +84,12 @@ export const customerAccount: StubbedAccount = {
  * fixtures with known prices, and a test that reads its expectations out of
  * whatever the database holds cannot assert anything.
  *
- * That means these tests must not be at the mercy of the local database. Once
- * `npm run db:sync` copies production in, `products` is no longer empty, the API
+ * That means these tests must not be at the mercy of whatever the store holds. Once
+ * an admin has saved a product, `products` is no longer empty, the API
  * answers `catalogueManaged: true`, and the browser correctly throws the bundled
  * samples away - so every product-name assertion below fails on data, not on
  * code. Stubbing the catalogue is the same trick the console stubs already use,
- * and it makes the suite answer to the same catalogue whether or not a local
- * database is running.
+ * and it makes the suite answer to the same catalogue on every run.
  *
  * `catalogueManaged: false` is the honest value: it is what the API returns for a
  * shop that has never been stocked, and it is the only setting under which

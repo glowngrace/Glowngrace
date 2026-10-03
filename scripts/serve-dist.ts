@@ -38,8 +38,8 @@ function sendNotFound(response: ServerResponse, message: string) {
 
 /**
  * The page list the built app reads before it renders any route. It mirrors the
- * rows `db/migrations` seeds so the preview behaves like a freshly migrated
- * database, minus the ones the console may switch off.
+ * rows the store seeds, so the preview behaves like a freshly started deployment,
+ * minus the ones the console may switch off.
  */
 const previewPages = [
   { slug: 'home', label: 'Home', path: '/', position: 1 },
@@ -64,7 +64,10 @@ function sendFunction(response: ServerResponse, pathname: string) {
     const payload = JSON.stringify({
       status: 'ok',
       environment: 'local',
-      database: { configured: true, reachable: true, missingTables: [], productCount: 0, latencyMs: 0, provider: 'local', host: 'localhost', ssl: 'disable' },
+      store: 'memory',
+      tables: 0,
+      rows: {},
+      productCount: 0,
     });
     response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'content-length': Buffer.byteLength(payload) });
     return response.end(payload);

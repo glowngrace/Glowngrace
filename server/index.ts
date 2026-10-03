@@ -2,13 +2,10 @@ import 'dotenv/config';
 import express, { type Request, type Response } from 'express';
 import { createHandlers } from '../src/server/handlers.js';
 import { database } from '../src/server/database.js';
-import { checkDatabaseHealth } from '../src/server/health.js';
-import { assertLocalRuntimeUsesLocalDatabase, resolveRuntimeDatabase } from '../src/server/config.js';
+import { checkHealth } from '../src/server/health.js';
 import { createApiRouter } from '../src/server/router.js';
 import { startOwnerPasswordRotation } from '../src/server/admin/owner-password.js';
 import { mailConfigFromEnv, startMailDelivery } from '../src/server/mailer.js';
-
-assertLocalRuntimeUsesLocalDatabase(resolveRuntimeDatabase());
 
 const app = express();
 const handlers = createHandlers(database);
@@ -68,8 +65,8 @@ app.get('/api/site/pages', async (_request, response) => {
     return response.status(500).json({ error: 'server_error', message: 'The page list could not be loaded.' });
   }
 });
-app.get('/api/health', async (_request, response) => {
-  const report = await checkDatabaseHealth();
+app.get('/api/health', (_request, response) => {
+  const report = checkHealth();
   return response.status(report.status === 'ok' ? 200 : 503).json(report);
 });
 

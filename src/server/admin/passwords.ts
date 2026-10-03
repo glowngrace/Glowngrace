@@ -164,7 +164,7 @@ export function resetTokenExpiry(now: Date = new Date()) {
  * database leak cannot be replayed as a working reset link.
  *
  * The digest is salted, which means it cannot be used to find the row. The
- * `token_lookup` column added by db/migrations/009 holds a plain SHA-256 of the
+ * `token_lookup` column holds a plain SHA-256 of the
  * same token purely to locate the candidate row, and the scrypt hash beside it
  * is what actually decides whether the token is correct. SHA-256 is safe here
  * because the input is 32 bytes of `randomBytes`, not a guessable password.

@@ -1,15 +1,7 @@
 import { z } from 'zod';
 import type { Product } from '../data/catalog.js';
 import { joinProductTags, mapProduct, parseProductImages, productRichTextSchema, productSlugSchema, productTagsSchema, type ParsedProductImage } from './handlers.js';
-import {
-  baseSelect,
-  catalogueDriftHint,
-  detailSelect,
-  dropUnavailableColumns,
-  publishingSelect,
-  resolveCatalogueShape,
-  type CatalogueShape,
-} from './catalogue.js';
+import { baseSelect, detailSelect, publishingSelect } from './catalogue.js';
 import { sanitizeRichText } from '../lib/rich-text.js';
 import {
   collectionByKey,
@@ -18,13 +10,12 @@ import {
   type Collection,
   type Row,
 } from './admin/collections.js';
-import { hashPassword, generateStrongPassword, newSessionToken, newResetToken, passwordPolicy, removedDemoPassword, resetTokenExpiry, resetTokenLookup, sessionExpiry, verifyPassword, hashResetToken } from './admin/passwords.js';
+import { hashPassword, generateStrongPassword, newSessionToken, newResetToken, passwordHoldError, passwordPolicy, removedDemoPassword, resetTokenExpiry, resetTokenLookup, sessionExpiry, verifyPassword, hashResetToken } from './admin/passwords.js';
 import { consoleRoles, signupRoles, superAdminEmail, superAdminRole } from '../auth/roles.js';
 import { ownerCredentialsMessage } from './admin/owner-password.js';
 import { tryDeliverPendingMail } from './mailer.js';
 import { datasetCountSql, mapDatasetRowCounts } from './admin/datasets.js';
 import { normalizeStoreSettings, validateStoreSettings, type StoreSettings } from './admin/settings.js';
-import { errorCode, isMissingSchema, schemaNotMigrated } from './schema.js';
 import {
   candidateSeeds,
   customerSeeds,
@@ -38,7 +29,7 @@ import {
   switchablePageSlugs,
   type DemoDatasetKey,
 } from './admin/seeds.js';
-import type { Database, QueryResult } from './handlers.js';
+import type { Database } from './handlers.js';
 
 export type AdminRequest = {
   method: string;
@@ -71,7 +62,8 @@ export const orderStatusFlowList = [...orderStatusFlow];
 export const orderStatusesList = [...orderStatuses];
 
 /**
- * The account lifecycle, as db/migrations/008_role_signup.sql constrains it.
+ * The account lifecycle the console enforces: a signup starts as pending and
+ * becomes active only when somebody with the right role reviews it.
  *
  * This used to be Active/Paused. The column still defaults to 'Active' and the
  * seeded rows are all Active, so the vocabulary change is invisible until an
@@ -382,16 +374,11 @@ const productImagesSelect = `COALESCE(
     '[]'::json
   ) AS images`;
 
-/**
- * Built from the shape of the products table this database actually has, so the
- * catalogue list still loads when a detail migration has not been applied. The
- * absent columns come back as NULL and the console shows the section empty, which
- * is what a product with no SEO block looks like anyway.
- */
-function productSelect(shape: CatalogueShape) {
+/** The one product query the console reads, with every product column named. */
+function productSelect() {
   return `SELECT ${baseSelect('product')},
-  ${detailSelect(shape)},
-  ${publishingSelect(shape)},
+  ${detailSelect('product')},
+  ${publishingSelect('product')},
   ${productImagesSelect}
   FROM products AS product`;
 }
@@ -399,52 +386,15 @@ function productSelect(shape: CatalogueShape) {
 /** The parsed shape both the console form and a bulk upload row arrive in. */
 type InsertableProduct = z.infer<typeof productCreateSchema>;
 
-/** A blank panel is not data, so a blank field is not something a save would lose. */
-function isBlankProductField(value: unknown) {
-  if (value === undefined || value === null) return true;
-  if (typeof value === 'string') return value.trim() === '';
-  if (Array.isArray(value)) return value.length === 0;
-  return false;
-}
-
-/**
- * The detail columns a request actually carries a value for.
- *
- * Both the create and the update schema default every detail field, so a parsed
- * product cannot tell "they typed a slug" from "they left the SEO panel blank" -
- * both arrive as `''`. That distinction is the whole question when a database is
- * missing those columns: a non-empty value is data a save would silently drop, so
- * it is refused by name, while a product whose detail panels are all blank is a
- * product the database can honestly store and must not be blocked.
- *
- * The column names are the ones in the schema and in the import template, which is
- * why `dropUnavailableColumns` can compare against them directly.
- */
-function addressedProductDetails(fields: Record<string, unknown>) {
-  const detail = [
-    ['slug', 'slug'],
-    ['meta_title', 'metaTitle'],
-    ['meta_description', 'metaDescription'],
-    ['shades', 'shades'],
-    ['highlights', 'highlights'],
-    ['features_and_specification', 'featuresAndSpecification'],
-    ['measurement', 'measurement'],
-    ['material_and_care', 'materialAndCare'],
-    ['additional_details', 'additionalDetails'],
-    ['item_details', 'itemDetails'],
-  ] as const;
-  return detail.filter(([, key]) => !isBlankProductField(fields[key])).map(([column]) => column);
-}
-
 /**
  * One INSERT builder for the console form and the bulk upload template.
  *
  * They were two copies of the same hand-numbered 24-placeholder string, which is
  * how the two drifted apart and why a new column had to be renumbered twice. The
- * placeholders are generated from the column list here, so a column a migration
- * has not added is simply not written and every other number shifts safely.
+ * placeholders are generated from the column list here, so every other number
+ * shifts safely when one is added.
  */
-function productInsert(product: InsertableProduct, shape: CatalogueShape) {
+function productInsert(product: InsertableProduct) {
   // name, value, and whether an empty string should become NULL.
   const columns: Array<[string, unknown, boolean]> = [
     ['name', product.name, false],
@@ -456,27 +406,22 @@ function productInsert(product: InsertableProduct, shape: CatalogueShape) {
     ['stock', product.stock, false],
     ['image', product.image || `${product.name.toLowerCase().replaceAll(/[^a-z0-9]+/g, '-')}.jpg`, false],
     ['description', product.description, false],
-  ];
-  if (shape.details) {
-    columns.push(
-      ['slug', product.slug, true],
-      ['meta_title', product.metaTitle, true],
-      ['meta_description', product.metaDescription, true],
-      ['shades', joinProductTags(product.shades), false],
-      ['highlights', joinProductTags(product.highlights), false],
-      ['features_and_specification', product.featuresAndSpecification, true],
-      ['measurement', product.measurement, true],
-      ['material_and_care', product.materialAndCare, true],
-      ['additional_details', product.additionalDetails, true],
-      ['item_details', product.itemDetails, true],
-    );
-  }
-  if (shape.publishing) columns.push(['published', product.published, false], ['featured', product.featured, false]);
-  columns.push(
+    ['slug', product.slug, true],
+    ['meta_title', product.metaTitle, true],
+    ['meta_description', product.metaDescription, true],
+    ['shades', joinProductTags(product.shades), false],
+    ['highlights', joinProductTags(product.highlights), false],
+    ['features_and_specification', product.featuresAndSpecification, true],
+    ['measurement', product.measurement, true],
+    ['material_and_care', product.materialAndCare, true],
+    ['additional_details', product.additionalDetails, true],
+    ['item_details', product.itemDetails, true],
+    ['published', product.published, false],
+    ['featured', product.featured, false],
     ['rating', product.rating, false],
     ['reviews', product.reviews, false],
     ['badge', product.badge, true],
-  );
+  ];
   return {
     values: columns.map(([, value]) => value),
     text: `INSERT INTO products (${columns.map(([name]) => name).join(', ')})
@@ -557,7 +502,7 @@ export const publishedDemoAdminEmails = [
  * Removes the seeded colleagues that are still sitting on the published password,
  * and leaves alone the ones that have been claimed.
  *
- * db/migrations/010 used to delete these five by address, on the reasoning that a
+ * A migration used to delete these five by address, on the reasoning that a
  * demo row is nothing an operator would keep. Production disproved that:
  * `deepak@glowngrace.in` had been claimed with a password somebody chose, and a
  * delete by address takes the account and its history with it, unasked. The
@@ -593,6 +538,36 @@ async function retirePublishedDemoAccounts(database: Database) {
  * administrator. Running it twice is a no-op, so it doubles as the
  * "reset demo data" replay.
  */
+/**
+ * The owner's first password, and how long it is held for.
+ *
+ * Normally this is generated and mailed, because an account whose password was
+ * typed by a human is an account whose password is in a shell history and a
+ * password manager. But the store starts empty on every boot, so a generated
+ * password that could not be mailed leaves nobody able to open the console at
+ * all - the outbox row dies with the process.
+ *
+ * `OWNER_PINNED_PASSWORD` is the way out, and the only reason it is read here.
+ * It is a hand-chosen password, so it is refused unless `OWNER_PINNED_HOLD_UNTIL`
+ * names the moment the rotation takes it back, which keeps a pinned password
+ * from quietly becoming permanent.
+ */
+function seededOwnerCredentials(now: Date) {
+  const pinned = process.env.OWNER_PINNED_PASSWORD?.trim();
+  if (!pinned) return { password: generateStrongPassword(), holdUntil: null as Date | null, pinned: false };
+
+  const holdRaw = process.env.OWNER_PINNED_HOLD_UNTIL?.trim();
+  if (!holdRaw) {
+    throw new Error(
+      'OWNER_PINNED_PASSWORD is set without OWNER_PINNED_HOLD_UNTIL. A hand-chosen password has to expire, so the hold date is not optional.',
+    );
+  }
+  const holdUntil = new Date(holdRaw);
+  const refused = passwordHoldError(holdUntil, now);
+  if (refused) throw new Error(`OWNER_PINNED_HOLD_UNTIL ${holdRaw} was refused: ${refused}`);
+  return { password: pinned, holdUntil, pinned: true };
+}
+
 export async function seedAdminData(database: Database) {
   await insertSeedRows(
     database,
@@ -636,11 +611,10 @@ export async function seedAdminData(database: Database) {
     `INSERT INTO admin_users (id, name, email, role, password_hash, avatar, status)
      VALUES ('00000000-0000-4000-8000-000000000001', 'Glow & Grace Admin', 'admin@glowngrace.in', 'Store Administrator', $1, '/images/partner1.jpg', 'Active')
      ON CONFLICT (email) DO NOTHING`,
-    // A random secret nobody holds, not a published one. The address exists so
-    // the console has a stable owner to be opened with, but the only way in is
-    // to set a real password from the host:
-    //   npx tsx scripts/reset-admin-password.ts --email admin@glowngrace.in
-    [await hashPassword(generateStrongPassword())],
+// A random secret nobody holds, not a published one. The address exists so
+  // the console has a stable second owner to be opened with, but the only way in
+  // is the owner account below, or an admin resetting this one by hand.
+  [await hashPassword(generateStrongPassword())],
   );
   await retirePublishedAdminPassword(database);
   await retirePublishedDemoAccounts(database);
@@ -653,14 +627,17 @@ export async function seedAdminData(database: Database) {
   // written down anywhere is the same as no account at all. The outbox row is
   // only written when the insert actually created the row, so a boot that finds
   // the account already there does not mail a password that was never stored.
-  const ownerPassword = generateStrongPassword();
+  // A pinned password is the one exception: the operator already has it, so
+  // mailing it back would be noise.
+  const now = new Date();
+  const { password: ownerPassword, holdUntil, pinned } = seededOwnerCredentials(now);
   const created = await database.query(
-    `INSERT INTO admin_users (id, name, email, role, password_hash, avatar, status, password_rotated_at)
-     VALUES ('00000000-0000-4000-8000-0000000000f1', $1, $2, $3, $4, '/images/partner1.jpg', 'Active', NOW())
+    `INSERT INTO admin_users (id, name, email, role, password_hash, avatar, status, password_rotated_at, password_hold_until)
+     VALUES ('00000000-0000-4000-8000-0000000000f1', $1, $2, $3, $4, '/images/partner1.jpg', 'Active', NOW(), $5)
      ON CONFLICT (email) DO NOTHING`,
-    [ownerAccount.name, ownerAccount.email, ownerAccount.role, await hashPassword(ownerPassword)],
+    [ownerAccount.name, ownerAccount.email, ownerAccount.role, await hashPassword(ownerPassword), holdUntil],
   );
-  if (created.rowCount) {
+  if (created.rowCount && !pinned) {
     const message = ownerCredentialsMessage({ password: ownerPassword, role: ownerAccount.role, now: new Date() });
     await database.query(
       `INSERT INTO email_outbox (kind, recipient, subject, body)
@@ -696,19 +673,12 @@ export function createAdminHandlers(database: Database) {
     seeded ??= seedAdminData(database).catch((error: unknown) => {
       console.error('Unable to seed admin data', error);
       // A rejected promise must not stay cached, or every later request would
-      // replay a failure that a freshly applied migration has already fixed.
+      // replay a failure that has already been fixed.
       seeded = undefined;
       throw error;
     });
     return seeded;
   };
-
-  /**
-   * The shape of the products table, read once per warm instance and re-read
-   * every 60 seconds. Reads use it to serve whatever the database has; writes use
-   * it to refuse an edit that would be silently lost, see `missingColumn`.
-   */
-  const catalogueShape = () => resolveCatalogueShape(database, 'admin');
 
   /**
    * Whether an id is the owner account.
@@ -780,12 +750,12 @@ export function createAdminHandlers(database: Database) {
   }
 
   async function listProducts() {
-    const result = await database.query(`${productSelect(await catalogueShape())} ORDER BY product.id`, []);
+    const result = await database.query(`${productSelect()} ORDER BY product.id`, []);
     return result.rows.map((row) => mapProduct(row) as Product);
   }
 
   async function readProduct(productId: number) {
-    const result = await database.query(`${productSelect(await catalogueShape())} WHERE product.id = $1`, [productId]);
+    const result = await database.query(`${productSelect()} WHERE product.id = $1`, [productId]);
     return result.rows[0] ? mapProduct(result.rows[0]) : null;
   }
 
@@ -903,17 +873,16 @@ export function createAdminHandlers(database: Database) {
     return all.filter((page) => (switchablePageSlugs as readonly string[]).includes(page.slug));
   }
 
-  async function listPages() {
-    // site_pages arrives with db/migrations/005_admin_console.sql. A database
-    // without it still has a storefront: it just has no saved visibility, so
-    // every page falls back to the bundled list and is shown.
-    let result: QueryResult;
-    try {
-      result = await database.query('SELECT slug, label, path, visible, position FROM site_pages ORDER BY position, slug', []);
-    } catch (error) {
-      if (!isMissingSchema(error)) throw error;
-      return sitePageSeeds.map((page) => ({ ...page, visible: true }));
-    }
+  /**
+ * The pages, falling back to the bundled list while the store is empty.
+ *
+ * The store starts empty, so an unseeded deployment would otherwise serve a
+ * storefront with no navigation at all. Every page is shown until the console
+ * says otherwise, which is what a page with no saved visibility looks like.
+ */
+async function listPages() {
+    const result = await database.query('SELECT slug, label, path, visible, position FROM site_pages ORDER BY position, slug', []);
+    if (result.rows.length === 0) return sitePageSeeds.map((page) => ({ ...page, visible: true }));
     return result.rows.map((row) => ({
       slug: String(row.slug),
       label: String(row.label),
@@ -1225,7 +1194,7 @@ export function createAdminHandlers(database: Database) {
           errors.push({ row: index + 2, message: 'The original price must be at least the selling price.', errors: { mrp: 'Lower the original price or raise the selling price.' } });
           continue;
         }
-        const insert = productInsert(product, await catalogueShape());
+        const insert = productInsert(product);
         const result = await database.query(insert.text, insert.values);
         created.push(String(result.rows[0]?.id ?? ''));
       }
@@ -1270,34 +1239,9 @@ export function createAdminHandlers(database: Database) {
     try {
       return await dispatch(request);
     } catch (error) {
-      if (isMissingSchema(error)) {
-        console.error(`The admin console database is behind this build (${errorCode(error)})`, error);
-        return schemaNotMigrated(error, { path: `/${request.segments.join('/')}` });
-      }
       console.error(`The admin console could not handle /${request.segments.join('/')}`, error);
       return fail(500, 'server_error', 'The console could not complete that request. Please try again shortly.');
     }
-  }
-
-  /**
-   * The 503 a write returns when the edit addresses columns this database does not
-   * have.
-   *
-   * Reads degrade on purpose, but a write must not: an operator who typed a slug
-   * and a meta description into the product form and watched both disappear would
-   * have no way to tell that from the save working. So the console refuses the
-   * edit and names the exact columns and the migration that adds them.
-   */
-  function missingColumn(columns: string[], shape: CatalogueShape): AdminResult {
-    return {
-      status: 503,
-      body: {
-        error: 'schema_not_migrated',
-        message: `This save was not applied because products is missing the ${columns.length === 1 ? 'column' : 'columns'} ${columns.join(', ')}.`,
-        detail: catalogueDriftHint(shape),
-        columns,
-      },
-    };
   }
 
   async function dispatch(request: AdminRequest): Promise<AdminResult> {
@@ -1416,12 +1360,7 @@ export function createAdminHandlers(database: Database) {
         // database without the 013 columns, because that is a save the console
         // can honestly make; it is the slug and SEO fields that cannot be
         // accepted, and those are named in the 503.
-        const shape = await catalogueShape();
-        if (!shape.details) {
-          const addressed = addressedProductDetails(product);
-          if (addressed.length > 0) return missingColumn(addressed, shape);
-        }
-        const insert = productInsert(product, shape);
+        const insert = productInsert(product);
         const result = await database.query(insert.text, insert.values);
         const createdId = Number(result.rows[0]?.id);
         if (validImages.length > 0) await insertProductImages(createdId, validImages);
@@ -1467,21 +1406,13 @@ export function createAdminHandlers(database: Database) {
         // A gallery-only edit carries no scalar column and is still a real edit, so
         // this guard only fires when nothing at all was addressed.
         if (Object.keys(columns).length === 0 && update.images === undefined) return fail(400, 'empty_update', 'Change at least one detail before saving.');
-        // An edit that touches only columns this database has is applied normally,
-        // so a drifted database still accepts a price or a stock correction. One
-        // that reaches for an absent column is refused rather than half-saved.
-        const shape = await catalogueShape();
-        const { columns: writable, dropped } = dropUnavailableColumns(shape, columns);
-        if (dropped.length > 0) return missingColumn(dropped, shape);
-        const names = Object.keys(writable);
+        const names = Object.keys(columns);
         if (names.length > 0) {
-          // `updated_at` is itself a migration 005 column, so it only goes in the
-          // SET list on a database that has it.
-          const stamped = shape.publishing ? [...names, 'updated_at'] : names;
+          const stamped = [...names, 'updated_at'];
           try {
             await database.query(
               `UPDATE products SET ${stamped.map((name, position) => `${name} = ${name === 'updated_at' ? 'NOW()' : `$${position + 2}`}`).join(', ')} WHERE id = $1`,
-              [productId, ...names.map((name) => writable[name])],
+              [productId, ...names.map((name) => columns[name])],
             );
           } catch (error) {
             if (isUniqueViolation(error)) return fail(409, 'duplicate_sku', 'That SKU is already in the catalogue. Use a unique SKU or leave it blank.');
@@ -1737,20 +1668,6 @@ export function createAdminHandlers(database: Database) {
     if (resource === 'bulk' && method === 'POST') {
       const parsed = bulkSchema.safeParse(request.body);
       if (!parsed.success) return fail(400, 'invalid_bulk', 'Check the spreadsheet and try again.');
-      // The product template carries the slug, SEO and rich text columns, so
-      // importing a sheet that uses them into a database without them would drop a
-      // whole sheet of data and still report success. Refuse that, naming the
-      // columns; a sheet of plain base fields is imported as usual.
-      if (parsed.data.dataset === 'products') {
-        const shape = await catalogueShape();
-        if (!shape.details) {
-          const addressed = new Set<string>();
-          for (const row of parsed.data.rows) {
-            for (const column of addressedProductDetails(row)) addressed.add(column);
-          }
-          if (addressed.size > 0) return missingColumn([...addressed], shape);
-        }
-      }
       const outcome = await bulkImport(parsed.data.dataset, parsed.data.rows);
       return {
         status: 201,

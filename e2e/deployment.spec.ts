@@ -66,7 +66,7 @@ test('API requests still reach the API layer and are never rewritten to the sing
   const health = await request.get('/api/health');
   expect(health.status()).toBe(200);
   expect(health.headers()['cache-control']).toContain('no-store');
-  expect(await health.json()).toMatchObject({ status: 'ok', database: { configured: true, reachable: true } });
+  expect(await health.json()).toMatchObject({ status: 'ok', store: 'memory', productCount: 0 });
 
   // /api/admin/products/11 is the path the old `[...path]` function could not
   // match. It belongs here so a nested console route can never fall through to

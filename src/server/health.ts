@@ -1,133 +1,47 @@
-import { Client } from 'pg';
-import {
-  describeProductColumnDrift,
-  productDetailColumns,
-  publishingColumns,
-} from './catalogue.js';
-import {
-  adminTables,
-  DatabaseConfigError,
-  clientConfig,
-  maskHost,
-  requiredTables,
-  resolveRuntimeDatabase,
-  runtimeEnvironment,
-  type Environment,
-  type HealthReport,
-} from './config.js';
-
-function tablePresenceSql() {
-  return [...requiredTables, ...adminTables]
-    .map((table) => `to_regclass('public.${table}') IS NOT NULL AS ${table}`)
-    .join(', ');
-}
+import { store, tables } from './database.js';
 
 /**
- * Migration 005 and 013 both add to the existing products table, so a database
- * can hold every table and still be missing the columns the catalogue reads. All
- * of them are listed here: checking only the 005 pair let a production database
- * report a clean `ok` while `/api/products` was returning 500 and the console 503.
+ * What /api/health reports.
+ *
+ * There is no database to connect to any more, so the checks a connection needed
+ * - can the connection string be read, is the host reachable, do the tables exist -
+ * have nothing to ask. What remains is the one thing that can still fail: the
+ * store itself, which is process memory, so the only honest question is whether
+ * this process came up with its tables.
+ *
+ * The block is deliberately not called `database`. Reporting one that no longer
+ * exists would be a claim nothing here can back, and the only reader is the
+ * deployment check, which is better served by being told what the store is.
  */
-const optionalProductColumns = [...publishingColumns, ...productDetailColumns] as const;
 
-function productColumnPresenceSql() {
-  return optionalProductColumns
-    .map((column) => `EXISTS (
-      SELECT 1 FROM information_schema.columns
-      WHERE table_schema = 'public' AND table_name = 'products' AND column_name = '${column}'
-    ) AS ${column}`)
-    .join(', ');
-}
+export type HealthReport = {
+  status: 'ok' | 'error';
+  store: 'memory';
+  tables: number;
+  rows: Record<string, number>;
+  productCount: number;
+  reason?: string;
+};
 
-const productColumnPresenceQuery = `SELECT ${productColumnPresenceSql()}`;
-
-export async function checkDatabaseHealth(env: Environment = process.env): Promise<HealthReport> {
-  const environment = runtimeEnvironment(env);
-  let resolved;
+export function checkHealth(): HealthReport {
   try {
-    resolved = resolveRuntimeDatabase(env);
+    const rows: Record<string, number> = {};
+    for (const table of tables) rows[table.name] = store.rows.get(table.name)?.length ?? 0;
+    return {
+      status: 'ok',
+      store: 'memory',
+      tables: tables.length,
+      rows,
+      productCount: rows.products ?? 0,
+    };
   } catch (error) {
     return {
       status: 'error',
-      environment,
-      database: {
-        configured: false,
-        reachable: false,
-        missingTables: [...requiredTables],
-        missingAdminTables: [...adminTables],
-        reason: error instanceof DatabaseConfigError ? error.message : 'The database configuration could not be read.',
-      },
-    };
-  }
-
-  const client = new Client(clientConfig(resolved));
-  const startedAt = Date.now();
-  try {
-    await client.connect();
-    const presence = await client.query<Record<string, boolean>>(
-      `SELECT current_database() AS name, ${tablePresenceSql()}`,
-    );
-    const row = presence.rows[0] ?? {};
-    const missingTables = requiredTables.filter((table) => row[table] !== true);
-    const missingAdminTables = adminTables.filter((table) => row[table] !== true);
-    let missingProductColumns: string[] = [];
-    if (!missingTables.includes('products')) {
-      const columns = await client.query<Record<string, boolean>>(productColumnPresenceQuery);
-      const columnRow = columns.rows[0] ?? {};
-      missingProductColumns = optionalProductColumns.filter((column) => columnRow[column] !== true);
-    }
-    let productCount: number | null = null;
-    if (!missingTables.includes('products')) {
-      const counted = await client.query<{ total: string }>('SELECT count(*)::text AS total FROM products');
-      productCount = Number(counted.rows[0]?.total ?? 0);
-    }
-    await client.end();
-    return {
-      status: missingTables.length === 0 ? 'ok' : 'degraded',
-      environment,
-      database: {
-        configured: true,
-        variable: resolved.variable,
-        provider: resolved.description.provider,
-        host: maskHost(resolved.description.host),
-        port: resolved.description.port,
-        name: String(row.name ?? resolved.description.database),
-        ssl: resolved.ssl,
-        reachable: true,
-        missingTables,
-        missingAdminTables,
-        missingProductColumns,
-        productCount,
-        latencyMs: Date.now() - startedAt,
-        reason: missingTables.length > 0
-          ? `Connected, but these tables are missing. Apply db/init.sql to this database: ${missingTables.join(', ')}.`
-          : missingProductColumns.length > 0
-            ? describeProductColumnDrift(missingProductColumns)
-            : missingAdminTables.length > 0
-              ? `Connected and serving the storefront. The admin console still needs: ${missingAdminTables.join(', ')}.`
-              : undefined,
-      },
-    };
-  } catch (error) {
-    await client.end().catch(() => undefined);
-    const cause = error as { code?: string; message?: string };
-    const code = typeof cause?.code === 'string' ? ` (code=${cause.code})` : '';
-    return {
-      status: 'error',
-      environment,
-      database: {
-        configured: true,
-        variable: resolved.variable,
-        provider: resolved.description.provider,
-        host: maskHost(resolved.description.host),
-        port: resolved.description.port,
-        name: resolved.description.database,
-        ssl: resolved.ssl,
-        reachable: false,
-        missingTables: [...requiredTables],
-        missingAdminTables: [...adminTables],
-        reason: `${cause?.message ?? 'The connection failed.'}${code}`,
-      },
+      store: 'memory',
+      tables: 0,
+      rows: {},
+      productCount: 0,
+      reason: error instanceof Error ? error.message : 'The in-memory store could not be read.',
     };
   }
 }

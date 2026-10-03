@@ -40,7 +40,7 @@ export type StoreSettings = {
 export const notificationKeys = ['orders', 'lowStock', 'partners', 'reviews'] as const;
 export type NotificationKey = (typeof notificationKeys)[number];
 
-/** Mirrors db/migrations/006_store_settings.sql. */
+/** The settings a deployment starts with, before anybody edits them. */
 export const defaultStoreSettings: StoreSettings = {
   profile: {
     storeName: 'Glow & Grace',

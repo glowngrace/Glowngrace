@@ -1757,8 +1757,9 @@ describe('owner account protection', () => {
   });
 
   it('does not protect an account still sitting on the address the owner used to be spelled with', async () => {
-    // The owner address was misspelled until this branch, and db/migrations/012
-    // renames the row. If any deployment is still holding the old spelling, that
+    // The owner address was misspelled until this branch. Nothing renames a row now,
+    // because nothing outlives a restart, but if an account is still sitting on the
+    // old spelling then that
     // account is an ordinary team member: it is not the way back in after every
     // credential has been rotated, so it must not be mistaken for one and
     // protected from the cleanup it needs.

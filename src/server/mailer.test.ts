@@ -239,8 +239,8 @@ describe('the delivery pass', () => {
 
 describe('the form the password writers call', () => {
   it('reports a failure instead of throwing, so seeding cannot be broken by it', async () => {
-    // `sent_at` only exists from db/migrations/011, so this is the exact shape of a
-    // database that has not been migrated yet.
+    // A row the store cannot update, which is the same failure this guards against:
+    // an outbox whose delivery cannot record itself.
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     try {
       const database: Database = { query: vi.fn(async () => { throw Object.assign(new Error('column "sent_at" does not exist'), { code: '42703' }); }) };
