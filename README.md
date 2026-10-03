@@ -1,435 +1,52 @@
-# Glow & Grace
-
-A responsive React storefront and beauty-career platform built to `Design/glow-and-grace-elegant 1.html`, with an administrator console built to `Design/glow-and-grace-admin.html`. The working app includes a product catalogue, category filters, product pages, a persistent bag and wishlist, server-backed sign-in with role-based candidate/partner/admin portals, public registration, partner salons, career listings, contact requests, and newsletter signups. The typography uses the reference's Cormorant Garamond / Jost font pairing, 16 px base size, and matching heading and navigation scale.
-
-## Stack
-
-- React 19, TypeScript, Vite, and React Router
-- PostgreSQL locally in Docker Compose; Neon PostgreSQL for production; a disposable Docker mirror of the production schema for reproducing database problems
-- Parameterized `pg` queries and Zod validation in the API
-- Vercel static hosting and Node.js serverless API functions, with a single-page-app rewrite for deep links
-- Vitest / Testing Library for UI and API unit tests; Playwright for browser E2E tests, including a production-build deployment suite
-- E2E | Playwright (@playwright/test) — headed/serial suite + UI runner |
-
-## Two databases, one direction
-
-The app never talks to one database from both places. Local development always uses the local Docker PostgreSQL container; production always uses Neon. Data flows in a single direction: **production to local, never local to production.**
-
-| | Local | Production |
-| --- | --- | --- |
-| Database | PostgreSQL 16 in Docker Compose (`glow-grace-data` volume) | Neon PostgreSQL |
-| Connection string | `DATABASE_URL` in `.env` | Same value, set in the Vercel project environment |
-| Schema | `npm run db:migrate:local` | `npm run db:migrate:production` |
-| Data source of truth | A copy of production, refreshed by `npm run db:sync` | The real data |
-
-Because production is the source of truth, the local database is disposable. A product you add in the local admin console is local-only until it is created in production; `npm run db:sync` will delete it. Add and verify products on production, then refresh local.
-
-A **third** database exists for reproduction and holds no data at all: the disposable mirror described in [Reproducing a production database problem](#reproducing-a-production-database-problem).
-
-## Local setup
-
-Requirements: Node.js 22+, npm, and Docker Desktop (or another Docker Compose runtime).
-
-1. Copy `.env.example` to `.env`, set the local database password, and paste the Neon pooled connection string into `PRODUCTION_DATABASE_URL`. `.env` is ignored by Git and holds every setting the project uses.
-2. Install packages with `npm install`.
-3. Start the local database with `npm run db:up`. Compose initializes it from `db/init.sql` and keeps data in the `glow-grace-data` volume.
-4. Confirm both databases with `npm run db:check`, then load the current production data with `npm run db:sync`.
-5. Start the API and Vite development server with `npm run dev`.
-6. Open `http://localhost:5173`.
-
-The starter storefront works without a database. Loading and saving administrator products, contact and newsletter submissions, and checkout require the local PostgreSQL container to be running. `http://localhost:3001/api/health` reports database health, not just process liveness. Stop the local database with `npm run db:down`; this keeps its named volume and data. To intentionally remove local database data, run `docker compose down -v` and then `npm run db:sync` to rebuild it from production.
-
-## Reproducing a production database problem
-
-When production misbehaves, the first instinct is to connect to Neon and look. `npm run db:sync` and `npm run db:check production` exist for that, but neither is appropriate while developing a fix: they read the live database, and a query written while debugging can write to it.
-
-The **disposable mirror** is a throwaway PostgreSQL that reproduces the production schema instead. It runs the same `postgres:16-alpine` image on port `5436`, its data directory is a `tmpfs` so nothing survives, and it is a local host, so the API's guard against remote databases accepts it without an override. It never touches `.env` and never reads `PRODUCTION_DATABASE_URL`.
-
-```sh
-npm run db:mirror:up      # start it and apply the full schema
-npm run db:mirror:down    # delete it and everything in it
-```
-
-Point the app at it instead of the local database:
-
-```sh
-DATABASE_URL=postgresql://glow_grace:glow_grace_mirror@localhost:5436/glow_grace npm run dev
-```
-
-The valuable part is `--through`, which stops the schema at a chosen migration:
-
-```sh
-npm run db:mirror:up -- --through 004
-```
-
-That produces exactly the database a deployment had before the console migrations existed — no `site_pages`, no `admin_users`, and no `products.published` — which is how the "the whole site returns 500" class of production bug is reproduced. `db/migrations/005_admin_console.sql` is the one that added `products.published`, so `--through 004` and `--through 005` behave very differently.
-
-`--through 012` reproduces the most recent production fault exactly: every console table present, `products.published` and `products.featured` in place, and the ten columns from `013_product_details.sql` absent. Against that, `GET /api/products` must return `200` and `GET /api/admin/products` must return `200`, with the SEO and rich-text sections simply empty. If either returns `500` or `503`, the shape handling in `src/server/catalogue.ts` has regressed.
-
-Run `npm run db:mirror:up` again with a higher `--through` to apply the missing migrations to the running mirror; the API picks them up within a minute, with no restart.
-
-### Proving the fix against a real database
-
-```sh
-npm run db:verify:catalogue
-```
-
-The unit tests stub the driver, and that is the gap that let the production fault through: a stub never raises `42703`, never parses the SQL, and hands back whatever the test told it to — so it cannot tell whether the SQL a build actually sends is valid on the database it is actually pointed at, or even whether a query result was read in the right shape. Three real bugs got past the entire unit suite that way and are now pinned by this command:
-
-- a fragment was interpolated as `${baseSelect}` instead of `${baseSelect()}`, so the statement literally contained the text of a JavaScript function;
-- two fragments each ended in a comma, so the joined statement contained `,,`;
-- `array_agg(column_name)` over `information_schema.sql_identifier` came back from the driver as the *string* `{slug,meta_title,...}`, so the shape check read it as "this database has none of the optional columns" — on a fully migrated database, which made the shop serve drafts and the console show empty fields.
-
-This command closes the gap. It stands the mirror up at migration `012` — the production fault exactly — starts the real server against it over real HTTP, and asserts that `/api/health` names the ten absent columns, `/api/products` and `/api/admin/products` both answer `200`, no query in the server log mentions a column that does not exist, a console edit of an absent column is refused by name, an edit of an existing column still saves, and applying `--only 013` makes the same running server accept every detail column within the cache TTL, with no restart. The mirror is local and disposable, so it cannot reach production.
-
-## Accounts, roles, and the way in
-
-There is no demo account any more. Authentication is the server's: passwords are scrypt-hashed, sessions are bearer tokens in `admin_sessions`, and every protected route checks the account's own role rather than the mere presence of a token. A `Customer` who signs in successfully still cannot walk into `/admin` with a valid session.
-
-- **Registration is public and narrow.** `/signup` offers exactly three roles - `Customer`, `Candidate`, and `Partner Salon` - and the server rejects anything else, including every console role. A registration creates a `Pending` account with `source = 'signup'`, mints no session, and leaves a message in `email_outbox` so an administrator knows a request arrived. Nobody can sign in as a `Pending` account, and nobody can send a status in the request body: the caller does not choose one.
-- **Console roles** - `Super Admin`, `Store Administrator`, `Store Manager`, `Inventory Manager`, `Partnerships Lead`, `Content & Reviews`, `Placement Coordinator` - are granted from the console's Settings section, never by self-registration.
-- **Approval** happens in Settings, where a pending registration is promoted to `Active` with a role. Until then the account exists and cannot sign in.
-- **Forgotten passwords** use a hashed, single-use, expiring token. `POST /api/admin/password-reset` always answers the same way whether or not the address is known, so it cannot be used to discover who has an account. A console operator can also set any team member's password from Settings.
-- **Passwords** are 8-128 characters and there is no longer any `demo123` exception. The browser demo sign-in, `src/auth/demo-auth.ts`, and the published credentials were all removed.
-- **The seeded colleagues are retired one row at a time, and only while they still hold the published password.** Five accounts used to share the credential printed in an old README. They were removed by address, on the reasoning that a demo row is nothing an operator would keep - and production disproved that: `deepak@glowngrace.in` had been claimed with a password somebody chose, and a delete by address takes the account with it, unasked. The check that already protected `admin@glowngrace.in` now covers all of them, so a claimed account survives with the password its owner set and an unclaimed one goes. `retirePublishedDemoAccounts` in `src/server/admin.ts` runs on the first request after the migration; `db/migrations/010` no longer deletes anything itself. Comparing hashes cannot decide this, because every hash carries its own random salt, so the password is verified against each row's own salt.
-
-### The owner account
-
-`glowngracebiz@gmail.com` is a fixed `Super Admin` whose password nobody chooses: the system generates a 24-character password, stores only its hash, and mails the plaintext to that same address. This is the only way into a deployment that has lost every other credential.
-
-- The address was `glownglancebiz@gmail.com` until the password-hold branch, which is a misspelling and matched no account in any database - so the weekly rotation was looking for a row that was not there and quietly doing nothing. `db/migrations/012` renames the row in any database still holding the old spelling, and the old address is now refused everywhere it used to be accepted: it cannot receive a credential, and an account still sitting on it is an ordinary team member rather than a protected owner.
-- The first password is written to `email_outbox` at the moment the account is created. The insert is guarded by its row count, so a later boot does not mail a password that was never stored.
-- `password_rotated_at` then drives a rotation every 7 days from `src/server/admin/owner-password.ts`. Each rotation replaces the hash, revokes every session the old password opened, and mails the new one. The schedule wakes daily and decides in SQL whether a rotation is due, so a clock skew or a restart cannot cause one on every request.
-- The owner row cannot be deleted or moved to another role, while its name can still be corrected. The rotation job, not the account row, is what changes the password.
-- "Mail" here means a row in `email_outbox`. `src/server/mailer.ts` sends the owner's message over SMTP and stamps `sent_at`, and the outbox stays the record either way. On a host where the outbox is not acceptable, set the first password directly instead: `npx tsx scripts/reset-admin-password.ts --email glowngracebiz@gmail.com`.
-
-### Holding a password that a person chose
-
-The weekly rotation is the right default and the wrong behaviour for a short window. During a handover, a demo or an incident somebody needs a password they actually know, and a rotation replaces it a week later whether or not anyone has read it. `password_hold_until` is that window.
-
-```sh
-OWNER_PINNED_PASSWORD=... npx tsx scripts/reset-admin-password.ts \
-  --email glowngracebiz@gmail.com --hold-until 2026-10-10T23:59:59Z
-
-OWNER_PINNED_PASSWORD=... npx tsx scripts/reset-admin-password.ts \
-  --email glowngracebiz@gmail.com --hold-until 2026-10-10T23:59:59Z --allow-local
-```
-
-- **The password is never in the source.** It is read from `OWNER_PINNED_PASSWORD` in `.env`, or typed at a masked prompt, and is never accepted as a command-line argument - so it cannot reach a shell history, a process listing or a CI log. The server never reads it: the script hashes the value, stores the hash, and the plaintext is not needed again. Delete the line from `.env` once it has been applied.
-- **A hold replaces the rotation, it does not add to it.** While the date is in the future the account is not due however long ago `password_rotated_at` was stamped. The moment it passes the account is due immediately, whatever that stamp says, and the rotation clears the column - so the hold is spent exactly once and cannot go on exempting the password that replaced it. After that the normal 7-day clock resumes.
-- **The reset lands on the first daily check after the deadline, not at the deadline.** `ownerRotationCheckMs` is a day, so a hold ending at 23:59 is honoured somewhere in the following 24 hours. The new password is written to `email_outbox` and every session the old one opened is destroyed.
-- **It is the owner account only.** `password_hold_until` is read by the owner's rotation and by nothing else, so a hold on any other row would be a column saying "do not touch this" to a schedule that never looks at it. The script refuses `--hold-until` for another address rather than handing back a password everybody believes is pinned and that is rotated away a week later with nobody told.
-- **It is capped at 30 days** by `maxPasswordHoldDays`. Past that the script refuses, so this cannot quietly become a way to switch the rotation off. `passwordHoldError` is the whole rule and is unit tested, including a date in the past, which is rejected rather than stored - storing it would make the account due on the very next tick, the opposite of the intent.
-
-`src/server/admin/owner-password.test.ts` covers the window end to end: the password survives a rotation stamp 60 days old, the hold is still in force on its last day, the first check after it closes rotates and mails, the column is cleared, and six days later the account is back on the weekly clock. `e2e/ui-review.spec.ts` covers the browser half: the owner signs in at the real address and the console opens, and a portal account with a valid session still meets the locked console, because a hold changes when the owner password is replaced and not who may use it.
-
-
-### Sending the owner's password
-
-A rotation writes the message and then tries to send it in the same call, so the password is normally in the mailbox before the request returns. Because that row is the only copy of a working password, a send that fails is not allowed to break anything: the row stays queued, and a pass runs every 5 minutes from `server/index.ts` to try again. `sent_at` is what stops it being sent twice.
-
-SMTP is configured in `.env` (see `.env.example`):
-
-```
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=465
-SMTP_USER=postmaster@glowandgrace.in
-SMTP_PASSWORD=<a Gmail app password, not the account password>
-MAIL_FROM=postmaster@glowandgrace.in
-```
-
-- Port 465 implies implicit TLS; any other port negotiates STARTTLS. `SMTP_SECURE=true` forces implicit TLS elsewhere.
-- `MAIL_FROM` defaults to `SMTP_USER`, which is right for a dedicated sending mailbox. Use a real address the provider is allowed to send from, or the mail will be rejected.
-- The server says at boot whether it will send owner credentials or only queue them. A deployment that believes it is emailing a password and is not would otherwise be found out a week later, when a password nobody received stops working.
-- Delivery is restricted to `kind = 'owner-credentials'` addressed to `glowngracebiz@gmail.com`. No other message in the outbox is ever sent, and no other address is ever mailed, whatever the row says. The address the owner used to be spelled with is refused as well, so a credential cannot be posted to a mailbox that is not the one holding the console. Everything else - signup notices and reset links - stays in the console inbox on purpose.
-
-## Loading feedback
-
-`src/components/Loader.tsx` is the single loading primitive for the whole application, so a slow request always produces the same visible, announced feedback instead of a blank screen. Nothing renders a bespoke spinner.
-
-- `Loader` fills a region that is fetching its first payload, `PageLoader` fills a whole page, `Spinner` sits inside a button, and `Skeleton` / `TableSkeleton` keep a region's final shape while it loads.
-- `LoadingProvider` wraps the app and renders a thin route progress bar during navigation. It is mounted once in `src/App.tsx`.
-- The storefront page gate (`StorefrontPagesProvider`) shows a `PageLoader` until `GET /api/site/pages` resolves, and clears it on failure as well as success, so a failed request can never strand a spinner.
-- `AdminStore` distinguishes the first load from a background reload. The admin console shows a full loader while the first payload arrives and a small progress bar for later refreshes, which is what previously caused a reload loop on every settings change.
-- Every loader is a `role="status"` region with `aria-live="polite"` and `aria-busy="true"`, and the animations are disabled by the global `prefers-reduced-motion` rule.
-
-`e2e/regressions.spec.ts` holds the relevant request open and asserts the loader is visible, announced, and then removed, which is the failure the old implementation produced: an empty `#main-content` with no indication anything was happening.
-
-## Page visibility settings
-
-`GET /api/admin/pages` and `PATCH /api/admin/pages/:slug` are restricted server-side to the three pages that actually have a storefront visibility switch: **Partners**, **Shop**, and **Careers**. The list is declared once as `switchablePageSlugs` in `src/server/admin/seeds.ts`; structural pages such as About, Contact, and FAQ are rejected on update, because hiding them would leave the app with no route.
-
-`GET /api/site/pages`, which the storefront gate uses, still returns every page. The admin restriction applies to the admin surface only.
-
-## Admin settings
-
-The Settings section reads and writes `GET`/`PUT /api/admin/settings`. Values are stored in `store_settings` as one JSONB row per section (`profile`, `delivery`, `notifications`, `preview`), so `src/server/admin/settings.ts` is the single source of truth: `storeSettingsSchema` validates an incoming change and `normalizeStoreSettings` guarantees a caller always receives a complete, correctly typed object even when a row is missing, partial, or was written before the schema tightened.
-
-- **Each form saves on its own.** Profile, delivery, password, and invite are separate forms with separate save buttons, each carrying only the sections it owns, and every team-member row has its own *Save role* button. A `PUT` merges section objects at the JSONB level (`value || EXCLUDED.value`), so saving the profile cannot blank out delivery or the switches.
-- **A switch that fails to save returns to where it was.** Notification and preview toggles persist immediately rather than behind a save button, so a rejected request toggles the switch back instead of leaving the UI claiming a setting is on when the server never stored it.
-- **A rejected save keeps your typing.** Validation failures come back as `400` with a `fieldErrors` map keyed by dotted path (`profile.email`, `delivery.deliveryFee`). The form splits the path on `.` and takes the last segment, renders the message next to the field with `aria-describedby` and `aria-invalid` set, and moves focus to the first bad field. An invalid email is the quick check: `z.string().email(...)`, because the project is on Zod v3 and `z.email()` does not exist.
-- **A save in flight locks the section.** Edits made while a section is saving are not clobbered when the response lands; the dirty-section guard tracks which form the operator is still editing.
-- **The danger zone asks first.** Reset and delete actions open a focus-managed confirm dialog, close on Escape, and never run without a click.
-- **Clipboard failures are reported, not ignored.** A browser that blocks `navigator.clipboard` shows a failure message instead of a false "copied" confirmation.
-
-Admin team members are managed through `GET`/`POST /api/admin/users` plus `PATCH`/`DELETE /api/admin/users/:id` and `POST /api/admin/users/:id/password`. A password change verifies the current password first and returns a `wrong_password` field error, which the form maps back to the current-password input rather than showing an unexplained error. Sample datasets shown under the settings status card come from `GET /api/admin/demo-data`, which reports a `rowCount` per dataset plus a `visible` flag, and `POST /api/admin/demo-data` restores or hides them.
-
-## Bulk uploads and spreadsheets
-
-Bulk upload templates are generated in the browser by `src/lib/xlsx.ts` and downloads are triggered by `downloadBlob`.
-
-- **The workbook builder drains the compression stream before it waits on the write.** Browsers apply backpressure to `CompressionStream`: the promise returned by `write()` does not settle until the readable side is being drained. The original code wrote first and read afterwards, which Node tolerates (it buffers eagerly) but which deadlocked in Chrome, so no template ever downloaded. Both compression and decompression now start the read and the write together.
-- **Compression degrades, it does not fail.** If a compressor has not produced output within four seconds, the entry is written as a stored (uncompressed) ZIP member instead. The archive stays valid, so a slow device gets a larger file rather than no file.
-- **`downloadBlob` attaches its anchor to the document, clicks it, and revokes the object URL after 60 seconds.** Revoking inline tore the blob down before the browser read it; the anchor is removed from the DOM immediately after the click so it cannot accumulate.
-
-`src/lib/xlsx.test.ts` covers all three with fakes that model the browser backpressure rule, because Node's implementation cannot reproduce the deadlock. `e2e/regressions.spec.ts` additionally downloads a real template in Chromium and asserts the file starts with the `PK` ZIP header, which is the check that would have caught the original bug.
-
-## Administrator console
-
-`/admin` is a single-page console built to `Design/glow-and-grace-admin.html`: a dark grouped sidebar, a topbar with search and quick-create, and twelve sections — Dashboard, Orders, Products, Add product, Job vacancies, Post a vacancy, Candidates, Partner salons, Customers, Reviews, Add a review, and Settings. It shares the storefront `/login` route; there is no separate administrator login.
-
-- The sidebar collapses to an off-canvas drawer below 1000 px, opened with the **Toggle navigation** button in the topbar.
-- Search, status filter chips, table sorting-free row actions, detail modals, CSV export, toasts, and the settings forms are all client-side.
-- **Product creation is real.** `createCatalogueProduct` posts to `POST /api/products` and the saved product appears in the console, the storefront, product pages, the bag, and checkout.
-- **Every console section is persisted.** Orders, jobs, candidates, partner salons, customers, and reviews are served from the database through `/api/admin/collections/:collection` and can be created, updated, and deleted like products. The seeded rows exist so a fresh install has something to look at, not as a client-side mock.
-- A mutation that the server rejects is not swallowed. `AdminStore` rethrows the failure so the calling form can keep the typed values, mark the offending field, and explain what went wrong instead of clearing the form and showing a generic toast.
-
-Add-product images support 1–10 JPEG, PNG, or WebP files, each up to **1200 × 1200 px** and **300 KB**. Images can be chosen, drag-and-dropped, picked from the in-app library, previewed, and removed before saving. Demo sign-in is still client-side only: do not expose product management or other admin APIs publicly until server-side authentication and authorization are added.
-
-### The console API route is an index function, not a catch-all
-
-Every console request nests a path segment: `/api/admin/products/11`, `/api/admin/pages/careers`, `/api/admin/orders/GG-2046`. The console is the only API in this project that does, and Vercel matches a `[...path]` serverless function for a **single** segment and answers `x-vercel-error: NOT_FOUND` for anything deeper. That is how every save, publish toggle and page switch came back as a platform 404 in production while local development kept working: `app.all('/api/admin/*')` matches any depth, so the two environments disagreed and the deployment preview could not reproduce it.
-
-The console API therefore lives in `api/admin/index.ts` and `vercel.json` forwards it explicitly:
-
-```json
-{ "source": "/api/admin/:path*", "destination": "/api/admin/index" }
-```
-
-Keep it that way. Adding a `[...path].ts` file under `api/` will look correct locally and fail again in production. `src/lib/vercel-routing.test.ts` fails if any `/api/admin/**` path stops resolving to the function, and `src/server/admin.test.ts` covers the nested product route itself.
-
-## Product content and rich text
-
-`db/migrations/013_product_details.sql` adds ten columns to `products`: `slug`, `meta_title` and `meta_description` for search, `shades` and `highlights` as comma-separated tags, and five free-text sections - `features_and_specification`, `measurement`, `material_and_care`, `additional_details` and `item_details`. They are ordinary nullable `TEXT` columns, so a database that has not run the migration keeps serving the storefront and the console reports `schema_not_migrated` rather than failing.
-
-**Rich text is stored as a restricted HTML subset, and the restriction is enforced on the server.** `src/lib/rich-text.ts` is the single implementation of that subset, and it is used on both sides of the wire:
-
-- `sanitizeRichText` is the only way a value reaches the database. It keeps `b`, `strong`, `i`, `em`, `u`, `s`, `br`, `p`, `div`, `ul`, `ol` and `li`, converts newlines to `<br>` so a value pasted from a spreadsheet keeps its shape, and drops everything else - including `style`, `class`, `on*` handlers and `<script>`. An `href` survives only for `http:`, `https:`, `mailto:`, `tel:` and relative targets, so `javascript:` cannot be stored.
-- `productRichTextSchema` applies that transform inside the Zod schema, so a hand-written `POST` or `PATCH` is cleaned exactly like the form. Sanitizing on write rather than on read means a stored value is already safe, and a row written before the editor existed - plain text with newlines - still renders.
-- `RichText` renders a stored value into React elements. There is **no `dangerouslySetInnerHTML` anywhere in this project**, so the stored subset cannot become executable markup even if a future writer slips something past the sanitizer.
-
-**The admin editor is a visible `contenteditable` over a hidden `textarea`.** `RichTextField` gives the toolbar bold, italic, underline and bulleted and numbered lists, and strips formatting from pasted content so a paste from Word cannot smuggle a style into the column. The hidden textarea carries the field's `name` and is what actually submits; it is `readonly`, `aria-hidden` and out of the tab order, because the labelled `contenteditable` beside it is the control a person uses. Seven product fields use it: the description, the meta description, and the five Product Information sections. The meta description is edited with the same toolbar and therefore stores the same sanitized subset rather than being forced to plain text - if a search engine prefers bare text there, that is a change to make deliberately, not something the sanitizer does quietly.
-
-**The product page renders those sections, and the parent heading never disappears.** Optional cards are omitted when their section is empty, but the **Product Information** heading, description, Safety Information and Ingredient are always present - otherwise a product written before these fields existed would render an empty section. The five configurable sections sit between the description and the two fixed ones.
-
-**Images survive an edit.** A `PATCH` used to replace the gallery with whatever the form happened to be holding, which deleted stored images whenever a product was renamed. Now the form sends the authoritative gallery only when it was actually changed, a `PATCH` preserves the images it was not given, and a reference to an image that is not there is rejected before anything is deleted. `src/server/admin.test.ts` covers the gallery-only edit, the preserved reference and the rejected one.
-
-## Partner profiles
-
-`/partners/:partnerSlug` renders a full profile - banner, about, gallery with a lightbox, services and pricing, hours and location, and booking and contact actions - from the static records in `src/data/catalog.ts`, resolved by `findPartner()`. An unknown slug renders the page's own "we couldn't find that parlour" state rather than a platform 404.
-
-The profile is wrapped in `PageGate path="/partners"`, so hiding the **Partners** page in Settings hides its profiles too. That gate renders a loader with no heading while the page list is in flight, which is why the UI spec below pins the page list instead of reading it from the local database.
-
-## Product form layout
-
-Two faults in the Add product form were invisible to unit tests and are measured in a real browser by `e2e/product-form-layout.spec.ts`:
-
-- The rich text editor's hidden `textarea` is absolutely positioned. With no positioned ancestor it was laid out against the page rather than its own field and dragged a horizontal scrollbar across the whole console; `.admin-rte` is now `position: relative`.
-- The right column was capped with `max-height` and `overflow-y: auto`, which put a second vertical scrollbar beside the page's own. Capping it is not the fix, though: a column taller than the viewport would then hide its own footer, and **Save product** with it. The column keeps its natural height and `.admin-form-actions` is `position: sticky; bottom: 0`, so the actions stay on screen at any viewport with one scrollbar.
-
-The console's left navigation is off-canvas below 1000px, and **a translated element is still reported as visible**. A test that waits for a nav button inside a closed drawer therefore waits successfully while the button sits unreachable outside the viewport, and the click then hangs. The spec asks whether the button is actually reachable, and opens the drawer by waiting on the burger's `aria-expanded`, which reflects React's own `navOpen`. The burger is addressed by class rather than by role because it is `display: none` above the breakpoint, which also drops it out of the accessibility tree.
-
-## Announcement ribbon
-
-A fixed black ribbon sits above the storefront header with the free-shipping threshold, the house telephone number, and links to the brand's Instagram and Facebook. It is rendered from `src/components/Layout.tsx`, so it appears on every storefront route and not inside `/admin`.
-
 ## Environment
 
-Every setting lives in `.env` at the project root; nothing is hard-coded and no secret is committed. `.env` is ignored by Git, and `.env.example` is the committed template. Copy the template and fill in the production connection string before running any database command.
+Every setting lives in `.env` at the project root; nothing is hard-coded and no secret is committed. `.env` is ignored by Git, and `.env.example` is the committed template.
 
 | Variable | Used by | Description |
 | --- | --- | --- |
-| `DATABASE_URL` | API, sync | The **local** Docker connection string. It is also the name the Vercel project uses, where it must hold the **Neon** connection string. |
-| `POSTGRES_DB` | Docker Compose | Local database name. |
-| `POSTGRES_USER` | Docker Compose | Local database user. |
-| `POSTGRES_PASSWORD` | Docker Compose | Local database password; replace the example value. |
-| `POSTGRES_PORT` | Docker Compose | Host port for the local container (default `5435`; change it in `.env` if the port is in use). |
-| `PRODUCTION_DATABASE_URL` | Sync, migrate, check | The **production** Neon pooled connection string. Read-only source for `npm run db:sync` and target for `npm run db:migrate:production`. |
-| `LOCAL_DATABASE_SSL` | API | TLS for the local container. Defaults to `disable`; the local image does not serve TLS. |
-| `DATABASE_SSL` | API | TLS for the production Neon connection. Defaults to `require` when the connection string does not set `sslmode`. Accepts `disable`, `require`, or `verify-full`. |
-| `DATABASE_POOL_MAX` | API | Pool size per function instance. Default `1`. |
-| `DATABASE_IDLE_TIMEOUT_MS` | API | Default `10000`. |
-| `DATABASE_CONNECT_TIMEOUT_MS` | API | Default `8000`, deliberately below the 10 s function budget so a bad connection fails with a real error instead of a hard timeout. |
-| `DATABASE_STATEMENT_TIMEOUT_MS` | API | Default `0` (off). Set a value to abort long-running queries. |
-| `ALLOW_REMOTE_DATABASE` | Local API | Default `false`. While `false`, the local API server refuses to start if `DATABASE_URL` points at anything other than the local container, so local work can never read or write production by accident. |
-| `OWNER_PINNED_PASSWORD` | Reset script | Read by `scripts/reset-admin-password.ts` only, and only to apply a password once. The server never sees it, because the script stores only the hash. Set it in `.env`, run the script, delete the line. |
 | `PORT` | Local API | Express API port (defaults to `3001` if omitted). |
 | `VITE_API_BASE_URL` | Vite | Browser-visible API prefix; keep this as `/api`. Never put secrets in a `VITE_` variable. |
+| `SMTP_*`, `MAIL_FROM` | Mailer | How the owner's password is delivered. See [Sending the owner's password](#sending-the-owners-password). |
+| `OWNER_PINNED_PASSWORD` | API seed | A hand-chosen owner password for this process. Only honoured together with `OWNER_PINNED_HOLD_UNTIL`, and both stop mattering at the next restart. |
+| `OWNER_PINNED_HOLD_UNTIL` | API seed | When the weekly rotation takes the pinned password back. ISO 8601, and at most 30 days out. |
 
-The disposable mirror sets its own four variables in `scripts/mirror-database.ts` and `docker-compose.mirror.yml` (`MIRROR_POSTGRES_DB`, `MIRROR_POSTGRES_USER`, `MIRROR_POSTGRES_PASSWORD`, `MIRROR_POSTGRES_PORT`, default port `5436`). They are not read from `.env`, which is what keeps the mirror from ever being pointed at production.
-
-### How the API picks a connection string
-
-`src/server/config.ts` is the single place that reads configuration. The API tries these names in order and uses the first one that is set: `DATABASE_URL`, `NEON_DATABASE_URL`, `DATABASE_URL_UNPOOLED`, `POSTGRES_URL`, `POSTGRES_PRISMA_URL`. The later names are the ones Neon and the Vercel Neon integration inject automatically, so the API connects whether you set `DATABASE_URL` by hand or link Neon from the Vercel dashboard.
-
-`PRODUCTION_DATABASE_URL` is deliberately **not** in that list. It is only read by the local scripts, which is what guarantees the sync can never mistake the local database for production.
+There are no connection strings to set. Anything that used to name a database is ignored.
 
 ### Production setup on Vercel
 
-The production API needs two things: the Neon connection string and an applied schema.
+Nothing to provision. Build the project, deploy, and check that `/api/health` answers `"status": "ok"`.
 
-1. Create or pick the Neon project and copy its **pooled** connection string.
-2. Set it in the Vercel project under **Settings → Environment Variables** as `DATABASE_URL`, for the **Production** environment (and Preview if you want preview deployments to work). Keep the password in Vercel, not in source control or a browser variable.
-3. Apply the schema to Neon once, from your machine: `npm run db:migrate:production`.
-4. Confirm it works: `curl https://your-app.vercel.app/api/health` should return `"status": "ok"` with empty `missingTables`, `missingProductColumns` and `missingAdminTables`.
+**Leave behind anything that looks like a connection string.** A leftover `DATABASE_URL` or `POSTGRES_*` in the Vercel project is dead weight at best, and at worst a live credential for a database this code no longer talks to. Delete it, then rotate anything it held.
 
-If you already linked Neon through the Vercel Neon integration, step 2 is unnecessary — the injected variables are in the list above.
+## Store health
 
-**Run `npm run db:migrate:production` again after every migration you add.** Deploying code that reads a new column or table without applying the migration is what produces the drift described in [Database](#database); the API now degrades instead of going down, but only the migration actually enables the feature.
-
-## Database health
-
-`/api/health` reports whether the deployed API can reach its database. It never returns a password, and the host is masked.
-
-```sh
-curl -s https://glowngrace-tau.vercel.app/api/health
-```
+`/api/health` reports the store. It never returns a password, because there is no connection to leak one from.
 
 | `status` | Meaning | Fix |
 | --- | --- | --- |
-| `ok` (HTTP 200) | Connected and every table and product column exists. | Nothing. |
-| `ok` with `missingProductColumns` or `missingAdminTables` | The shop works, but the console cannot edit everything. | `npm run db:migrate:production` |
-| `degraded` (HTTP 503) | Connected, but tables are missing. `missingTables` lists them. | `npm run db:migrate:production` |
-| `error` (HTTP 503) | Not connected, or no connection string is configured. `reason` explains which. | Set `DATABASE_URL` in Vercel, then redeploy. |
+| `ok` (HTTP 200) | The process came up with its tables. | Nothing. |
+| `error` (HTTP 503) | The store could not be read. `reason` explains which. | Restart the instance. |
 
-`missingProductColumns` exists because migrations `005_admin_console.sql` and `013_product_details.sql` add columns to the existing `products` table, so a database can be missing part of the schema while every table it reports is present. All thirteen optional columns are checked, and `reason` names the exact ones and the exact migration that adds them.
+`store`, `tables`, `rows` and `productCount` describe **this process**, not a server. A non-zero `rows.products` means somebody saved a product since this instance started, and it returns to zero when the instance is replaced.
 
-That check is the early warning, and it is what this repository was missing when `013` shipped: it listed only the two migration-`005` columns, so production reported a clean `ok` while `GET /api/products` was returning `500` and `GET /api/admin/products` was returning `503`. Run `npm run db:check` against production after any deploy that touches `db/`.
+This is a liveness check, not a durability one. Nothing here can tell you whether an order placed yesterday is still there, because whether it is depends on whether the instance that took it is still the instance you are asking.
 
-The same check runs locally and covers both databases at once:
+## The store's schema
 
-```sh
-npm run db:check              # local and production
-npm run db:check production   # production only
-```
+`src/server/database.ts` declares every table and column in a single `tables` array. That array **is** the schema: there is no migration to apply and nothing can drift from it.
 
-It exits non-zero when either database is unhealthy, so it can be used as a deployment gate.
+Adding a product column means changing two places that have to agree — the table definition, and the query fragments in `src/server/catalogue.ts`:
 
-## Schema and data commands
+| List | Columns |
+| --- | --- |
+| `baseProductColumns` | `id` … `description` |
+| `publishingColumns` | `published`, `featured`, `updated_at` |
+| `productDetailColumns` | `slug`, `meta_title`, `meta_description`, `shades`, `highlights`, `features_and_specification`, `measurement`, `material_and_care`, `additional_details`, `item_details` |
 
-```sh
-npm run db:up                  # start the local container
-npm run db:check               # report health of both databases
-npm run db:migrate:local       # apply the schema to the local container
-npm run db:migrate:production  # apply the schema to Neon
-npm run db:migrate:production -- --only 013   # apply one migration, nothing else
-npm run db:sync                # copy production data into the local container
-npm run db:mirror:up           # start a disposable mirror of the production schema
-npm run db:mirror:up -- --through 004   # stop that schema at migration 004
-npm run db:mirror:down         # delete the mirror and all of its data
-npm run db:verify:catalogue    # prove catalogue resilience against a real drifted database
-```
+`src/server/catalogue-columns.test.ts` fails if a query in `admin.ts` or `handlers.ts` names a `products` column that none of those lists declare, which is the assertion that stops the two drifting apart.
 
-`db/migrate:*` is safe to re-run. Every statement in `db/init.sql` and `db/migrations/*.sql` is `IF NOT EXISTS` or `IF EXISTS`, so the files apply cleanly to a fresh database, an existing one, and one that is already up to date. The mirror applies the same files, so `--through 00N` is exactly the schema a deployment had when `00N` was the newest migration.
+A column named in a query but missing from the store is an **error**, not an empty value: the executor refuses to resolve it. That is the opposite of the old behaviour, where an absent column was quietly swapped for `NULL::TEXT` and a product silently lost its slug.
 
-`--only` applies a single file, by number or by name. Use it to bring one drifted migration up to date without replaying the rest of `db/`, which also re-runs the destructive statements in `010_remove_demo_accounts.sql`:
+Checkout validates the customer's delivery/contact details and product IDs on the server, looks up all prices from the product catalogue, calculates 5% GST and delivery charges, and saves the order and its line items. Delivery costs are free for standard, ₹49 for express, and ₹99 for same-day delivery. Cash on delivery is the only enabled payment option; UPI, cards, and net banking are visibly marked as coming soon because no payment provider is configured. Do not collect or store payment-card details. The order confirmation includes its order number and COD total; confirmation details are kept in the browser's current navigation state rather than exposed through a public order-lookup endpoint.
 
-```sh
-npm run db:migrate:production -- --only 013
-```
-
-It prints how many files `--only` matched and exits non-zero if that was not exactly one, so a typo cannot quietly apply nothing or the wrong thing.
-
-`npm run db:sync` is the only command that copies rows, and it is deliberately one-way:
-
-- It **reads** `PRODUCTION_DATABASE_URL` and **writes** `DATABASE_URL`.
-- It refuses to start unless the target is a local host, and refuses if both strings point at the same database. There is no code path that writes to production.
-- It applies `db/init.sql` to the local database, truncates the local tables, copies every row across in batches, and then realigns local identity sequences so the next locally created product gets the correct ID.
-- `--dry-run` reports production row counts without writing. `--schema-only` applies the schema and copies nothing. `--skip-images` copies the catalogue without the binary `product_images` rows.
-
-Always run it before starting local work if you need to reproduce a production bug.
-
-## Database
-
-`db/init.sql` creates the contact-request, newsletter-subscriber, product, product-image, order, and order-item tables. Docker runs it when creating a fresh data volume, and `npm run db:migrate:local` and `npm run db:migrate:production` apply it plus every file in `db/migrations/` to an existing database. `005_admin_console.sql` adds the publishing columns and the console tables, `006_store_settings.sql` the default store settings, and `007_admin_users.sql` the demo console accounts. `008`-`013` add role signup, the password-reset lookup, the removal of the demo accounts and the outbox's delivery marker. `012_owner_password_hold.sql` adds `password_hold_until` and renames the owner row off its old misspelling. `013_product_details.sql` adds the product copy columns described in [Product content and rich text](#product-content-and-rich-text). Docker's PostgreSQL entrypoint does not rerun initialization scripts on an already-initialized volume, so use the migrate commands after changing the schema.
-
-**A deployment that is newer than its database is the single most common cause of "The catalogue could not be loaded."** Code that reads `products.published` fails with `42703` on a database where migration 005 was never applied, and code that reads `site_pages` or `admin_users` fails with `42P01`. `src/server/schema.ts` recognises both, and the API is written to survive them.
-
-### A migration that adds a product column no longer takes the shop down
-
-This is the fault that broke production: `013_product_details.sql` added ten columns to `products` and the queries that read them shipped in the same commit, but the migration was never applied to Neon. Every one of those column names was hardcoded into the SQL, so `GET /api/products` returned `500` and `GET /api/admin/products` returned `503` — the whole shop, over metadata columns that are not the price, the stock or the SKU. The old fallback only swapped `published` and `featured`, so the retry failed the same way and the error surfaced as a `500`.
-
-The columns `products` has grown over time are now declared once, in `src/server/catalogue.ts`:
-
-| List | Columns | Added by |
-| --- | --- | --- |
-| `baseProductColumns` | `id` … `description` | `db/init.sql` |
-| `publishingColumns` | `published`, `featured`, `updated_at` | `005_admin_console.sql` |
-| `productDetailColumns` | `slug`, `meta_title`, `meta_description`, `shades`, `highlights`, `features_and_specification`, `measurement`, `material_and_care`, `additional_details`, `item_details` | `013_product_details.sql` |
-
-Every product query is built from a `CatalogueShape` — which of those groups the database actually has — read from `information_schema.columns` once per warm instance and re-read every 60 seconds. The behaviour that follows:
-
-- **The storefront degrades.** `GET /api/products` selects `NULL::TEXT AS slug` and the rest in place of the absent columns. `mapProduct` already reads a NULL as "not set", so the product page hides those sections instead of rendering them empty, and the shop keeps selling.
-- **The console reads degrade too.** `GET /api/admin/products` returns `200`, so the catalogue list and the rest of the console keep working.
-- **Console writes never silently lose data.** An edit that touches only columns the database has is applied normally — a price or stock correction still saves. An edit that reaches for an absent column, a product create, or a bulk product import is refused with `503` and a `columns` array naming exactly what is missing, plus the migration that adds it. Dropping an operator's slug silently is not an acceptable version of "degraded".
-- **It self-heals.** Applying the migration is enough: the cached shape expires within `CATALOGUE_SHAPE_CACHE_MS` (60 seconds by default) and the next request uses the full columns. No redeploy, no cache flush, no restart.
-- **A genuine outage is still a `500`.** No `products` table at all, a dropped connection or a timeout is logged and answered, never rejected out of the function.
-
-`src/server/catalogue-columns.test.ts` reads the SQL in `db/` and fails if any migration adds a `products` column that is not declared in `catalogue.ts`. That is the assertion that stops this recurring: a new column cannot be added to a product query and a migration without the two being tied together.
-
-Reproduce any of it with `npm run db:mirror:up -- --through 004` (see [Reproducing a production database problem](#reproducing-a-production-database-problem)), or `--through 012` for exactly this fault. The fix is always `npm run db:migrate:production`, or `-- --only 013` for the single drifted file.
-
-A failure is never allowed to escape a route as a rejected promise. Express 4 does not catch those, so one failed request used to end the API process and turn every following request into a `500` until the instance was replaced.
-
-Checkout validates the customer's delivery/contact details and product IDs on the server, looks up all prices from the product catalogue, calculates 5% GST and delivery charges, and atomically saves the order and its line items. Delivery costs are free for standard, ₹49 for express, and ₹99 for same-day delivery. Cash on delivery is the only enabled payment option; UPI, cards, and net banking are visibly marked as coming soon because no payment provider is configured. Do not collect or store payment-card details. The order confirmation includes its order number and COD total; confirmation details are kept in the browser's current navigation state rather than exposed through a public order-lookup endpoint.
-
-The application opens a lazy, small (`max: 1`) PostgreSQL pool, which suits Vercel's short-lived function instances and works with both Neon and the local Docker database. TLS is decided per environment: off for the local container, on for Neon. When a query fails, the error names the variable, the masked host, the SSL mode, and the PostgreSQL error code, so the Vercel function log identifies the cause without printing the password.
-
-## Quality checks
-
-```sh
-npm run lint
-npm run build
-npm run test
-npm run test:e2e
-npm run test:e2e:dist
-npm run db:verify:catalogue   # needs Docker; see "Proving the fix against a real database"
-```
-
-Only the last one touches a real database, and it does so through the disposable mirror rather than production. Everything above it stubs the driver, which is why the catalogue SQL is also checked against a real PostgreSQL by `npm run db:verify:catalogue`: a stub cannot parse the SQL it is handed, so it will happily accept a statement containing the text of a JavaScript function, and it answers a shape probe with whatever the test told it to rather than what the driver would.
-
-Playwright runs Chromium in desktop and mobile emulation. Install its browser once with `npx playwright install chromium`. The E2E server starts automatically; browser tests cover storefront navigation, product and wishlist interactions, checkout delivery/tax calculations and failure recovery, portal access, administrator section navigation and product/image creation, contact submission, and responsive layouts. API unit tests cover validation and server-calculated persistence without requiring a live database. To verify saved products or real local orders, apply the migrations if needed, start Docker and the app, and create a test product or place a COD test order.
-
-`e2e/regressions.spec.ts` covers the three regressions fixed in the loading, settings, and spreadsheet work described above: a held request must produce a visible and announced loader that then clears (including on failure), the Settings page must offer exactly three page switches and no structural pages, and the products template must download as a real ZIP archive whose button announces progress while the workbook is built. Every request in that file is stubbed, so the suite never touches the database.
-
-`e2e/ui-review.spec.ts` is the pass over the pages that branch touched, checked the way a person meets them. It walks `/signup`, `/login`, `/reset-password`, and `/admin` on desktop and mobile and asserts the things a component test cannot see: that the sign-up form offers exactly the three public roles and never mentions a console role, that a refused sign-up or a wrong password produces an announced message without revealing whether an account exists, that the console lock offers a route to the sign-up form, and that a weak password never reaches the server. It also signs in as the owner at the real address and checks the console opens, and signs in as a Candidate and checks the console does not - the two halves of the password hold, which changes when the owner credential is replaced and not who may use it. The last check on each page is a layout audit - no horizontal overflow, no text clipped by its own box, no unlabelled field, no image without alternative text, exactly one `h1`, and a clean console. The screen-reader-only one-pixel pattern is excluded from the clipping check on purpose, since hiding a label from the eye is the point of it.
-
-**That layout audit now lives in `e2e/support/audit.ts`, and it is applied to the pages the current branch rebuilt as well.** `e2e/ui-review.spec.ts` covers the sign-in surfaces, which is the correct set for that branch; the product page, the partner profile and the product form had no such coverage, so `e2e/rebuilt-pages-ui.spec.ts` runs the same `auditPage` helper over them. Sharing the helper is the point: a defect like an unnamed `TagInput` - a field wrapped in a `fieldset` whose `legend` groups the tags but does not name the box they are typed into - is invisible to the old list and would stay invisible to a copy of it. The helper adds one check of its own for a `contenteditable` with no accessible name, because the rich text editor is exactly that kind of field. It deliberately ignores controls marked `aria-hidden`, since a field the author has taken out of the accessibility tree is not missing a label - it is deliberately not announced.
-
-That spec also pins the storefront page list rather than reading it from the local database, for the reason given in [Partner profiles](#partner-profiles): the gate renders a heading-less loader while the request is in flight, so a spec that trusted local data would be asserting against whatever `npm run db:sync` last copied.
-
-The admin settings work is covered twice. `src/pages/admin/SettingsPage.test.tsx` runs twelve UI tests against a stubbed fetch: per-section saves, dotted-path field errors, a rejected save keeping the typed value, cleared number fields staying empty rather than becoming `0`, the `wrong_password` mapping, the focus-managed danger dialog, and the blocked-clipboard path. `e2e/admin-settings.spec.ts` repeats the critical ones in Chromium on desktop and mobile against a real signed-in session. Both are slower than the other suites because the page resolves thirteen requests per render; `src/test/setup.ts` raises `asyncUtilTimeout` and `vite.config.ts` raises `testTimeout` for that reason. The E2E file stubs `**/api/admin/**` and never touches the database, so the sign-in request must still reach the real API — register the catch-all route first and `route.continue()` for anything unstubbed, because Playwright matches the most recently registered route first.
-
-**The storefront specs pin the bundled sample catalogue.** `e2e/storefront.spec.ts` asserts on shipped product names (for example *Glow Ritual Vitamin C Face Serum*) because those are stable fixtures with known prices, and a test that reads its expectations out of whatever the database holds cannot assert anything. Those specs call `stubBundledCatalogue()` from `e2e/support/accounts.ts`, which answers `**/api/products` with `catalogueManaged: false`. That is the value the API really returns for a shop that has never been stocked, and it is the only setting under which `ProductCatalog` keeps the bundled products, so the stub documents the contract rather than faking around it.
-
-This matters because the alternative was a suite whose result depended on local data. `npm run db:sync` copies three production products into the local database, the API then answers `catalogueManaged: true`, and the browser correctly discards the bundled samples - every product-name assertion failed on data rather than on code. Pinning the catalogue means the same suite passes against a stocked database, an unstocked one, or none at all. `e2e/deployment.spec.ts` needs no stub because it runs against `npm run preview:dist`, whose API is stand-in JSON and never consults a database.
-
-Worth knowing why the fallback exists at all: the API never serves bundled rows. It returns an empty list and lets the browser decide, so a catalogue outage is indistinguishable from an unstocked shop, and a customer sees sample products rather than an empty grid.
-
-`src/server/admin.test.ts` covers the nested product route, because every console write depends on a path the deployment bug took offline and that route had no tests of its own: saving through `PATCH /products/:id`, the publish toggle, a reference that is not a whole number, a product that is no longer in the catalogue, and an unauthenticated request. The last two matter for triage: the handler answers `401` for a missing session and `404 not_found` for a missing product, so a platform `404` with an `x-vercel-error` header is a routing failure rather than data.
-
-`src/server/schema-drift.test.ts` covers the deployment-ahead-of-database behaviour against a fake database that raises `42P01` and `42703`, so no live database is needed. To check it for real rather than against a mock, run `npm run db:verify:catalogue`, which stands the mirror up at migration `012`, serves real HTTP from it and asserts every one of those cases automatically; or do it by hand with `npm run db:mirror:up -- --through 004` and read `GET /api/products` (expect `200` with the products treated as published), `GET /api/site/pages` (expect `200` with the bundled page list) and `POST /api/admin/session` (expect `503` `schema_not_migrated`).
-
-The owner rename in `012` is worth checking against a real database rather than a mock, because the interesting case is a row that exists under the old spelling. `npm run db:mirror:up -- --through 011` gives a schema without the column and without the rename; insert an `admin_users` row at `glownglancebiz@gmail.com`, then `npm run db:mirror:up` again to apply `012` and confirm the row now reads `glowngracebiz@gmail.com` and that `password_hold_until` exists and is `NULL`. The update is guarded on the new address not already existing, so a database that was corrected by hand is left alone rather than failing on a duplicate key - and running the migration twice changes nothing.
-
-`npm run test:e2e` runs the storefront suite against the Vite development server. `npm run test:e2e:dist` builds the app, serves `dist` with the same routing rules as the deployment, and runs `e2e/deployment.spec.ts` against it, so a broken production route fails the build rather than reaching users. It asserts that every storefront route deep links to the built app, that a refresh keeps working, that the app's own not-found page is served instead of the hosting 404 page, that no page request returns 4xx or 5xx, that API requests still reach the API layer, including the nested `/api/admin/products/11`, and that path traversal cannot read files outside the build output. The routing rules themselves are unit tested in `src/lib/vercel-routing.test.ts`, which fails if `vercel.json` loses a rewrite, stops sending `/api` requests to the app, or lets a nested console path stop resolving to `api/admin/index.ts`.
-
-## Deploy to Vercel
-
-Import this repository into Vercel, keep the Vite framework/build defaults from `vercel.json`, and set `DATABASE_URL` in the Vercel project environment to the same Neon pooled connection string that `PRODUCTION_DATABASE_URL` holds in your local `.env`. If Neon is linked through the Vercel integration you can skip that and let the injected variables satisfy the API. Then run `npm run db:migrate:production` once and verify with `/api/health`; see [Production setup on Vercel](#production-setup-on-vercel). The browser app is served from `dist`; the `api/` TypeScript files run as Vercel Node.js functions. Do not commit `.env` or deploy local database credentials.
-
-The storefront is a single-page app, so `vercel.json` rewrites every non-API path to `/index.html`. Without that rewrite, Vercel looks for a file that matches each URL, and deep links or refreshes such as `/shop`, `/product/4`, or `/admin` return Vercel's "404 NOT_FOUND" page instead of the app. Two details keep this safe: the rewrite source `/:path((?!api/).*)` excludes `/api/*`, and Vercel checks the filesystem before applying rewrites, so built assets and images under `/assets` and `/images` are still served as files rather than the HTML shell. Keep `cleanUrls` off; with `cleanUrls: true` the rewrite destination must be written without the `.html` extension.
-
-`vercel.json` carries a second rewrite, `/api/admin/:path*` → `/api/admin/index`, and it is not optional. Every console request nests a segment (`/api/admin/products/11`, `/api/admin/pages/careers`), and Vercel matches a `[...path]` serverless function for a single segment only, so the nested paths returned a platform 404 and took every save, publish toggle and page switch offline while `vercel dev` and `npm run dev` kept working. The console API therefore ships as `api/admin/index.ts`. See [The console API route is an index function, not a catch-all](#the-console-api-route-is-an-index-function-not-a-catch-all).
-
-To review a production build locally, run `npm run preview:dist` after `npm run build`. It serves `dist` through the deployment routing rules, so deep links, assets, and API paths behave like they do on Vercel. Its API responses are stand-in JSON, so use `npm run dev` for real form submissions, saved products, and orders. The preview answers `/api/health`, `/api/products`, and `/api/site/pages` and returns a JSON `404` for anything else. `/api/site/pages` matters because every route asks for the page list on load: without it the deployment suite fails on a request the app makes on every page. `/api/admin/**` paths are resolved to the admin function and then return that stand-in `404`; what the preview proves is that they reach the API layer instead of falling through to the HTML shell, which is the failure the nested console route used to have.
+The order and its lines are separate statements, so they are **not** written as a unit: a failure after the order lands leaves an order behind with no lines. A product save that fails while writing an image has the same problem. Real transactions in the store are the fix, and they have not been added.

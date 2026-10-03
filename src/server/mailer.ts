@@ -168,9 +168,8 @@ export async function deliverPendingMail(
  * This is the form the password writers call. The row is already written by the
  * time either of them runs, and a password cannot be regenerated, so a failure
  * here has to be survivable: the message stays queued and the next pass tries
- * again. It also means a database that has not been migrated yet - `sent_at` only
- * exists from db/migrations/011 - cannot stop the console from seeding, which is
- * the more important job this code is sitting in the middle of.
+ * again. It also means an unconfigured mail host cannot stop the console from
+ * seeding, which is the more important job this code is sitting in the middle of.
  */
 export async function tryDeliverPendingMail(database: Database) {
   try {

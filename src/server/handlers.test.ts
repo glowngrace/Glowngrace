@@ -1,28 +1,14 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { resetCatalogueShapeCache } from './catalogue';
-import {
-  fullyMigrated,
-  statements,
-  withCatalogueShape,
-  type FakeShape,
-} from './catalogue-fake';
+import { describe, expect, it, vi } from 'vitest';
+import { statements } from './catalogue-fake';
 import { createHandlers, type Database, type QueryResult } from './handlers';
 
 function makeDatabase(
-  queryImpl?: (text: string, values: unknown[]) => Promise<QueryResult>,
-  shape: FakeShape = fullyMigrated,
+  queryImpl?: (text: string, values?: unknown[]) => Promise<QueryResult>,
 ) {
-  const query = vi.fn(withCatalogueShape(shape, (text, values) => (
-    queryImpl ? queryImpl(text, values) : { rows: [], rowCount: 0 }
-  )));
+  const run = queryImpl ?? (async () => ({ rows: [], rowCount: 0 }));
+  const query = vi.fn(run);
   return { database: { query } satisfies Database, query };
 }
-
-beforeEach(() => {
-  // The shape is cached per warm instance, which is the point in production and a
-  // trap in a suite: without this one test's fake hands its shape to the next.
-  resetCatalogueShapeCache();
-});
 
 const checkoutPayload = {
   firstName: 'Priya',
@@ -40,11 +26,12 @@ const checkoutPayload = {
 };
 
 describe('checkout handler', () => {
-  it('uses catalogue prices and atomically persists a server-calculated order', async () => {
-    const { database, query } = makeDatabase(async (_text, values) => ({
-      rows: [{ order_number: values[0], total_paise: 183190, item_count: 1 }],
-      rowCount: 1,
-    }));
+  it('uses catalogue prices and persists a server-calculated order and its lines', async () => {
+    const { database, query } = makeDatabase(async (text, values = []) => (
+      text.includes('SELECT count(*)::int AS item_count')
+        ? { rows: [{ item_count: 1 }], rowCount: 1 }
+        : { rows: [{ id: 'order-uuid', order_number: values[0], total_paise: 183190 }], rowCount: 1 }
+    ));
     const result = await createHandlers(database).checkout('POST', checkoutPayload);
 
     expect(result).toEqual({
@@ -55,18 +42,14 @@ describe('checkout handler', () => {
         message: expect.stringContaining('cash on delivery'),
       },
     });
-    expect(query).toHaveBeenCalledTimes(1);
-    const [sql, values] = query.mock.calls[0];
-    expect(sql).toContain('WITH created_order AS');
-    expect(sql).toContain('INSERT INTO order_items');
-    expect(values).toEqual(expect.arrayContaining([169800, 4900, 8490, 183190]));
-    const savedItems = JSON.parse(String(values?.[15])) as Array<Record<string, unknown>>;
-    expect(savedItems).toEqual([{
-      product_id: 4,
-      product_name: 'Glow Ritual Vitamin C Face Serum',
-      unit_price_paise: 84900,
-      quantity: 2,
-    }]);
+    // The order row, a read back for its id, one line, then the line count that
+    // confirms the write before the order is confirmed to the customer.
+    expect(query).toHaveBeenCalledTimes(4);
+    const written = statements(query);
+    expect(written[0].text).toContain('INSERT INTO orders');
+    expect(written[0].values).toEqual(expect.arrayContaining([169800, 4900, 8490, 183190]));
+    expect(written[2].text).toContain('INSERT INTO order_items');
+    expect(written[2].values).toEqual(['order-uuid', 4, 'Glow Ritual Vitamin C Face Serum', 84900, 2]);
   });
 
   it('rejects invalid, unknown, duplicated and non-COD orders without writing', async () => {
@@ -99,23 +82,23 @@ describe('checkout handler', () => {
   });
 
   it('uses database-backed products and prices during checkout', async () => {
-    const { database, query } = makeDatabase(async (sql, values) => sql.includes('SELECT id, name, price')
-      ? { rows: [{ id: 9, name: 'New catalogue serum', price: 500 }], rowCount: 1 }
-      : { rows: [{ order_number: values[0], total_paise: 109900, item_count: 1 }], rowCount: 1 });
+    const { database, query } = makeDatabase(async (sql, values = []) => {
+      if (sql.includes('SELECT id, name, price')) {
+        return { rows: [{ id: 9, name: 'New catalogue serum', price: 500 }], rowCount: 1 };
+      }
+      if (sql.includes('SELECT count(*)::int AS item_count')) return { rows: [{ item_count: 1 }], rowCount: 1 };
+      return { rows: [{ id: 'order-uuid', order_number: values[0], total_paise: 109900 }], rowCount: 1 };
+    });
     const result = await createHandlers(database).checkout('POST', {
       ...checkoutPayload,
       items: [{ productId: 9, quantity: 2 }],
     });
 
     expect(result).toMatchObject({ status: 201, body: { total: 1099 } });
-    expect(query).toHaveBeenCalledTimes(2);
-    const savedItems = JSON.parse(String(query.mock.calls[1][1]?.[15])) as Array<Record<string, unknown>>;
-    expect(savedItems).toEqual([{
-      product_id: 9,
-      product_name: 'New catalogue serum',
-      unit_price_paise: 50000,
-      quantity: 2,
-    }]);
+    // The price lookup, then the same four statements as the catalogue order.
+    expect(query).toHaveBeenCalledTimes(5);
+    const savedItems = statements(query).find((statement) => statement.text.includes('INSERT INTO order_items'));
+    expect(savedItems?.values).toEqual(['order-uuid', 9, 'New catalogue serum', 50000, 2]);
   });
 });
 
@@ -168,15 +151,15 @@ describe('products API handler', () => {
       status: 201,
       body: { product: { id: 9, image: '/api/products/9/images/0', images: ['/api/products/9/images/0'], stock: 8 } },
     });
-    // The shape probe, then the one statement that writes the row.
+    // The product row, then one statement per image.
     expect(query).toHaveBeenCalledTimes(2);
-    const [statement] = statements(query);
-    expect(statement.text).toContain('INSERT INTO product_images');
-    expect(statement.text).toContain("decode(image.data, 'base64')");
-    expect(statement.values[7]).toBe('serum.png');
-    // The image set is the last bound value, so it is addressed from the end:
-    // adding a product column must not silently move it out from under a fixed index.
-    expect(JSON.parse(String(statement.values.at(-1)))).toMatchObject([{ filename: 'serum.png', position: 0 }]);
+    const [product, ...images] = statements(query);
+    expect(product.text).toContain('INSERT INTO products');
+    expect(product.values[7]).toBe('serum.png');
+    expect(images).toHaveLength(1);
+    expect(images[0].text).toContain('INSERT INTO product_images');
+    expect(images[0].text).toContain("decode($5, 'base64')");
+    expect(images[0].values).toEqual([9, 0, 'serum.png', 'image/png', expect.any(String), 1200, 1200]);
   });
 
   it('accepts up to 10 images at any dimensions within the maximum', async () => {
@@ -190,29 +173,30 @@ describe('products API handler', () => {
       width: 800,
       height: 600,
     }));
-    const { database, query } = makeDatabase(async () => ({
-      rows: [{
-        id: 10,
-        name: 'Test glow serum',
-        category: 'Skincare',
-        price: 500,
-        mrp: 700,
-        stock: 8,
-        rating: '0',
-        reviews: 0,
-        image: 'serum-0.png',
-        description: 'A carefully made product description.',
-        images: Array.from({ length: 10 }, (_value, index) => `/api/products/10/images/${index}`),
-      }],
-      rowCount: 1,
-    }));
+    const { database, query } = makeDatabase(async (text) => (text.includes('INSERT INTO products')
+      ? {
+          rows: [{
+            id: 10,
+            name: 'Test glow serum',
+            category: 'Skincare',
+            price: 500,
+            mrp: 700,
+            stock: 8,
+            rating: '0',
+            reviews: 0,
+            image: 'serum-0.png',
+            description: 'A carefully made product description.',
+          }],
+          rowCount: 1,
+        }
+      : { rows: [], rowCount: 1 }));
 
     const result = await createHandlers(database).products('POST', { ...productPayload, images });
     expect(result).toMatchObject({ status: 201, body: { product: { images: expect.arrayContaining(['/api/products/10/images/9']) } } });
-    const savedImages = JSON.parse(String(statements(query)[0].values.at(-1))) as Array<{ position: number; width: number; height: number }>;
+    const savedImages = statements(query).filter((statement) => statement.text.includes('INSERT INTO product_images'));
     expect(savedImages).toHaveLength(10);
-    expect(savedImages[0]).toMatchObject({ position: 0, width: 800, height: 600 });
-    expect(savedImages[9]).toMatchObject({ position: 9 });
+    expect(savedImages[0].values).toEqual([10, 0, 'serum-0.png', 'image/png', expect.any(String), 800, 600]);
+    expect(savedImages[9].values?.[1]).toBe(9);
   });
 
   it('rejects unsupported image counts, dimensions and payloads without writing', async () => {
@@ -240,8 +224,8 @@ describe('products API handler', () => {
     });
     expect(await handler.productImage(9, 0)).toEqual({ status: 200, mimeType: 'image/png', data: image });
     expect(await handler.productImage(9, 10)).toEqual({ status: 404 });
-    // Probe, catalogue list, then the one image that exists.
-    expect(query).toHaveBeenCalledTimes(4);
+    // Catalogue list, the ownership count, then the one image that exists.
+    expect(query).toHaveBeenCalledTimes(3);
   });
 
   it('reports an unstocked catalogue only while the products table is empty', async () => {

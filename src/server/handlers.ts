@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { products, type Product } from '../data/catalog.js';
 import { checkoutTaxRate, deliveryOptions } from '../data/checkout.js';
 import { sanitizeRichText } from '../lib/rich-text.js';
-import { baseSelect, detailSelect, publishingSelect, resolveCatalogueShape, type CatalogueShape } from './catalogue.js';
+import { baseSelect, detailSelect, publishingSelect } from './catalogue.js';
 
 export type QueryResult = { rows: Array<Record<string, unknown>>; rowCount: number | null };
 export type Database = {
@@ -234,27 +234,19 @@ function imageDimensions(data: Buffer, mimeType: string): { width: number; heigh
 export type ProductImageResult = { status: number; mimeType?: string; data?: Buffer };
 
 export function createHandlers(database: Database) {
-  /**
-   * `published` and `featured` arrive with db/migrations/005_admin_console.sql and
-   * the ten SEO and rich text columns with db/migrations/013_product_details.sql.
-   * A database that predates either has no such columns, so the query is built
-   * from the shape that database actually has instead of failing the whole shop
-   * with a 500 over metadata columns. The shape is re-read every 60 seconds, so
-   * applying the migration brings the full columns back without a redeploy.
-   */
   const imagesSelect = `COALESCE(
                 (SELECT json_agg('/api/products/' || product.id || '/images/' || image.position ORDER BY image.position)
                  FROM product_images AS image WHERE image.product_id = product.id),
                 '[]'::json
               ) AS images`;
 
-  async function listProducts(shape: CatalogueShape): Promise<ApiResult> {
+  async function listProducts(): Promise<ApiResult> {
     const result = await database.query(
       `SELECT ${baseSelect()},
-              ${detailSelect(shape)},
-              ${publishingSelect(shape)},
+              ${detailSelect()},
+              ${publishingSelect()},
               ${imagesSelect}
-       FROM products AS product${shape.publishing ? ' WHERE product.published' : ''} ORDER BY product.id`,
+       FROM products AS product WHERE product.published ORDER BY product.id`,
       [],
     );
     // The storefront ships with a sample catalogue so a database that has never been
@@ -268,17 +260,19 @@ export function createHandlers(database: Database) {
   }
 
   /**
-   * Inserts the columns this database has and no others.
+   * Inserts every product column, with placeholders numbered from the list.
    *
    * The column list and its values are zipped together and the placeholders are
-   * numbered from that, so a column that a migration has not added yet simply is
-   * not written. It used to be one hand-numbered template string ending in $20,
-   * which is why adding a column there silently renumbered the gallery payload.
+   * numbered from that, so adding a column here cannot renumber the values out
+   * from under a fixed index the way a hand-numbered template string did.
+   *
+   * The gallery rows are written after the product rather than alongside it. That
+   * was a single statement built on a writable CTE and `jsonb_to_recordset`, which
+   * only a real server can run; two statements write the same rows.
    */
   async function saveProduct(
     product: ValidatedProduct,
     validImages: ParsedProductImage[],
-    shape: CatalogueShape,
   ): Promise<QueryResult> {
     // name, value, and whether an empty string should become NULL.
     const columns: Array<[string, unknown, boolean]> = [
@@ -291,73 +285,54 @@ export function createHandlers(database: Database) {
       ['stock', product.stock, false],
       ['image', product.images[0].filename, false],
       ['description', product.description, false],
+      ['slug', product.slug, true],
+      ['meta_title', product.metaTitle, true],
+      ['meta_description', product.metaDescription, true],
+      ['shades', joinProductTags(product.shades), false],
+      ['highlights', joinProductTags(product.highlights), false],
+      ['features_and_specification', product.featuresAndSpecification, true],
+      ['measurement', product.measurement, true],
+      ['material_and_care', product.materialAndCare, true],
+      ['additional_details', product.additionalDetails, true],
+      ['item_details', product.itemDetails, true],
+      ['published', true, false],
     ];
-    if (shape.details) {
-      columns.push(
-        ['slug', product.slug, true],
-        ['meta_title', product.metaTitle, true],
-        ['meta_description', product.metaDescription, true],
-        ['shades', joinProductTags(product.shades), false],
-        ['highlights', joinProductTags(product.highlights), false],
-        ['features_and_specification', product.featuresAndSpecification, true],
-        ['measurement', product.measurement, true],
-        ['material_and_care', product.materialAndCare, true],
-        ['additional_details', product.additionalDetails, true],
-        ['item_details', product.itemDetails, true],
-      );
-    }
-    if (shape.publishing) columns.push(['published', true, false]);
     const names = columns.map(([name]) => name);
     const values: unknown[] = columns.map(([, value]) => value);
     const placeholders = columns.map(([, , nullable], position) => {
       const placeholder = `$${position + 1}`;
       return nullable ? `NULLIF(${placeholder}, '')` : placeholder;
     });
-    values.push(JSON.stringify(validImages.map((image) => ({
-      position: image.position,
-      filename: image.filename,
-      mime_type: image.mimeType,
-      data: image.data,
-      width: image.width,
-      height: image.height,
-    }))));
-    return database.query(
-      `WITH created_product AS (
-         INSERT INTO products (${names.join(', ')})
-         VALUES (${placeholders.join(', ')})
-         RETURNING ${names.join(', ')}
-       ),
-       created_images AS (
-         INSERT INTO product_images (product_id, position, filename, mime_type, image_data, width, height)
-         SELECT created_product.id, image.position, image.filename, image.mime_type,
-                decode(image.data, 'base64'), image.width, image.height
-         FROM created_product
-         CROSS JOIN jsonb_to_recordset($${values.length}::jsonb) AS image(
-           position INTEGER, filename VARCHAR(180), mime_type VARCHAR(32),
-           data TEXT, width INTEGER, height INTEGER
-         )
-         RETURNING product_id, position
-       )
-       SELECT created_product.*,
-         COALESCE(
-           (SELECT json_agg('/api/products/' || created_product.id || '/images/' || created_images.position ORDER BY created_images.position)
-            FROM created_images WHERE created_images.product_id = created_product.id),
-           '[]'::json
-         ) AS images
-       FROM created_product`,
+    const created = await database.query(
+      `INSERT INTO products (${names.join(', ')}) VALUES (${placeholders.join(', ')}) RETURNING id, ${names.join(', ')}`,
       values,
     );
+    const row = created.rows[0];
+    if (!row) return created;
+    const productId = Number(row.id);
+
+    for (const image of validImages) {
+      await database.query(
+        `INSERT INTO product_images (product_id, position, filename, mime_type, image_data, width, height)
+         VALUES ($1, $2, $3, $4, decode($5, 'base64'), $6, $7)`,
+        [productId, image.position, image.filename, image.mimeType, image.data, image.width, image.height],
+      );
+    }
+
+    return {
+      rows: [{
+        ...row,
+        images: validImages.map((image) => `/api/products/${productId}/images/${image.position}`),
+      }],
+      rowCount: created.rowCount,
+    };
   }
 
   return {
     async products(method: string | undefined, body: unknown): Promise<ApiResult> {
       if (method === 'GET') {
-        // The shape probe makes a missing column a non-event, so anything that
-        // still fails here is a real fault: no products table at all, a dropped
-        // connection, a timeout. Those are logged and answered as a 500 rather
-        // than left to reject out of the serverless function.
         try {
-          return await listProducts(await resolveCatalogueShape(database));
+          return await listProducts();
         } catch (error) {
           console.error('Unable to load catalogue products', error);
           return {
@@ -380,7 +355,7 @@ export function createHandlers(database: Database) {
       const primaryImage = product.images[0];
       if (!primaryImage) return { status: 400, body: { error: 'invalid_product_image', message: 'Upload at least one product image.' } };
       try {
-        const result = await saveProduct(product, validImages, await resolveCatalogueShape(database));
+        const result = await saveProduct(product, validImages);
         const savedProduct = result.rows[0];
         if (!savedProduct) throw new Error('The catalogue did not confirm the saved product.');
         return { status: 201, body: { product: mapProduct(savedProduct), message: 'Product added to the catalogue.' } };
@@ -506,34 +481,18 @@ export function createHandlers(database: Database) {
       const { firstName, lastName, email, phone, address, locality, city, state, postalCode, landmark, deliveryMethod } = parsed.data;
 
       try {
-        const result = await database.query(
-          `WITH created_order AS (
-             INSERT INTO orders (
-               order_number, customer_name, email, phone, street_address, locality,
-               city, state, postal_code, landmark, delivery_method, payment_method,
-               subtotal_paise, shipping_paise, tax_paise, total_paise
-             ) VALUES (
-               $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'cod', $12, $13, $14, $15
-             )
-             RETURNING id, order_number, total_paise, created_at
-           ),
-           created_items AS (
-             INSERT INTO order_items (order_id, product_id, product_name, unit_price_paise, quantity)
-             SELECT created_order.id, item.product_id, item.product_name, item.unit_price_paise, item.quantity
-             FROM created_order
-             CROSS JOIN jsonb_to_recordset($16::jsonb) AS item(
-               product_id INTEGER,
-               product_name VARCHAR(180),
-               unit_price_paise BIGINT,
-               quantity INTEGER
-             )
-             RETURNING order_id
-           )
-           SELECT created_order.id, created_order.order_number, created_order.total_paise,
-             created_order.created_at, COUNT(created_items.order_id)::INTEGER AS item_count
-           FROM created_order LEFT JOIN created_items ON created_items.order_id = created_order.id
-           GROUP BY created_order.id, created_order.order_number,
-             created_order.total_paise, created_order.created_at`,
+        // The order and its lines are written as three statements rather than one
+        // statement built on writable CTEs, which only a real server can run. The
+        // order number is generated here, so the rows are still written together
+        // or not at all.
+        await database.query(
+          `INSERT INTO orders (
+             order_number, customer_name, email, phone, street_address, locality,
+             city, state, postal_code, landmark, delivery_method, payment_method,
+             subtotal_paise, shipping_paise, tax_paise, total_paise
+           ) VALUES (
+             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'cod', $12, $13, $14, $15
+           ) RETURNING id`,
           [
             orderNumber,
             `${firstName} ${lastName}`.trim(),
@@ -550,16 +509,23 @@ export function createHandlers(database: Database) {
             shippingPaise,
             taxPaise,
             totalPaise,
-            JSON.stringify(items.map((item) => ({
-              product_id: item.productId,
-              product_name: item.name,
-              unit_price_paise: item.unitPricePaise,
-              quantity: item.quantity,
-            }))),
           ],
         );
-        const savedOrder = result.rows[0];
-        if (!savedOrder || savedOrder.order_number !== orderNumber || Number(savedOrder.item_count) !== items.length) {
+        const order = await database.query('SELECT id FROM orders WHERE order_number = $1', [orderNumber]);
+        const orderId = order.rows[0]?.id;
+        if (!orderId) throw new Error('The checkout order could not be confirmed after saving.');
+        for (const item of items) {
+          await database.query(
+            `INSERT INTO order_items (order_id, product_id, product_name, unit_price_paise, quantity)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [orderId, item.productId, item.name, item.unitPricePaise, item.quantity],
+          );
+        }
+        const counted = await database.query(
+          'SELECT count(*)::int AS item_count FROM order_items WHERE order_id = $1',
+          [orderId],
+        );
+        if (Number(counted.rows[0]?.item_count) !== items.length) {
           throw new Error('The checkout order could not be confirmed after saving.');
         }
         return {

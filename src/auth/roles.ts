@@ -44,8 +44,8 @@ export type AccountRole = (typeof signupRoles)[number];
  * The address was `glownglancebiz@gmail.com` until this branch, which is a
  * misspelling of the real one and matched no account in any database: the weekly
  * rotation looked for a row that was not there and did nothing. It is spelled
- * correctly here, and db/migrations/012 renames the row in any database that
- * still holds the old one.
+ * correctly here, and no migration can rename a row any more because there are no
+ * rows to rename: every deployment starts from the seeds in the store.
  */
 export const superAdminRole = 'Super Admin';
 export const superAdminEmail = 'glowngracebiz@gmail.com';

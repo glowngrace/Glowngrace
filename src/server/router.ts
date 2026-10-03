@@ -49,8 +49,8 @@ export function createApiRouter(database: Database) {
       try {
         return { status: 200, body: { pages: await admin.publicPages() } };
       } catch (error) {
-        // listPages already falls back to the bundled page list when site_pages
-        // is absent, so reaching here means the database is unreachable.
+        // An empty store already falls back to the bundled page list, so
+        // reaching here means the store could not be read at all.
         console.error('Unable to load storefront pages', error);
         return { status: 500, body: { error: 'server_error', message: 'The page list could not be loaded.' } };
       }
