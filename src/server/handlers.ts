@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { products, type Product } from '../data/catalog.js';
 import { checkoutTaxRate, deliveryOptions } from '../data/checkout.js';
 import { sanitizeRichText } from '../lib/rich-text.js';
-import { isMissingSchema } from './schema.js';
+import { baseSelect, detailSelect, publishingSelect, resolveCatalogueShape, type CatalogueShape } from './catalogue.js';
 
 export type QueryResult = { rows: Array<Record<string, unknown>>; rowCount: number | null };
 export type Database = {
@@ -235,31 +235,26 @@ export type ProductImageResult = { status: number; mimeType?: string; data?: Buf
 
 export function createHandlers(database: Database) {
   /**
-   * `published` and `featured` arrive with db/migrations/005_admin_console.sql.
-   * A database that predates it has no such columns, so both the read and the
-   * write fall back to the pre-console shape - every product is published and
-   * nothing is featured - instead of failing the whole shop with a 500. Once
-   * the migration is applied the first shape succeeds again, so no restart or
-   * cache reset is needed to pick it up.
+   * `published` and `featured` arrive with db/migrations/005_admin_console.sql and
+   * the ten SEO and rich text columns with db/migrations/013_product_details.sql.
+   * A database that predates either has no such columns, so the query is built
+   * from the shape that database actually has instead of failing the whole shop
+   * with a 500 over metadata columns. The shape is re-read every 60 seconds, so
+   * applying the migration brings the full columns back without a redeploy.
    */
-  const publishingColumns = 'product.published, product.featured,';
-  const legacyPublishingColumns = 'TRUE AS published, FALSE AS featured,';
-  const publishedFilter = ' WHERE product.published';
-
-  async function listProducts(flags: string, filter: string): Promise<ApiResult> {
-    const result = await database.query(
-      `SELECT product.id, product.name, product.category, product.brand, product.sku, product.price,
-              product.mrp, product.stock, product.rating, product.reviews, product.badge,
-              product.image, product.description, product.slug, product.meta_title,
-              product.meta_description, product.shades, product.highlights,
-              product.features_and_specification, product.measurement, product.material_and_care,
-              product.additional_details, product.item_details, ${flags}
-              COALESCE(
+  const imagesSelect = `COALESCE(
                 (SELECT json_agg('/api/products/' || product.id || '/images/' || image.position ORDER BY image.position)
                  FROM product_images AS image WHERE image.product_id = product.id),
                 '[]'::json
-              ) AS images
-       FROM products AS product${filter} ORDER BY product.id`,
+              ) AS images`;
+
+  async function listProducts(shape: CatalogueShape): Promise<ApiResult> {
+    const result = await database.query(
+      `SELECT ${baseSelect()},
+              ${detailSelect(shape)},
+              ${publishingSelect(shape)},
+              ${imagesSelect}
+       FROM products AS product${shape.publishing ? ' WHERE product.published' : ''} ORDER BY product.id`,
       [],
     );
     // The storefront ships with a sample catalogue so a database that has never been
@@ -272,35 +267,72 @@ export function createHandlers(database: Database) {
     };
   }
 
+  /**
+   * Inserts the columns this database has and no others.
+   *
+   * The column list and its values are zipped together and the placeholders are
+   * numbered from that, so a column that a migration has not added yet simply is
+   * not written. It used to be one hand-numbered template string ending in $20,
+   * which is why adding a column there silently renumbered the gallery payload.
+   */
   async function saveProduct(
     product: ValidatedProduct,
     validImages: ParsedProductImage[],
-    publishing: boolean,
+    shape: CatalogueShape,
   ): Promise<QueryResult> {
-    const flags = publishing ? ', published' : '';
-    const published = publishing ? ', TRUE' : '';
-    const returning = publishing ? ', published, featured' : '';
+    // name, value, and whether an empty string should become NULL.
+    const columns: Array<[string, unknown, boolean]> = [
+      ['name', product.name, false],
+      ['category', product.category, false],
+      ['brand', product.brand, true],
+      ['sku', product.sku, true],
+      ['price', product.price, false],
+      ['mrp', product.mrp, false],
+      ['stock', product.stock, false],
+      ['image', product.images[0].filename, false],
+      ['description', product.description, false],
+    ];
+    if (shape.details) {
+      columns.push(
+        ['slug', product.slug, true],
+        ['meta_title', product.metaTitle, true],
+        ['meta_description', product.metaDescription, true],
+        ['shades', joinProductTags(product.shades), false],
+        ['highlights', joinProductTags(product.highlights), false],
+        ['features_and_specification', product.featuresAndSpecification, true],
+        ['measurement', product.measurement, true],
+        ['material_and_care', product.materialAndCare, true],
+        ['additional_details', product.additionalDetails, true],
+        ['item_details', product.itemDetails, true],
+      );
+    }
+    if (shape.publishing) columns.push(['published', true, false]);
+    const names = columns.map(([name]) => name);
+    const values: unknown[] = columns.map(([, value]) => value);
+    const placeholders = columns.map(([, , nullable], position) => {
+      const placeholder = `$${position + 1}`;
+      return nullable ? `NULLIF(${placeholder}, '')` : placeholder;
+    });
+    values.push(JSON.stringify(validImages.map((image) => ({
+      position: image.position,
+      filename: image.filename,
+      mime_type: image.mimeType,
+      data: image.data,
+      width: image.width,
+      height: image.height,
+    }))));
     return database.query(
       `WITH created_product AS (
-         INSERT INTO products (name, category, brand, sku, price, mrp, stock, image, description,
-                               slug, meta_title, meta_description, shades, highlights,
-                               features_and_specification, measurement, material_and_care,
-                               additional_details, item_details${flags})
-         VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6, $7, $8, $9,
-                 NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), $13, $14,
-                 NULLIF($15, ''), NULLIF($16, ''), NULLIF($17, ''),
-                 NULLIF($18, ''), NULLIF($19, '')${published})
-         RETURNING id, name, category, brand, sku, price, mrp, stock, rating, reviews, badge, image, description,
-                   slug, meta_title, meta_description, shades, highlights,
-                   features_and_specification, measurement, material_and_care,
-                   additional_details, item_details${returning}
+         INSERT INTO products (${names.join(', ')})
+         VALUES (${placeholders.join(', ')})
+         RETURNING ${names.join(', ')}
        ),
        created_images AS (
          INSERT INTO product_images (product_id, position, filename, mime_type, image_data, width, height)
          SELECT created_product.id, image.position, image.filename, image.mime_type,
                 decode(image.data, 'base64'), image.width, image.height
          FROM created_product
-         CROSS JOIN jsonb_to_recordset($20::jsonb) AS image(
+         CROSS JOIN jsonb_to_recordset($${values.length}::jsonb) AS image(
            position INTEGER, filename VARCHAR(180), mime_type VARCHAR(32),
            data TEXT, width INTEGER, height INTEGER
          )
@@ -313,41 +345,25 @@ export function createHandlers(database: Database) {
            '[]'::json
          ) AS images
        FROM created_product`,
-      [
-        product.name, product.category, product.brand, product.sku, product.price, product.mrp,
-        product.stock, product.images[0].filename, product.description,
-        product.slug, product.metaTitle, product.metaDescription,
-        joinProductTags(product.shades), joinProductTags(product.highlights),
-        product.featuresAndSpecification, product.measurement, product.materialAndCare,
-        product.additionalDetails, product.itemDetails,
-        JSON.stringify(validImages.map((image) => ({
-          position: image.position,
-          filename: image.filename,
-          mime_type: image.mimeType,
-          data: image.data,
-          width: image.width,
-          height: image.height,
-        }))),
-      ],
+      values,
     );
   }
 
   return {
     async products(method: string | undefined, body: unknown): Promise<ApiResult> {
       if (method === 'GET') {
+        // The shape probe makes a missing column a non-event, so anything that
+        // still fails here is a real fault: no products table at all, a dropped
+        // connection, a timeout. Those are logged and answered as a 500 rather
+        // than left to reject out of the serverless function.
         try {
-          return await listProducts(publishingColumns, publishedFilter);
+          return await listProducts(await resolveCatalogueShape(database));
         } catch (error) {
-          if (!isMissingSchema(error)) throw error;
-          try {
-            return await listProducts(legacyPublishingColumns, '');
-          } catch (fallbackError) {
-            console.error('Unable to load catalogue products', fallbackError);
-            return {
-              status: 500,
-              body: { error: 'server_error', message: 'The catalogue could not be loaded. Please try again shortly.' },
-            };
-          }
+          console.error('Unable to load catalogue products', error);
+          return {
+            status: 500,
+            body: { error: 'server_error', message: 'The catalogue could not be loaded. Please try again shortly.' },
+          };
         }
       }
       if (method !== 'POST') return { status: 405, body: { error: 'method_not_allowed' } };
@@ -364,13 +380,7 @@ export function createHandlers(database: Database) {
       const primaryImage = product.images[0];
       if (!primaryImage) return { status: 400, body: { error: 'invalid_product_image', message: 'Upload at least one product image.' } };
       try {
-        let result: QueryResult;
-        try {
-          result = await saveProduct(product, validImages, true);
-        } catch (error) {
-          if (!isMissingSchema(error)) throw error;
-          result = await saveProduct(product, validImages, false);
-        }
+        const result = await saveProduct(product, validImages, await resolveCatalogueShape(database));
         const savedProduct = result.rows[0];
         if (!savedProduct) throw new Error('The catalogue did not confirm the saved product.');
         return { status: 201, body: { product: mapProduct(savedProduct), message: 'Product added to the catalogue.' } };

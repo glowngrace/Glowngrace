@@ -24,6 +24,7 @@
     "db:migrate:production": "tsx scripts/migrate-database.ts production",
     "db:mirror:up": "tsx scripts/mirror-database.ts up",
     "db:mirror:down": "tsx scripts/mirror-database.ts down",
+    "db:verify:catalogue": "tsx scripts/verify-catalogue-drift.ts",
     "db:sync": "tsx scripts/sync-production-to-local.ts"
   },
   "dependencies": {

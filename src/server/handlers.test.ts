@@ -1,10 +1,28 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { resetCatalogueShapeCache } from './catalogue';
+import {
+  fullyMigrated,
+  statements,
+  withCatalogueShape,
+  type FakeShape,
+} from './catalogue-fake';
 import { createHandlers, type Database, type QueryResult } from './handlers';
 
-function makeDatabase(queryImpl?: (text: string, values: unknown[]) => Promise<QueryResult>) {
-  const query = vi.fn(async (text: string, values: unknown[] = []) => (queryImpl ? queryImpl(text, values) : { rows: [], rowCount: 0 }));
+function makeDatabase(
+  queryImpl?: (text: string, values: unknown[]) => Promise<QueryResult>,
+  shape: FakeShape = fullyMigrated,
+) {
+  const query = vi.fn(withCatalogueShape(shape, (text, values) => (
+    queryImpl ? queryImpl(text, values) : { rows: [], rowCount: 0 }
+  )));
   return { database: { query } satisfies Database, query };
 }
+
+beforeEach(() => {
+  // The shape is cached per warm instance, which is the point in production and a
+  // trap in a suite: without this one test's fake hands its shape to the next.
+  resetCatalogueShapeCache();
+});
 
 const checkoutPayload = {
   firstName: 'Priya',
@@ -150,14 +168,15 @@ describe('products API handler', () => {
       status: 201,
       body: { product: { id: 9, image: '/api/products/9/images/0', images: ['/api/products/9/images/0'], stock: 8 } },
     });
-    expect(query).toHaveBeenCalledTimes(1);
-    const [sql, values] = query.mock.calls[0];
-    expect(sql).toContain('INSERT INTO product_images');
-    expect(sql).toContain("decode(image.data, 'base64')");
-    expect(values?.[7]).toBe('serum.png');
+    // The shape probe, then the one statement that writes the row.
+    expect(query).toHaveBeenCalledTimes(2);
+    const [statement] = statements(query);
+    expect(statement.text).toContain('INSERT INTO product_images');
+    expect(statement.text).toContain("decode(image.data, 'base64')");
+    expect(statement.values[7]).toBe('serum.png');
     // The image set is the last bound value, so it is addressed from the end:
     // adding a product column must not silently move it out from under a fixed index.
-    expect(JSON.parse(String(values?.at(-1)))).toMatchObject([{ filename: 'serum.png', position: 0 }]);
+    expect(JSON.parse(String(statement.values.at(-1)))).toMatchObject([{ filename: 'serum.png', position: 0 }]);
   });
 
   it('accepts up to 10 images at any dimensions within the maximum', async () => {
@@ -190,7 +209,7 @@ describe('products API handler', () => {
 
     const result = await createHandlers(database).products('POST', { ...productPayload, images });
     expect(result).toMatchObject({ status: 201, body: { product: { images: expect.arrayContaining(['/api/products/10/images/9']) } } });
-    const savedImages = JSON.parse(String(query.mock.calls[0][1]?.at(-1))) as Array<{ position: number; width: number; height: number }>;
+    const savedImages = JSON.parse(String(statements(query)[0].values.at(-1))) as Array<{ position: number; width: number; height: number }>;
     expect(savedImages).toHaveLength(10);
     expect(savedImages[0]).toMatchObject({ position: 0, width: 800, height: 600 });
     expect(savedImages[9]).toMatchObject({ position: 9 });
@@ -221,7 +240,8 @@ describe('products API handler', () => {
     });
     expect(await handler.productImage(9, 0)).toEqual({ status: 200, mimeType: 'image/png', data: image });
     expect(await handler.productImage(9, 10)).toEqual({ status: 404 });
-    expect(query).toHaveBeenCalledTimes(3);
+    // Probe, catalogue list, then the one image that exists.
+    expect(query).toHaveBeenCalledTimes(4);
   });
 
   it('reports an unstocked catalogue only while the products table is empty', async () => {

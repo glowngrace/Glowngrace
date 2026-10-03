@@ -1,6 +1,11 @@
 import 'dotenv/config';
 import { Client } from 'pg';
 import {
+  describeProductColumnDrift,
+  productDetailColumns,
+  publishingColumns,
+} from '../src/server/catalogue.js';
+import {
   DatabaseConfigError,
   clientConfig,
   maskHost,
@@ -40,6 +45,19 @@ async function inspect(target: Target): Promise<Outcome> {
     );
     const row = presence.rows[0] ?? {};
     const missingTables = requiredTables.filter((table) => row[table] !== true);
+    // products gains columns in migrations 005 and 013, so table presence alone
+    // cannot tell a current database from one that is a release behind.
+    let missingProductColumns: string[] = [];
+    if (!missingTables.includes('products')) {
+      const columns = await client.query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'products' AND column_name = ANY($1::text[])`,
+        [[...publishingColumns, ...productDetailColumns]],
+      );
+      const present = new Set(columns.rows.map((entry) => entry.column_name));
+      missingProductColumns = [...publishingColumns, ...productDetailColumns]
+        .filter((column) => !present.has(column));
+    }
     const counts: Record<string, number> = {};
     for (const table of missingTables.length === 0 ? requiredTables : []) {
       const counted = await client.query<{ value: string }>(`SELECT count(*)::text AS value FROM "${table}"`);
@@ -48,12 +66,13 @@ async function inspect(target: Target): Promise<Outcome> {
     await client.end();
     return {
       ...base,
-      ok: missingTables.length === 0,
+      ok: missingTables.length === 0 && missingProductColumns.length === 0,
       configured: true,
       connection: described,
       version: String(row.version ?? '').split(' ').slice(0, 2).join(' '),
       latencyMs: Date.now() - startedAt,
       missingTables,
+      missingProductColumns,
       counts,
     };
   } catch (error) {
@@ -83,6 +102,11 @@ function report(outcome: Outcome) {
     const missing = outcome.missingTables as string[];
     console.log(`  reachable:  yes`);
     console.log(`  tables:     ${missing.length === 0 ? 'all present' : `missing ${missing.join(', ')}`}`);
+    const missingColumns = (outcome.missingProductColumns as string[] | undefined) ?? [];
+    console.log(`  columns:    ${missingColumns.length === 0
+      ? 'every product column this build reads is present'
+      : `products is missing ${missingColumns.join(', ')}`}`);
+    if (missingColumns.length > 0) console.log(`  drift:      ${describeProductColumnDrift(missingColumns)}`);
     if (outcome.counts) {
       for (const [table, count] of Object.entries(outcome.counts as Record<string, number>)) {
         console.log(`    ${table.padEnd(24)} ${count}`);
