@@ -74,7 +74,7 @@ Run `npm run db:mirror:up` again with a higher `--through` to apply the missing 
 npm run db:verify:catalogue
 ```
 
-The unit tests stub the driver, and that is the gap that let the production fault through: a stub never raises `42703`, never parses the SQL, and hands back whatever the test told it to — so it cannot tell whether the SQL a build actually sends is valid on the database it is actually pointed at, or even whether a query result was read in the right shape. Three real bugs got past 313 unit tests that way and are now pinned by this command:
+The unit tests stub the driver, and that is the gap that let the production fault through: a stub never raises `42703`, never parses the SQL, and hands back whatever the test told it to — so it cannot tell whether the SQL a build actually sends is valid on the database it is actually pointed at, or even whether a query result was read in the right shape. Three real bugs got past the entire unit suite that way and are now pinned by this command:
 
 - a fragment was interpolated as `${baseSelect}` instead of `${baseSelect()}`, so the statement literally contained the text of a JavaScript function;
 - two fragments each ended in a comma, so the joined statement contained `,,`;
@@ -393,7 +393,10 @@ npm run build
 npm run test
 npm run test:e2e
 npm run test:e2e:dist
+npm run db:verify:catalogue   # needs Docker; see "Proving the fix against a real database"
 ```
+
+Only the last one touches a real database, and it does so through the disposable mirror rather than production. Everything above it stubs the driver, which is why the catalogue SQL is also checked against a real PostgreSQL by `npm run db:verify:catalogue`: a stub cannot parse the SQL it is handed, so it will happily accept a statement containing the text of a JavaScript function, and it answers a shape probe with whatever the test told it to rather than what the driver would.
 
 Playwright runs Chromium in desktop and mobile emulation. Install its browser once with `npx playwright install chromium`. The E2E server starts automatically; browser tests cover storefront navigation, product and wishlist interactions, checkout delivery/tax calculations and failure recovery, portal access, administrator section navigation and product/image creation, contact submission, and responsive layouts. API unit tests cover validation and server-calculated persistence without requiring a live database. To verify saved products or real local orders, apply the migrations if needed, start Docker and the app, and create a test product or place a COD test order.
 
@@ -415,7 +418,7 @@ Worth knowing why the fallback exists at all: the API never serves bundled rows.
 
 `src/server/admin.test.ts` covers the nested product route, because every console write depends on a path the deployment bug took offline and that route had no tests of its own: saving through `PATCH /products/:id`, the publish toggle, a reference that is not a whole number, a product that is no longer in the catalogue, and an unauthenticated request. The last two matter for triage: the handler answers `401` for a missing session and `404 not_found` for a missing product, so a platform `404` with an `x-vercel-error` header is a routing failure rather than data.
 
-`src/server/schema-drift.test.ts` covers the deployment-ahead-of-database behaviour against a fake database that raises `42P01` and `42703`, so no live database is needed. To check it for real rather than against a mock, start `npm run db:mirror:up -- --through 004` and read `GET /api/products` (expect `200` with the products treated as published), `GET /api/site/pages` (expect `200` with the bundled page list) and `POST /api/admin/session` (expect `503` `schema_not_migrated`).
+`src/server/schema-drift.test.ts` covers the deployment-ahead-of-database behaviour against a fake database that raises `42P01` and `42703`, so no live database is needed. To check it for real rather than against a mock, run `npm run db:verify:catalogue`, which stands the mirror up at migration `012`, serves real HTTP from it and asserts every one of those cases automatically; or do it by hand with `npm run db:mirror:up -- --through 004` and read `GET /api/products` (expect `200` with the products treated as published), `GET /api/site/pages` (expect `200` with the bundled page list) and `POST /api/admin/session` (expect `503` `schema_not_migrated`).
 
 The owner rename in `012` is worth checking against a real database rather than a mock, because the interesting case is a row that exists under the old spelling. `npm run db:mirror:up -- --through 011` gives a schema without the column and without the rename; insert an `admin_users` row at `glownglancebiz@gmail.com`, then `npm run db:mirror:up` again to apply `012` and confirm the row now reads `glowngracebiz@gmail.com` and that `password_hold_until` exists and is `NULL`. The update is guarded on the new address not already existing, so a database that was corrected by hand is left alone rather than failing on a duplicate key - and running the migration twice changes nothing.
 
