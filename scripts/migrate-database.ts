@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { readdirSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from 'pg';
 import {
@@ -15,6 +15,8 @@ import {
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const arguments_ = process.argv.slice(2);
 const target = arguments_.includes('production') ? 'production' : 'local';
+const onlyIndex = arguments_.indexOf('--only');
+const only = onlyIndex === -1 ? undefined : arguments_[onlyIndex + 1];
 
 function schemaFiles() {
   const dbDirectory = join(projectRoot, 'db');
@@ -24,7 +26,23 @@ function schemaFiles() {
     .filter((name) => name.endsWith('.sql'))
     .sort()
     .map((name) => join(migrationsDirectory, name));
-  return [...files, ...migrations];
+  if (!only) return [...files, ...migrations];
+  // `--only` exists so a single migration can be applied without replaying the
+  // rest of db/, which would also re-run the destructive statements in
+  // 010_remove_demo_accounts.sql. Accepts a full filename or a bare number.
+  const wanted = only.endsWith('.sql') ? only : `${only.padStart(3, '0')}_`;
+  const match = [...files, ...migrations].filter((file) => {
+    // `basename`, not a manual split on a separator: the separator depends on the
+    // platform, and a Windows-only split matches nothing on Linux - so `--only`
+    // would silently apply no files on Vercel or in CI.
+    const name = basename(file);
+    return name === wanted || name.startsWith(wanted);
+  });
+  if (match.length !== 1) {
+    console.error(`\n--only ${only} matched ${match.length} files in db/. Pass a migration filename or number, for example --only 013.`);
+    process.exit(1);
+  }
+  return match;
 }
 
 function resolveTarget() {
@@ -40,8 +58,7 @@ async function applySchema(client: Client, resolved: ResolvedDatabase) {
   }
   const presence = await client.query<Record<string, unknown>>(
     `SELECT ${requiredTables.map((table) => `to_regclass('public.${table}') IS NOT NULL AS ${table}`).join(', ')}`,
-  );
-  const row = presence.rows[0] ?? {};
+  );  const row = presence.rows[0] ?? {};
   const missingTables = requiredTables.filter((table) => row[table] !== true);
   if (missingTables.length > 0) {
     console.error(`\nStill missing after migrating: ${missingTables.join(', ')}`);

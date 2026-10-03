@@ -1,6 +1,15 @@
 import { z } from 'zod';
 import type { Product } from '../data/catalog.js';
 import { joinProductTags, mapProduct, parseProductImages, productRichTextSchema, productSlugSchema, productTagsSchema, type ParsedProductImage } from './handlers.js';
+import {
+  baseSelect,
+  catalogueDriftHint,
+  detailSelect,
+  dropUnavailableColumns,
+  publishingSelect,
+  resolveCatalogueShape,
+  type CatalogueShape,
+} from './catalogue.js';
 import { sanitizeRichText } from '../lib/rich-text.js';
 import {
   collectionByKey,
@@ -15,7 +24,7 @@ import { ownerCredentialsMessage } from './admin/owner-password.js';
 import { tryDeliverPendingMail } from './mailer.js';
 import { datasetCountSql, mapDatasetRowCounts } from './admin/datasets.js';
 import { normalizeStoreSettings, validateStoreSettings, type StoreSettings } from './admin/settings.js';
-import { isMissingSchema, schemaNotMigrated } from './schema.js';
+import { errorCode, isMissingSchema, schemaNotMigrated } from './schema.js';
 import {
   candidateSeeds,
   customerSeeds,
@@ -367,18 +376,116 @@ const orderSelect = `SELECT order_record.id, order_record.order_number, order_re
   order_record.created_at, (SELECT count(*)::int FROM order_items AS item WHERE item.order_id = order_record.id) AS item_count
   FROM orders AS order_record`;
 
-const productSelect = `SELECT product.id, product.name, product.category, product.brand, product.sku, product.price,
-  product.mrp, product.stock, product.rating, product.reviews, product.badge, product.image, product.description,
-  product.slug, product.meta_title, product.meta_description, product.shades, product.highlights,
-  product.features_and_specification, product.measurement, product.material_and_care,
-  product.additional_details, product.item_details,
-  product.published, product.featured,
-  COALESCE(
+const productImagesSelect = `COALESCE(
     (SELECT json_agg('/api/products/' || product.id || '/images/' || image.position ORDER BY image.position)
      FROM product_images AS image WHERE image.product_id = product.id),
     '[]'::json
-  ) AS images
+  ) AS images`;
+
+/**
+ * Built from the shape of the products table this database actually has, so the
+ * catalogue list still loads when a detail migration has not been applied. The
+ * absent columns come back as NULL and the console shows the section empty, which
+ * is what a product with no SEO block looks like anyway.
+ */
+function productSelect(shape: CatalogueShape) {
+  return `SELECT ${baseSelect('product')},
+  ${detailSelect(shape)},
+  ${publishingSelect(shape)},
+  ${productImagesSelect}
   FROM products AS product`;
+}
+
+/** The parsed shape both the console form and a bulk upload row arrive in. */
+type InsertableProduct = z.infer<typeof productCreateSchema>;
+
+/** A blank panel is not data, so a blank field is not something a save would lose. */
+function isBlankProductField(value: unknown) {
+  if (value === undefined || value === null) return true;
+  if (typeof value === 'string') return value.trim() === '';
+  if (Array.isArray(value)) return value.length === 0;
+  return false;
+}
+
+/**
+ * The detail columns a request actually carries a value for.
+ *
+ * Both the create and the update schema default every detail field, so a parsed
+ * product cannot tell "they typed a slug" from "they left the SEO panel blank" -
+ * both arrive as `''`. That distinction is the whole question when a database is
+ * missing those columns: a non-empty value is data a save would silently drop, so
+ * it is refused by name, while a product whose detail panels are all blank is a
+ * product the database can honestly store and must not be blocked.
+ *
+ * The column names are the ones in the schema and in the import template, which is
+ * why `dropUnavailableColumns` can compare against them directly.
+ */
+function addressedProductDetails(fields: Record<string, unknown>) {
+  const detail = [
+    ['slug', 'slug'],
+    ['meta_title', 'metaTitle'],
+    ['meta_description', 'metaDescription'],
+    ['shades', 'shades'],
+    ['highlights', 'highlights'],
+    ['features_and_specification', 'featuresAndSpecification'],
+    ['measurement', 'measurement'],
+    ['material_and_care', 'materialAndCare'],
+    ['additional_details', 'additionalDetails'],
+    ['item_details', 'itemDetails'],
+  ] as const;
+  return detail.filter(([, key]) => !isBlankProductField(fields[key])).map(([column]) => column);
+}
+
+/**
+ * One INSERT builder for the console form and the bulk upload template.
+ *
+ * They were two copies of the same hand-numbered 24-placeholder string, which is
+ * how the two drifted apart and why a new column had to be renumbered twice. The
+ * placeholders are generated from the column list here, so a column a migration
+ * has not added is simply not written and every other number shifts safely.
+ */
+function productInsert(product: InsertableProduct, shape: CatalogueShape) {
+  // name, value, and whether an empty string should become NULL.
+  const columns: Array<[string, unknown, boolean]> = [
+    ['name', product.name, false],
+    ['category', product.category, false],
+    ['brand', product.brand, true],
+    ['sku', product.sku, true],
+    ['price', product.price, false],
+    ['mrp', product.mrp, false],
+    ['stock', product.stock, false],
+    ['image', product.image || `${product.name.toLowerCase().replaceAll(/[^a-z0-9]+/g, '-')}.jpg`, false],
+    ['description', product.description, false],
+  ];
+  if (shape.details) {
+    columns.push(
+      ['slug', product.slug, true],
+      ['meta_title', product.metaTitle, true],
+      ['meta_description', product.metaDescription, true],
+      ['shades', joinProductTags(product.shades), false],
+      ['highlights', joinProductTags(product.highlights), false],
+      ['features_and_specification', product.featuresAndSpecification, true],
+      ['measurement', product.measurement, true],
+      ['material_and_care', product.materialAndCare, true],
+      ['additional_details', product.additionalDetails, true],
+      ['item_details', product.itemDetails, true],
+    );
+  }
+  if (shape.publishing) columns.push(['published', product.published, false], ['featured', product.featured, false]);
+  columns.push(
+    ['rating', product.rating, false],
+    ['reviews', product.reviews, false],
+    ['badge', product.badge, true],
+  );
+  return {
+    values: columns.map(([, value]) => value),
+    text: `INSERT INTO products (${columns.map(([name]) => name).join(', ')})
+      VALUES (${columns.map(([, , nullable], position) => {
+        const placeholder = `$${position + 1}`;
+        return nullable ? `NULLIF(${placeholder}, '')` : placeholder;
+      }).join(', ')}) RETURNING id`,
+  };
+}
 
 async function insertSeedRows(database: Database, table: string, columns: string[], rows: Array<Array<string | number | boolean | null>>) {
   if (rows.length === 0) return;
@@ -597,6 +704,13 @@ export function createAdminHandlers(database: Database) {
   };
 
   /**
+   * The shape of the products table, read once per warm instance and re-read
+   * every 60 seconds. Reads use it to serve whatever the database has; writes use
+   * it to refuse an edit that would be silently lost, see `missingColumn`.
+   */
+  const catalogueShape = () => resolveCatalogueShape(database, 'admin');
+
+  /**
    * Whether an id is the owner account.
    *
    * The address is the identity, not the id, so this survives a row being
@@ -666,12 +780,12 @@ export function createAdminHandlers(database: Database) {
   }
 
   async function listProducts() {
-    const result = await database.query(`${productSelect} ORDER BY product.id`, []);
+    const result = await database.query(`${productSelect(await catalogueShape())} ORDER BY product.id`, []);
     return result.rows.map((row) => mapProduct(row) as Product);
   }
 
   async function readProduct(productId: number) {
-    const result = await database.query(`${productSelect} WHERE product.id = $1`, [productId]);
+    const result = await database.query(`${productSelect(await catalogueShape())} WHERE product.id = $1`, [productId]);
     return result.rows[0] ? mapProduct(result.rows[0]) : null;
   }
 
@@ -1111,29 +1225,8 @@ export function createAdminHandlers(database: Database) {
           errors.push({ row: index + 2, message: 'The original price must be at least the selling price.', errors: { mrp: 'Lower the original price or raise the selling price.' } });
           continue;
         }
-        const result = await database.query(
-          `INSERT INTO products (name, category, brand, sku, price, mrp, stock, image, description,
-                                 slug, meta_title, meta_description, shades, highlights,
-                                 features_and_specification, measurement, material_and_care,
-                                 additional_details, item_details,
-                                 published, featured, rating, reviews, badge)
-           VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6, $7, $8, $9,
-                   NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), $13, $14,
-                   NULLIF($15, ''), NULLIF($16, ''), NULLIF($17, ''),
-                   NULLIF($18, ''), NULLIF($19, ''),
-                   $20, $21, $22, $23, NULLIF($24, ''))
-           RETURNING id`,
-          [
-            product.name, product.category, product.brand, product.sku, product.price, product.mrp, product.stock,
-            product.image || `${product.name.toLowerCase().replaceAll(/[^a-z0-9]+/g, '-')}.jpg`,
-            product.description,
-            product.slug, product.metaTitle, product.metaDescription,
-            joinProductTags(product.shades), joinProductTags(product.highlights),
-            product.featuresAndSpecification, product.measurement, product.materialAndCare,
-            product.additionalDetails, product.itemDetails,
-            product.published, product.featured, product.rating, product.reviews, product.badge,
-          ],
-        );
+        const insert = productInsert(product, await catalogueShape());
+        const result = await database.query(insert.text, insert.values);
         created.push(String(result.rows[0]?.id ?? ''));
       }
       return { created, errors };
@@ -1178,12 +1271,33 @@ export function createAdminHandlers(database: Database) {
       return await dispatch(request);
     } catch (error) {
       if (isMissingSchema(error)) {
-        console.error('The admin console needs migrations 005-009', error);
+        console.error(`The admin console database is behind this build (${errorCode(error)})`, error);
         return schemaNotMigrated(error, { path: `/${request.segments.join('/')}` });
       }
       console.error(`The admin console could not handle /${request.segments.join('/')}`, error);
       return fail(500, 'server_error', 'The console could not complete that request. Please try again shortly.');
     }
+  }
+
+  /**
+   * The 503 a write returns when the edit addresses columns this database does not
+   * have.
+   *
+   * Reads degrade on purpose, but a write must not: an operator who typed a slug
+   * and a meta description into the product form and watched both disappear would
+   * have no way to tell that from the save working. So the console refuses the
+   * edit and names the exact columns and the migration that adds them.
+   */
+  function missingColumn(columns: string[], shape: CatalogueShape): AdminResult {
+    return {
+      status: 503,
+      body: {
+        error: 'schema_not_migrated',
+        message: `This save was not applied because products is missing the ${columns.length === 1 ? 'column' : 'columns'} ${columns.join(', ')}.`,
+        detail: catalogueDriftHint(shape),
+        columns,
+      },
+    };
   }
 
   async function dispatch(request: AdminRequest): Promise<AdminResult> {
@@ -1297,28 +1411,18 @@ export function createAdminHandlers(database: Database) {
         // leave a catalogue entry with no gallery behind it.
         const { images: validImages, invalid } = parseProductImages(uploaded.data ?? []);
         if (invalid) return fail(400, 'invalid_product_image', 'Each image must be a valid JPEG, PNG or WebP file no larger than 1200 x 1200 px or 300 KB.');
-        const result = await database.query(
-          `INSERT INTO products (name, category, brand, sku, price, mrp, stock, image, description,
-                                 slug, meta_title, meta_description, shades, highlights,
-                                 features_and_specification, measurement, material_and_care,
-                                 additional_details, item_details,
-                                 published, featured, rating, reviews, badge)
-           VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6, $7, $8, $9,
-                   NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), $13, $14,
-                   NULLIF($15, ''), NULLIF($16, ''), NULLIF($17, ''),
-                   NULLIF($18, ''), NULLIF($19, ''),
-                   $20, $21, $22, $23, NULLIF($24, '')) RETURNING id`,
-          [
-            product.name, product.category, product.brand, product.sku, product.price, product.mrp, product.stock,
-            product.image || `${product.name.toLowerCase().replaceAll(/[^a-z0-9]+/g, '-')}.jpg`,
-            product.description,
-            product.slug, product.metaTitle, product.metaDescription,
-            joinProductTags(product.shades), joinProductTags(product.highlights),
-            product.featuresAndSpecification, product.measurement, product.materialAndCare,
-            product.additionalDetails, product.itemDetails,
-            product.published, product.featured, product.rating, product.reviews, product.badge,
-          ],
-        );
+        // Only refused when the request actually carries a field the database
+        // cannot store. A create of nothing but the base fields is saved on a
+        // database without the 013 columns, because that is a save the console
+        // can honestly make; it is the slug and SEO fields that cannot be
+        // accepted, and those are named in the 503.
+        const shape = await catalogueShape();
+        if (!shape.details) {
+          const addressed = addressedProductDetails(product);
+          if (addressed.length > 0) return missingColumn(addressed, shape);
+        }
+        const insert = productInsert(product, shape);
+        const result = await database.query(insert.text, insert.values);
         const createdId = Number(result.rows[0]?.id);
         if (validImages.length > 0) await insertProductImages(createdId, validImages);
         const created = await readProduct(createdId);
@@ -1363,12 +1467,21 @@ export function createAdminHandlers(database: Database) {
         // A gallery-only edit carries no scalar column and is still a real edit, so
         // this guard only fires when nothing at all was addressed.
         if (Object.keys(columns).length === 0 && update.images === undefined) return fail(400, 'empty_update', 'Change at least one detail before saving.');
-        const names = Object.keys(columns);
+        // An edit that touches only columns this database has is applied normally,
+        // so a drifted database still accepts a price or a stock correction. One
+        // that reaches for an absent column is refused rather than half-saved.
+        const shape = await catalogueShape();
+        const { columns: writable, dropped } = dropUnavailableColumns(shape, columns);
+        if (dropped.length > 0) return missingColumn(dropped, shape);
+        const names = Object.keys(writable);
         if (names.length > 0) {
+          // `updated_at` is itself a migration 005 column, so it only goes in the
+          // SET list on a database that has it.
+          const stamped = shape.publishing ? [...names, 'updated_at'] : names;
           try {
             await database.query(
-              `UPDATE products SET ${names.map((name, position) => `${name} = $${position + 2}`).join(', ')}, updated_at = NOW() WHERE id = $1`,
-              [productId, ...names.map((name) => columns[name])],
+              `UPDATE products SET ${stamped.map((name, position) => `${name} = ${name === 'updated_at' ? 'NOW()' : `$${position + 2}`}`).join(', ')} WHERE id = $1`,
+              [productId, ...names.map((name) => writable[name])],
             );
           } catch (error) {
             if (isUniqueViolation(error)) return fail(409, 'duplicate_sku', 'That SKU is already in the catalogue. Use a unique SKU or leave it blank.');
@@ -1624,6 +1737,20 @@ export function createAdminHandlers(database: Database) {
     if (resource === 'bulk' && method === 'POST') {
       const parsed = bulkSchema.safeParse(request.body);
       if (!parsed.success) return fail(400, 'invalid_bulk', 'Check the spreadsheet and try again.');
+      // The product template carries the slug, SEO and rich text columns, so
+      // importing a sheet that uses them into a database without them would drop a
+      // whole sheet of data and still report success. Refuse that, naming the
+      // columns; a sheet of plain base fields is imported as usual.
+      if (parsed.data.dataset === 'products') {
+        const shape = await catalogueShape();
+        if (!shape.details) {
+          const addressed = new Set<string>();
+          for (const row of parsed.data.rows) {
+            for (const column of addressedProductDetails(row)) addressed.add(column);
+          }
+          if (addressed.size > 0) return missingColumn([...addressed], shape);
+        }
+      }
       const outcome = await bulkImport(parsed.data.dataset, parsed.data.rows);
       return {
         status: 201,
