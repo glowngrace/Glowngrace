@@ -2,10 +2,31 @@ node_modules/
 dist/
 coverage/
 playwright-report/
+blob-report/
+playwright/.cache/
 test-results/
+.vercel/
+design/
+.DS_Store
+*.pem
+*.log
+*.log.*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.tsbuildinfo
+
+# Secrets. `.env.example`, `.env.test` and `.env.local.example` are committed
+# templates; `.env.local` and `.env` hold real passwords and never are.
 .env
 .env.*
 !.env.example
 !.env.test
-.vercel/
-*.log
+!.env.local.example
+.env*.local
+
+# Build output from tools this project does not use, kept so a stray run of
+# either cannot be committed by accident.
+/.next/
+/out/
+/build

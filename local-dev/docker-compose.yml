@@ -1,0 +1,73 @@
+# The local PostgreSQL this project develops and tests against.
+#
+#   npm run db:up        start it
+#   npm run db:logs      follow its log
+#   npm run db:down      stop it, keeping the data
+#   npm run db:destroy   stop it and throw the data away
+#
+# `npm start local` does all four of those things in order and then starts the
+# app against it. Nothing here is used in production; production is Neon.
+#
+# Credentials come from the environment rather than being written here, so the
+# same file works whatever you set in `.env.local`. Compose reads `.env` from
+# this directory, not from the repository root, so `local-dev/.env` is the place
+# for overrides when you would rather not keep them in the root `.env.local`.
+
+name: glow-grace-local
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: glow-grace-local-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-glow_grace}
+      POSTGRES_USER: ${POSTGRES_USER:-glow_grace}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-glow_grace_local}
+      # The image only ever creates the role and the database on a first run
+      # against an empty data directory, and it will not reuse a password that
+      # has changed since. Changing POSTGRES_PASSWORD later means either
+      # changing DATABASE_URL to match the old password or running
+      # `npm run db:destroy` and starting over.
+      POSTGRES_INITDB_ARGS: '--data-checksums'
+    ports:
+      # Published on 5435 so a PostgreSQL you already run on 5432 is untouched.
+      - "${POSTGRES_PORT:-5435}:5432"
+    volumes:
+      # Named volume, not a bind mount: it keeps the data directory owned by
+      # the container's own user on Windows, where a bind mount of a
+      # PostgreSQL data directory reliably produces permission failures.
+      # `npm run db:destroy` removes it, which is the only way to reset.
+      - glow-grace-data:/var/lib/postgresql/data
+      # Applied only when the volume above is empty, which is the first run.
+      # The migrations in db/migrations/ are applied by `npm run db:migrate`
+      # and are idempotent, so re-running either is safe.
+      - ../db/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+    healthcheck:
+      # pg_isready is what `db:up` waits on, so "up" means "will accept a
+      # query" rather than "container is running but still initialising".
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-glow_grace} -d ${POSTGRES_DB:-glow_grace}"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    shm_size: 256mb
+
+  # A browser UI for the local database, so a seed or a sync can be checked by
+  # eye. Behind a profile so it never starts as part of `npm run db:up`:
+  #   docker compose --profile tools up -d
+  # then http://localhost:8081 with the POSTGRES_* credentials above.
+  adminer:
+    image: adminer:4
+    container_name: glow-grace-local-adminer
+    profiles: ["tools"]
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${ADMINER_PORT:-8081}:8080"
+
+volumes:
+  glow-grace-data:
+    name: glow-grace-local-data

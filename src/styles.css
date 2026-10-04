@@ -1293,6 +1293,9 @@ button.admin-stat:hover { border-color: var(--a-rose); transform: translateY(-2p
 .admin-status-card dd { margin: 0; color: var(--a-soft); }
 .admin-status-card dd.is-ok { color: var(--a-ok); }
 .admin-status-card dd.is-warn { color: var(--a-warn); }
+/* A connection string is longer than the row it sits in, and a `dd` that
+   cannot wrap would push the `dt` off the panel on a narrow screen. */
+.admin-status-card dd.admin-wrap { overflow-wrap: anywhere; text-align: right; }
 .admin-danger { border-color: #e4c3c3; }
 .admin-danger-confirm { margin-top: 14px; padding: 13px 14px; border: 1px solid #e4c3c3; border-radius: var(--a-r); background: var(--a-bad-bg); }
 .admin-danger-confirm h4 { margin: 0 0 4px; font-size: .84rem; font-weight: 500; }

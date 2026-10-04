@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+﻿import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createAdminHandlers, publishedDemoAdminEmails, seedAdminData } from './admin';
 import { hashPassword, removedDemoPassword, sessionDurationMinutes, sessionExpiry, verifyPassword } from './admin/passwords';
 import { retiredSuperAdminEmail, superAdminEmail } from '../auth/roles';
@@ -1774,5 +1774,140 @@ describe('owner account protection', () => {
     // And the misspelling is exactly what makes it a different account, so this
     // test cannot pass just because the protection was switched off.
     expect(retiredSuperAdminEmail).not.toBe(superAdminEmail);
+  });
+});
+
+describe('the local database route', () => {
+  const saved = { ...process.env };
+  const ownerRow = { ...activeAdminRow, id: '00000000-0000-4000-8000-0000000000f1', name: 'Glow & Grace Super Admin', email: superAdminEmail, role: 'Super Admin' };
+
+  /**
+   * A console session whose `admin_sessions` lookup answers with one row, and a
+   * switch that decides whether this process is allowed to reach for production
+   * at all.
+   */
+function consoleFor(row: Record<string, unknown>, overrides: Record<string, string | undefined> = {}) {
+    for (const key of ['USE_LOCAL_DATABASE', 'SYNC_FROM_PRODUCTION', 'DATABASE_URL', 'NEON_DATABASE_URL', 'DATABASE_SSL', 'LOCAL_DATABASE_SSL', 'NEON_PROJECT_NAME']) {
+      delete process.env[key];
+    }
+    // `process.env` turns an explicit `undefined` into the string "undefined", so
+    // an absent override is spelled as a delete rather than an assignment.
+    for (const [key, value] of Object.entries(overrides)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    process.env.USE_LOCAL_DATABASE = 'USE_LOCAL_DATABASE' in overrides ? overrides.USE_LOCAL_DATABASE! : 'true';
+    process.env.SYNC_FROM_PRODUCTION = 'SYNC_FROM_PRODUCTION' in overrides ? overrides.SYNC_FROM_PRODUCTION! : 'true';
+    process.env.DATABASE_URL = overrides.DATABASE_URL ?? 'postgresql://glow_grace:secret@localhost:5435/glow_grace';
+    process.env.LOCAL_DATABASE_SSL = 'disable';
+    const { database } = makeDatabase(async (text) => {
+      if (text.includes('FROM admin_sessions')) return { rows: [row], rowCount: 1 };
+      return { rows: [], rowCount: 0 };
+    });
+    return createAdminHandlers(database);
+  }
+
+  afterEach(() => {
+    for (const key of Object.keys(process.env)) {
+      if (!(key in saved)) delete process.env[key];
+    }
+    Object.assign(process.env, saved);
+  });
+
+  it('is not there at all when the sync has not been turned on', async () => {
+    // 404 rather than 403: a deployment that never opted in should not be carrying
+    // an endpoint that reaches for production, not merely hiding it from the UI.
+    const admin = consoleFor(ownerRow, { SYNC_FROM_PRODUCTION: undefined });
+    const result = await admin.handle({ method: 'GET', segments: ['local-db'], token });
+    expect(result.status).toBe(404);
+  });
+
+  it('is not there when the process is not running against the local database', async () => {
+    const admin = consoleFor(ownerRow, { USE_LOCAL_DATABASE: 'false' });
+    const result = await admin.handle({ method: 'GET', segments: ['local-db'], token });
+    expect(result.status).toBe(404);
+  });
+
+  it('refuses anyone who is not the owner', async () => {
+    const admin = consoleFor(activeAdminRow);
+    const result = await admin.handle({ method: 'GET', segments: ['local-db'], token });
+    expect(result.status).toBe(403);
+    expect((result.body as { error?: string }).error).toBe('forbidden');
+  });
+
+  it('needs a session', async () => {
+    const admin = consoleFor(ownerRow);
+    const result = await admin.handle({ method: 'GET', segments: ['local-db'], token: undefined });
+    expect(result.status).toBe(401);
+  });
+
+  it('reports both databases to the owner without printing a password', async () => {
+    const admin = consoleFor(ownerRow, {
+      NEON_DATABASE_URL: 'postgresql://neon_user:hunter2@ep-cool-pooler.aws-ap-southeast-2.neon.tech/neondb?sslmode=require',
+      NEON_PROJECT_NAME: 'neon-glowngraceproddb',
+    });
+    const result = await admin.handle({ method: 'GET', segments: ['local-db'], token });
+
+    expect(result.status).toBe(200);
+    const body = result.body as {
+      store: string;
+      local: { connection: string } | { error: string };
+      neon: { configured: boolean; project: string | null; host?: string; connection?: string; reason?: string };
+      syncEnabled: boolean;
+    };
+    expect(body.store).toBe('memory');
+    expect(body.local).toEqual({ connection: expect.stringContaining('localhost:5435') });
+    expect(body.neon.configured).toBe(true);
+    expect(body.neon.project).toBe('neon-glowngraceproddb');
+    expect(body.neon.host).toBe(`e${'*'.repeat('p-cool-pooler'.length)}.aws-ap-southeast-2.neon.tech`);
+    expect(body.neon.connection).toContain('ssl=require');
+    expect(body.syncEnabled).toBe(true);
+    // The string the console renders. A password in here would end up in a
+    // screenshot in a bug report.
+    expect(JSON.stringify(body)).not.toContain('hunter2');
+    expect(JSON.stringify(body)).not.toContain('secret@');
+  });
+
+  it('says so plainly when no production database is configured', async () => {
+    // A fresh clone has no Neon connection string yet, and the button needs an
+    // explanation rather than a stack trace.
+    const admin = consoleFor(ownerRow, { NEON_DATABASE_URL: undefined });
+    const result = await admin.handle({ method: 'GET', segments: ['local-db'], token });
+
+    expect(result.status).toBe(200);
+    const body = result.body as { neon: { configured: boolean; reason?: string } };
+    expect(body.neon.configured).toBe(false);
+    expect(body.neon.reason).toMatch(/No production database connection string is configured/);
+  });
+
+  it('will not let the report be written to', async () => {
+    const admin = consoleFor(ownerRow);
+    const result = await admin.handle({ method: 'PUT', segments: ['local-db'], token });
+    expect(result.status).toBe(405);
+  });
+
+  it('will only sync on a POST', async () => {
+    const admin = consoleFor(ownerRow);
+    const result = await admin.handle({ method: 'GET', segments: ['local-db', 'sync'], token });
+    expect(result.status).toBe(405);
+  });
+
+  it('rejects switches that are not booleans before opening a connection', async () => {
+    const admin = consoleFor(ownerRow);
+    const result = await admin.handle({
+      method: 'POST',
+      segments: ['local-db', 'sync'],
+      token,
+      body: { skipImages: 'yes' },
+    });
+    expect(result.status).toBe(400);
+    expect((result.body as { error?: string }).error).toBe('invalid_request');
+  });
+
+  it('answers 503 when the owner presses the button with nothing to copy from', async () => {
+    const admin = consoleFor(ownerRow, { NEON_DATABASE_URL: undefined });
+    const result = await admin.handle({ method: 'POST', segments: ['local-db', 'sync'], token, body: {} });
+    expect(result.status).toBe(503);
+    expect((result.body as { error?: string }).error).toBe('database_not_configured');
   });
 });

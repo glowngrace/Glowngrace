@@ -83,6 +83,31 @@ export type StoreSettingsResponse = { settings: StoreSettings; updatedAt: string
 
 export type BulkOutcome = { created: string[]; errors: Array<{ row: number; message: string; errors?: Record<string, string> }>; message: string };
 
+/**
+ * Where the console is pointed, before and after a sync.
+ *
+ * `local` and `neon` are connection descriptions with no password in them: the
+ * local host is plain and a remote one is masked, which is enough to notice the
+ * wrong project without printing a credential into the DOM.
+ */
+export type LocalDatabaseReport = {
+  store: 'memory' | 'postgres';
+  local: { connection: string; error?: undefined } | { connection?: undefined; error: string };
+  neon: { configured: boolean; project: string | null; host?: string; connection?: string; reason?: string };
+  syncEnabled: boolean;
+};
+
+export type NeonSyncResult = {
+  status: 'ok' | 'unchanged' | 'dry-run';
+  message: string;
+  source: string;
+  target: string;
+  copied: Record<string, number>;
+  available: Record<string, number>;
+  skipImages: boolean;
+  durationMs: number;
+};
+
 export class AdminApiError extends Error {
   status: number;
   code: string;
@@ -330,4 +355,23 @@ export const adminApi = {
 
   bulk: (dataset: BulkDatasetKey, rows: Array<Record<string, unknown>>) => post<BulkOutcome>('bulk', { dataset, rows }),
   bulkUsers: (rows: Array<Record<string, unknown>>) => post<BulkOutcome>('users/bulk', { rows }),
+
+  /**
+   * The local development database.
+   *
+   * `localDatabase` answers 404 on a deployment that has not enabled the sync,
+   * so the console hides the panel rather than offering a button that fails.
+   */
+  localDatabase: () => get<LocalDatabaseReport>('local-db'),
+  /**
+   * Copies the production database into the local one.
+   *
+   * `skipImages` leaves `product_images` alone, which is most of the bytes and
+   * the least of the use locally.
+   */
+  syncFromNeon: (options: { skipImages?: boolean; force?: boolean } = {}) =>
+    post<NeonSyncResult>('local-db/sync', {
+      skipImages: options.skipImages === true,
+      force: options.force === true,
+    }),
 };

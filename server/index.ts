@@ -1,11 +1,18 @@
 import 'dotenv/config';
 import express, { type Request, type Response } from 'express';
-import { createHandlers } from '../src/server/handlers.js';
-import { database } from '../src/server/database.js';
-import { checkHealth } from '../src/server/health.js';
-import { createApiRouter } from '../src/server/router.js';
-import { startOwnerPasswordRotation } from '../src/server/admin/owner-password.js';
-import { mailConfigFromEnv, startMailDelivery } from '../src/server/mailer.js';
+import { loadEnvironment } from '../src/server/env.js';
+
+// Before anything reads process.env, so `.env.local` - which holds the local
+// Docker credentials and is git-ignored - is in place ahead of the store.
+loadEnvironment();
+
+const { createHandlers } = await import('../src/server/handlers.js');
+const { database, storeKind, closeDatabase, resolvedDatabase } = await import('../src/server/database.js');
+const { checkHealth } = await import('../src/server/health.js');
+const { createApiRouter } = await import('../src/server/router.js');
+const { startOwnerPasswordRotation } = await import('../src/server/admin/owner-password.js');
+const { mailConfigFromEnv, startMailDelivery } = await import('../src/server/mailer.js');
+const { describeResolvedDatabase } = await import('../src/server/config.js');
 
 const app = express();
 const handlers = createHandlers(database);
@@ -65,8 +72,8 @@ app.get('/api/site/pages', async (_request, response) => {
     return response.status(500).json({ error: 'server_error', message: 'The page list could not be loaded.' });
   }
 });
-app.get('/api/health', (_request, response) => {
-  const report = checkHealth();
+app.get('/api/health', async (_request, response) => {
+  const report = await checkHealth();
   return response.status(report.status === 'ok' ? 200 : 503).json(report);
 });
 
@@ -78,6 +85,27 @@ app.get('/api/health', (_request, response) => {
 process.on('unhandledRejection', (reason) => {
   console.error('Unhandled promise rejection', reason);
 });
+
+/**
+ * Said once at boot, because the store a process picked is the single fact that
+ * most needs stating out loud: two identical checkouts can differ only in
+ * whether a restart forgets everything.
+ */
+console.log(storeKind === 'postgres'
+  ? `Store: PostgreSQL at ${resolvedDatabase ? describeResolvedDatabase(resolvedDatabase) : 'an unconfigured target'}.`
+  : 'Store: in-memory. Nothing is persisted and a restart starts empty. Set USE_LOCAL_DATABASE=true in .env.local for the local Docker database.');
+
+/**
+ * Drain the pool on a stop signal, so `npm run db:down` or Ctrl-C does not leave
+ * Postgres holding a connection that lingers after the process is gone.
+ */
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.on(signal, () => {
+    void closeDatabase()
+      .catch(() => undefined)
+      .finally(() => process.exit(0));
+  });
+}
 
 const port = Number(process.env.PORT ?? 3001);
 app.listen(port, '0.0.0.0', () => {
