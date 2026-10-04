@@ -5,9 +5,11 @@ import {
 } from 'react';
 import { Spinner } from '../../components/Loader';
 import { AdminApiError, type AdminUser, type StoreSettings } from '../../lib/admin-api';
+import { superAdminRole } from '../../auth/roles';
 import { useAdminStore } from './AdminStore';
 import { Avatar, IconButton, PageHead, Panel, PanelHead, Toggle } from './AdminUi';
 import { BulkUpload } from './BulkUpload';
+import { LocalDatabasePanel } from './LocalDatabasePanel';
 
 const notificationRows: Array<{ key: string; title: string; copy: string }> = [
   { key: 'orders', title: 'New order placed', copy: 'Email the store team for every new order.' },
@@ -567,6 +569,13 @@ export function SettingsPage({ onNotice }: { onNotice: (message: string) => void
         </div>
 
         <aside className="admin-settings-side">
+          {/*
+           * Owner-only, and only mounted for the owner, so the browser never
+           * asks for a route the server would answer with 403. The panel itself
+           * stays absent unless the deployment has enabled the sync at all.
+           */}
+          {account?.role === superAdminRole && <LocalDatabasePanel onNotice={onNotice} />}
+
           <Panel>
             <PanelHead title="Store status" />
             <div className="admin-status-card">

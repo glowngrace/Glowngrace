@@ -17,6 +17,16 @@ import { tryDeliverPendingMail } from './mailer.js';
 import { datasetCountSql, mapDatasetRowCounts } from './admin/datasets.js';
 import { normalizeStoreSettings, validateStoreSettings, type StoreSettings } from './admin/settings.js';
 import {
+  DatabaseConfigError,
+  describeResolvedDatabase,
+  maskHost,
+  resolveLocalDatabase,
+  resolveProductionDatabase,
+  syncIsEnabled,
+} from './config.js';
+import { isPostgresDatabase } from './postgres.js';
+import { syncFromNeon, type SyncResult } from './sync-from-neon.js';
+import {
   candidateSeeds,
   customerSeeds,
   demoDatasets,
@@ -667,6 +677,87 @@ async function resetDataset(database: Database, dataset: DemoDatasetKey) {
   );
 }
 
+const syncRequestSchema = z.object({
+  skipImages: z.boolean().optional(),
+  force: z.boolean().optional(),
+}).partial();
+
+/**
+ * What the console's "Sync from Neon" panel shows before anything is pressed.
+ *
+ * Reports both ends without connecting to either, and never includes a password:
+ * the local host is printed plainly and the Neon one masked, which is enough to
+ * tell "pointed at the wrong project" from "pointed at nothing".
+ */
+export function describeLocalDatabase(database: Database) {
+  let local: { connection: string } | { connection: string } | { error: string } = { error: '' };
+  try {
+    local = { connection: describeResolvedDatabase(resolveLocalDatabase()) };
+  } catch (error) {
+    local = { error: error instanceof Error ? error.message : String(error) };
+  }
+
+  let neon: Record<string, unknown>;
+  try {
+    const production = resolveProductionDatabase();
+    neon = {
+      configured: true,
+      project: process.env.NEON_PROJECT_NAME ?? null,
+      host: maskHost(production.description.host),
+      connection: describeResolvedDatabase(production),
+    };
+  } catch (error) {
+    neon = {
+      configured: false,
+      project: process.env.NEON_PROJECT_NAME ?? null,
+      reason: error instanceof DatabaseConfigError
+        ? error.message
+        : error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  return {
+    store: isPostgresDatabase(database) ? 'postgres' : 'memory',
+    local,
+    neon,
+    syncEnabled: syncIsEnabled(),
+  };
+}
+
+async function syncNeonIntoLocal(body: unknown): Promise<AdminResult> {
+  const parsed = syncRequestSchema.safeParse(body ?? {});
+  if (!parsed.success) {
+    return fail(400, 'invalid_request', 'Send skipImages and force as booleans, or nothing at all.');
+  }
+  try {
+    const result: SyncResult = await syncFromNeon({
+      skipImages: parsed.data.skipImages === true,
+      force: parsed.data.force === true,
+      log: (message) => console.log('[neon sync]', message),
+    });
+    return {
+      status: 200,
+      body: {
+        status: result.status,
+        message: result.message,
+        source: result.source,
+        target: result.target,
+        copied: result.copied,
+        available: result.available,
+        skipImages: result.skipImages,
+        durationMs: result.durationMs,
+      },
+    };
+  } catch (error) {
+    if (error instanceof DatabaseConfigError) {
+      return fail(503, 'database_not_configured', error.message);
+    }
+    const cause = error as { code?: string; message?: string };
+    console.error('The Neon sync failed', error);
+    return fail(502, 'sync_failed', `${cause?.message ?? String(error)}. Nothing was pushed back: data only ever flows from production to local.`);
+  }
+}
+
 export function createAdminHandlers(database: Database) {
   let seeded: Promise<void> | undefined;
   const ensureSeeded = () => {
@@ -1307,6 +1398,37 @@ async function listPages() {
     if (resource === 'me') {
       if (method !== 'GET') return fail(405, 'method_not_allowed', 'The console account cannot be changed from here.');
       return { status: 200, body: { user } };
+    }
+
+    /**
+     * The local development database, and the one button that pulls production
+     * rows into it.
+     *
+     * Gated three separate times, because this is the only console route that
+     * leaves the database this process is holding:
+     *
+     *   SYNC_FROM_PRODUCTION  off by default. With it off the route answers 404
+     *                         rather than reaching for the network, so a deployed
+     *                         console does not carry an endpoint that reads
+     *                         production at all.
+     *   the owner role        only the account that owns the deployment can pull
+     *                         production data down.
+     *   the local target      inside the sync, `assertSyncTargetIsLocal` refuses
+     *                         to write anywhere but the local Docker database.
+     */
+    if (resource === 'local-db') {
+      if (!syncIsEnabled()) return fail(404, 'not_found', 'That endpoint does not exist.');
+      if (user.role !== superAdminRole) {
+        return fail(403, 'forbidden', 'Only the owner account can sync from the production database.');
+      }
+      if (id === 'sync') {
+        if (method !== 'POST') return fail(405, 'method_not_allowed', 'Use POST to sync from the production database.');
+        return syncNeonIntoLocal(request.body);
+      }
+      if (!id) {
+        if (method !== 'GET') return fail(405, 'method_not_allowed', 'The local database report is read-only.');
+        return { status: 200, body: describeLocalDatabase(database) };
+      }
     }
 
     if (resource === 'summary') {
