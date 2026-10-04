@@ -25,6 +25,7 @@ import {
 } from './pages/PortalPages';
 import { CheckoutPage, OrderConfirmationPage } from './pages/CheckoutPage';
 import { PartnerDetailPage } from './pages/PartnerDetailPage';
+import { SuperAdminPasswordPage } from './pages/admin/SuperAdminPasswordPage';
 
 const FAVORITES_STORAGE_KEY = 'glow-grace-wishlist';
 
@@ -40,7 +41,7 @@ function loadFavorites(): number[] {
 function AppRoutes() {
   const [favorites, setFavorites] = useState<number[]>(loadFavorites);
   const location = useLocation();
-  const isAdminPage = location.pathname === '/admin';
+  const isAdminPage = location.pathname === '/admin' || location.pathname.startsWith('/superadmin/');
 
   useEffect(() => {
     localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify(favorites));
@@ -78,6 +79,13 @@ function AppRoutes() {
           <Route path="/candidate" element={<CandidatePortal />} />
           <Route path="/partner" element={<PartnerPortal />} />
           <Route path="/admin" element={<AdminPortal />} />
+          {/* Its own address rather than a console section, so it is not reachable
+              by clicking and can be bookmarked or linked directly. The guard is on
+              the server; the page asks who is signed in so it can explain itself. */}
+          <Route
+            path="/superadmin/ggpass"
+            element={<section className="section"><div className="page-container"><SuperAdminPasswordPage /></div></section>}
+          />
           <Route path="*" element={<div className="section"><div className="page-container empty-state"><span className="eyebrow">A little detour</span><h1>This page isn’t in our edit.</h1><p>Let’s get you back to something lovely.</p><a className="button button-dark" href="/">Back to the beauty house</a></div></div>} />
         </Routes>
       </main>

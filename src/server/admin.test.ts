@@ -1,5 +1,6 @@
-﻿import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createAdminHandlers, publishedDemoAdminEmails, seedAdminData } from './admin';
+import { orderItemSeeds } from './admin/seeds';
 import { hashPassword, removedDemoPassword, sessionDurationMinutes, sessionExpiry, verifyPassword } from './admin/passwords';
 import { retiredSuperAdminEmail, superAdminEmail } from '../auth/roles';
 import type { Database, QueryResult } from './handlers';
@@ -48,7 +49,11 @@ function storeDatabase() {
   });
 }
 
-const token = 'bearer-token';
+// A real session token, which means a real UUID: `admin_sessions.token` is a
+// `uuid` column, so a session is refused before it reaches the database unless
+// the value looks like one. A fixture of `'bearer-token'` would test the
+// rejection path while claiming to test the authenticated one.
+const token = '3f1c9a52-8d47-4e6b-9a10-2c5b7e8d4f31';
 
 describe('admin settings handler', () => {
   it('merges a partial notification save instead of clearing the other switches', async () => {
@@ -771,7 +776,7 @@ describe('admin team password route', () => {
       method: 'POST',
       segments: ['users', 'user-2', 'password'],
       body: { currentPassword: 'verify123', newPassword: 'verify456' },
-      token: 'bearer-token',
+      token,
     });
 
     expect(result.status).toBe(200);
@@ -792,7 +797,7 @@ describe('admin team password route', () => {
       method: 'POST',
       segments: ['users', 'user-2', 'password'],
       body: { currentPassword: 'wrong-password', newPassword: 'verify456' },
-      token: 'bearer-token',
+      token,
     });
 
     expect(result.status).toBe(400);
@@ -872,9 +877,93 @@ describe('admin session lifetime', () => {
     expect(result.status).toBe(401);
     expect(result.body.error).toBe('unauthenticated');
   });
+
+  it('answers 401 for a token that is not a UUID, without querying with it', async () => {
+    // `admin_sessions.token` is a `uuid` column. A stale token in localStorage,
+    // a truncated copy or a stray header reached Postgres and raised
+    // `invalid input syntax for type uuid` (22P02), which the route caught as a
+    // 500 - so a browser that simply needed to sign in again was told the
+    // console was broken. Anything that is not a UUID is a failed sign-in.
+    const { database, query } = makeDatabase(async () => ({ rows: [], rowCount: 0 }));
+    const admin = createAdminHandlers(database);
+
+    for (const bad of ['not.a.jwt', 'bearer-token', '', '  ', '12345', 'null', `${token}x`]) {
+      const result = await admin.handle({ method: 'GET', segments: ['me'], token: bad });
+
+      expect(result.status, `"${bad}" should not be a server error`).toBe(401);
+      expect(result.body.error).toBe('unauthenticated');
+      expect(
+        query.mock.calls.filter(([text]) => String(text).includes('admin_sessions')),
+        `"${bad}" should never reach the sessions table`,
+      ).toEqual([]);
+    }
+  });
+
+  it('signs out without querying with a token that is not a UUID', async () => {
+    // The same malformed token on the way out used to fail the DELETE the same
+    // way, so signing out of a console with a damaged session errored too.
+    const { database, query } = makeDatabase(async () => ({ rows: [], rowCount: 0 }));
+    const admin = createAdminHandlers(database);
+
+    const result = await admin.handle({ method: 'DELETE', segments: ['session'], token: 'not.a.jwt' });
+
+    expect(result.status).toBe(200);
+    expect(
+      query.mock.calls.filter(([text]) => String(text).includes('DELETE FROM admin_sessions')),
+    ).toEqual([]);
+  });
 });
 
 describe('admin demo seeding', () => {
+  it('attaches every sample order line to a product that exists', async () => {
+    // The defect: the lines carried a `productId` of 1..8 while `products.id` is
+    // declared `START WITH 9`, so every seeded line pointed at a row that was
+    // never created. `order_items.product_id` has no foreign key, so nothing
+    // complained. The id is now looked up from `products` by `product_name`.
+    const { database, query } = makeDatabase(async (text) => (
+      text.includes('FROM products WHERE name =') ? { rows: [{ id: 17 }], rowCount: 1 } : { rows: [], rowCount: 1 }
+    ));
+    await seedAdminData(database);
+
+    const lookup = query.mock.calls.find(([text]) => String(text).includes('FROM products WHERE name ='));
+    if (!lookup) throw new Error('The product id was never resolved from the product name.');
+    expect(lookup[1]).toEqual(['Velvet Matte Luxe Liquid Lipstick']);
+
+    const line = query.mock.calls.find(([text]) => String(text).includes('INSERT INTO order_items'));
+    if (!line) throw new Error('No sample order lines were seeded.');
+    const [text, values] = line as [string, unknown[]];
+    // The resolved id is passed as a parameter, never a literal baked into the seed.
+    expect(text).toContain('SELECT id, $2, $3, $4, $5 FROM orders WHERE order_number = $1');
+    expect(values).toEqual([expect.any(String), 17, 'Velvet Matte Luxe Liquid Lipstick', 59900, 2]);
+    expect(orderItemSeeds.every((item) => !('productId' in item))).toBe(true);
+  });
+
+  it('reports order lines it could not attach instead of dropping them quietly', async () => {
+    // Seeding with no catalogue is a real path - it is what the server does on
+    // first boot against an empty database. The lines are skipped rather than
+    // written against an invented id, and the caller is told which ones.
+    const { database, query } = makeDatabase(async (text) => (
+      text.includes('FROM products WHERE name =') ? { rows: [], rowCount: 0 } : { rows: [], rowCount: 1 }
+    ));
+    const seeded = await seedAdminData(database);
+
+    expect(seeded.unattachedOrderItems).toHaveLength(16);
+    expect(seeded.unattachedOrderItems[0]).toBe('GG-2046 / Velvet Matte Luxe Liquid Lipstick');
+    // Nothing was written against a guessed id.
+    expect(query.mock.calls.some(([text]) => String(text).includes('INSERT INTO order_items'))).toBe(false);
+  });
+
+  it('does not report a line that is already there', async () => {
+    // The insert is idempotent, so a second `db:seed` writes nothing. That is a
+    // success, not a line that went missing, and must not be reported as one.
+    const { database } = makeDatabase(async (text) => (
+      text.includes('FROM products WHERE name =') ? { rows: [{ id: 17 }], rowCount: 1 } : { rows: [], rowCount: 0 }
+    ));
+    const seeded = await seedAdminData(database);
+
+    expect(seeded.unattachedOrderItems).toEqual([]);
+  });
+
   it('seeds the owner account with a generated password nobody chose', async () => {
     const { database, query } = makeDatabase();
     await seedAdminData(database);
@@ -1904,10 +1993,132 @@ function consoleFor(row: Record<string, unknown>, overrides: Record<string, stri
     expect((result.body as { error?: string }).error).toBe('invalid_request');
   });
 
-  it('answers 503 when the owner presses the button with nothing to copy from', async () => {
+it('answers 503 when the owner presses the button with nothing to copy from', async () => {
     const admin = consoleFor(ownerRow, { NEON_DATABASE_URL: undefined });
     const result = await admin.handle({ method: 'POST', segments: ['local-db', 'sync'], token, body: {} });
     expect(result.status).toBe(503);
     expect((result.body as { error?: string }).error).toBe('database_not_configured');
+  });
+});
+
+describe('generating a new owner password', () => {
+  const ownerRow = { ...activeAdminRow, id: '00000000-0000-4000-8000-0000000000f1', name: 'Glow & Grace Super Admin', email: superAdminEmail, role: 'Super Admin' };
+
+  /**
+   * A console session answering as `row`, plus a database that recognises the
+   * owner account when `rotateOwnerPassword` goes looking for it.
+   */
+  function consoleFor(row: Record<string, unknown>, ownerExists = true) {
+    const { database, query } = makeDatabase(async (text) => {
+      // Before the session lookup: `DELETE FROM admin_sessions WHERE user_id`
+      // contains `FROM admin_sessions` too, and would otherwise answer as the
+      // signed-in user.
+      if (text.includes('DELETE FROM admin_sessions WHERE user_id')) return { rows: [], rowCount: 3 };
+      if (text.includes('FROM admin_sessions')) return { rows: [row], rowCount: 1 };
+      if (text.includes('FROM admin_users WHERE email = $1')) {
+        return ownerExists
+          ? { rows: [{ id: ownerRow.id, email: superAdminEmail, role: 'Super Admin', password_hold_until: null }], rowCount: 1 }
+          : { rows: [], rowCount: 0 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    return { admin: createAdminHandlers(database), query };
+  }
+
+  it('replaces the password and mails it to the owner address', async () => {
+    const { admin, query } = consoleFor(ownerRow);
+    const result = await admin.handle({ method: 'POST', segments: ['owner-password', 'generate'], token });
+
+    expect(result.status).toBe(200);
+    const body = result.body as { rotated: boolean; email: string; sessionsRevoked: number };
+    expect(body.rotated).toBe(true);
+    expect(body.email).toBe(superAdminEmail);
+    expect(body.sessionsRevoked).toBe(3);
+
+    const hash = query.mock.calls.find(([text]) => String(text).includes('SET password_hash = $1'));
+    expect(hash).toBeDefined();
+    // `password_hold_until = NULL` is on the same statement: there is no
+    // hand-chosen password left to come back to.
+    expect(String(hash![0])).toContain('password_hold_until = NULL');
+
+    const mail = query.mock.calls.find(([text]) => String(text).includes('INSERT INTO email_outbox'));
+    expect(mail).toBeDefined();
+    expect((mail![1] as unknown[])[0]).toBe(superAdminEmail);
+  });
+
+  it('never puts the generated password in the response', async () => {
+    // The whole design of `/superadmin/ggpass` rests on this. If the password ever
+    // came back over the wire, it would be in the browser, in a screen recording,
+    // and in whatever the network tab kept.
+    const { admin, query } = consoleFor(ownerRow);
+    const result = await admin.handle({ method: 'POST', segments: ['owner-password', 'generate'], token });
+
+    expect(result.status).toBe(200);
+    const body = result.body as Record<string, unknown>;
+    expect(Object.keys(body).sort()).toEqual(['email', 'nextRotationDays', 'rotated', 'sessionsRevoked']);
+    expect(JSON.stringify(body)).not.toMatch(/password/i);
+
+    // And the stored value is a hash, so the plaintext only ever exists in the
+    // outbox row on its way to the mailbox.
+    const hash = query.mock.calls.find(([text]) => String(text).includes('SET password_hash = $1'));
+    expect(String((hash![1] as unknown[])[0])).toMatch(/^scrypt\$/);
+    const mail = query.mock.calls.find(([text]) => String(text).includes('INSERT INTO email_outbox'));
+    expect(String((mail![1] as unknown[])[2])).toMatch(/Password: /);
+  });
+
+  it('ends every session, the caller included', async () => {
+    const { admin, query } = consoleFor(ownerRow);
+    await admin.handle({ method: 'POST', segments: ['owner-password', 'generate'], token });
+
+    const revoke = query.mock.calls.find(([text]) => String(text).includes('DELETE FROM admin_sessions WHERE user_id = $1'));
+    expect(revoke).toBeDefined();
+    expect((revoke![1] as unknown[])[0]).toBe(ownerRow.id);
+  });
+
+  it('refuses anybody who is not the owner account', async () => {
+    // The gate that counts. The page hides the button from other roles, but a
+    // hidden button is not access control - this has to hold for a direct POST
+    // from anything signed in as somebody else.
+    for (const row of [
+      activeAdminRow,
+      { ...activeAdminRow, role: 'Content Editor' },
+      { ...activeAdminRow, role: 'Candidate' },
+    ]) {
+      const { admin, query } = consoleFor(row);
+      const result = await admin.handle({ method: 'POST', segments: ['owner-password', 'generate'], token });
+
+      expect(result.status).toBe(403);
+      expect((result.body as { error?: string }).error).toBe('forbidden');
+      // Nothing was rotated.
+      expect(query.mock.calls.some(([text]) => String(text).includes('SET password_hash'))).toBe(false);
+    }
+  });
+
+  it('needs a session', async () => {
+    const { admin } = consoleFor(ownerRow);
+    const result = await admin.handle({ method: 'POST', segments: ['owner-password', 'generate'], token: undefined });
+    expect(result.status).toBe(401);
+  });
+
+  it('will only generate on a POST', async () => {
+    const { admin, query } = consoleFor(ownerRow);
+    const result = await admin.handle({ method: 'GET', segments: ['owner-password', 'generate'], token });
+
+    expect(result.status).toBe(405);
+    expect(query.mock.calls.some(([text]) => String(text).includes('SET password_hash'))).toBe(false);
+  });
+
+  it('says so when there is no owner account to give a password to', async () => {
+    const { admin } = consoleFor(ownerRow, false);
+    const result = await admin.handle({ method: 'POST', segments: ['owner-password', 'generate'], token });
+
+    expect(result.status).toBe(409);
+    expect((result.body as { error?: string }).error).toBe('owner_missing');
+  });
+
+  it('is not reachable at any other path under its name', async () => {
+    const { admin } = consoleFor(ownerRow);
+    const result = await admin.handle({ method: 'POST', segments: ['owner-password', 'something-else'], token });
+    expect(result.status).toBe(404);
   });
 });

@@ -76,9 +76,6 @@ try {
     await database.query(`UPDATE demo_datasets SET visible = TRUE, seeded = TRUE`);
   }
 
-  await seedAdminData(database);
-  console.log('Seeded pages, settings, demo datasets, sample orders and the admin accounts.');
-
   if (!skipCatalogue) {
     const columns = [
       'name', 'category', 'brand', 'sku', 'price', 'mrp', 'stock', 'rating', 'reviews',
@@ -142,6 +139,20 @@ try {
     }
     console.log(`Seeded ${inserted} catalogue product${inserted === 1 ? '' : 's'} from src/data/catalog.ts.`
       + (skipped > 0 ? ` Skipped ${skipped} already present.` : ''));
+  }
+
+  // After the catalogue, deliberately. The sample orders name their products and
+  // `seedAdminData` resolves each line's `product_id` by joining `products` on
+  // that name, so seeding them first - which is what this used to do - left every
+  // line pointing at an id that was never issued.
+  const seeded = await seedAdminData(database);
+  console.log('Seeded pages, settings, demo datasets, sample orders and the admin accounts.');
+  if (seeded.unattachedOrderItems.length > 0) {
+    // Not fatal: the order lines name their product, so nothing is corrupt, but
+    // they are missing and the count matters. The usual cause is the catalogue
+    // holding different names, or `--no-catalogue` on a database with no products.
+    console.warn(`\n  ${seeded.unattachedOrderItems.length} order line(s) had no matching product and were skipped:`);
+    for (const line of seeded.unattachedOrderItems) console.warn(`    ${line}`);
   }
 
   const counts = await database.query(

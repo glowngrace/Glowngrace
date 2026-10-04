@@ -15,6 +15,17 @@ With `USE_LOCAL_DATABASE=true`, a `DATABASE_URL` that resolves to a remote host 
 **refused** rather than obeyed. Local work must never read or write production by
 accident; `ALLOW_REMOTE_DATABASE=true` overrides it if you really mean it.
 
+This covers the scripts as well as the server. `db:seed`, `db:migrate` and
+`db:check` resolve the local database directly rather than through the request
+path, and they carry the same guard — before that, a Neon URL sitting in
+`DATABASE_URL` was seeded as though it were the local container.
+
+Which SSL variable applies is decided by **where the host actually is**, not by
+which target was asked for. A remote host reached through a local target inherits
+`DATABASE_SSL`, never `LOCAL_DATABASE_SSL`: the container speaks plain TCP, so
+`LOCAL_DATABASE_SSL=disable` dialled a remote host in cleartext and overrode the
+`sslmode=require` in its own connection string.
+
 | | Local | Production |
 | --- | --- | --- |
 | What | PostgreSQL 16 in Docker, port `5435`, named volume | Neon, `neon-glowngraceproddb`, region `aws-ap-southeast-2` |
@@ -40,10 +51,28 @@ the same without the storefront, for when you want to drive the browser yourself
 
 ### `db:seed`
 
-Creates the owner account and, only when `products` is empty, the bundled
-catalogue. The owner's password is generated and written to the `email_outbox`
-table, unless `OWNER_PINNED_PASSWORD` and `OWNER_PINNED_HOLD_UNTIL` are both set —
-both or neither, so a pinned password cannot quietly become permanent.
+Fills an empty database with the sample content the storefront ships with: the
+owner account, the console's pages and settings, and the bundled catalogue from
+`src/data/catalog.ts`.
+
+**The catalogue is written before the sample orders, not after.** `order_items`
+carries a denormalised `product_name` and resolves its `product_id` from it by
+joining `products`, so an order line can only be attached to a product that
+exists. Seeding them the other way round - which is what this used to do - left
+every line pointing at an id that was never issued, and nothing complained,
+because `order_items.product_id` has no foreign key on it. Any line whose name
+matches nothing is skipped and reported rather than invented.
+
+> `products.id` is `GENERATED ... START WITH 9`, so the seeded ids are `9`–`16`
+> on a fresh database and **not** `1`–`8` as the bundled catalogue in
+> `src/data/catalog.ts` numbers its own array. A deep link has to carry a real id.
+> `db:seed --reset` deletes and reinserts the catalogue without rewinding the
+> sequence, so ids move again on every reseed — read them from `/api/products`
+> rather than hardcoding them.
+
+The owner's password is generated, written to the `email_outbox` table, printed to
+the console, and emailed. `OWNER_PINNED_PASSWORD` is honoured if you set it, but
+nothing in this project sets it — see [The owner password](#the-owner-password).
 
 ### `db:check`
 
@@ -51,6 +80,43 @@ Prints the same report as `/api/health` for whichever databases are configured:
 which tables exist, which of the required ones are missing, and the connection
 string with the password left out. It is the first thing to run when the local
 database looks wrong.
+
+It also fails (exit 1) when any `order_items` row points at a `product_id` that
+does not exist, and says which migration repairs it. That check exists because the
+dangling ids above were invisible from every other angle: the storefront reads
+`product_name`, the schema does not constrain the column, and the seed reported
+success.
+
+## The owner password
+
+Nobody chooses the Super Admin password. It is generated on the server, stored
+hashed, written to `email_outbox`, and emailed to the owner address. It rotates
+weekly, and every rotation ends every open session.
+
+| | |
+| --- | --- |
+| Where it lands | The owner address, plus the `email_outbox` table (kept as the record, and how you read it when SMTP is not configured) |
+| Where it never lands | The browser, the API response, the console, the logs |
+| Who can ask for a new one | The `Super Admin` account, on `POST /api/admin/owner-password/generate` |
+
+### `/superadmin/ggpass`
+
+The screen that does it on demand — sign in as the owner and open
+`/superadmin/ggpass`. Use it after a suspected compromise, a lost mailbox, or
+whenever somebody leaves.
+
+It asks the server who is signed in rather than trusting what is in
+`localStorage`, so an edited role string cannot reveal the button. It confirms
+before acting, because the call ends the caller's own session. And it **never
+shows the password**: there is no field to copy out of and no value in the
+response, so a screen recording, a shared screen or the network tab has nothing
+to pick up. If the mail does not arrive, generate another one — that is cheap and
+safe to repeat, which is a better failure mode than a password on a page.
+
+The page hiding the button is a courtesy. The guard that counts is on the server:
+the endpoint re-reads the session and answers `403` to anything but the owner
+role, so it is safe to reach by typing the URL and safe to call directly. Both
+gates are covered by tests.
 
 ## Environment
 
@@ -71,9 +137,9 @@ real passwords go. `.env.local.example` is the committed starting point.
 | `DATABASE_POOL_MAX` | Pool | Defaults to `1`. Every request is a single short query, and a second connection on a pooled endpoint buys a second compute slot, not throughput. |
 | `PORT` | Local API | Express API port (defaults to `3001`). |
 | `VITE_API_BASE_URL` | Vite | Browser-visible API prefix; keep this as `/api`. Never put secrets in a `VITE_` variable. |
-| `SMTP_*`, `MAIL_FROM` | Mailer | How the owner's password is delivered. |
-| `OWNER_PINNED_PASSWORD` | Seed | A hand-chosen owner password. Only honoured with `OWNER_PINNED_HOLD_UNTIL`, and both stop mattering at the next restart. |
-| `OWNER_PINNED_HOLD_UNTIL` | Seed | When the weekly rotation takes the pinned password back. ISO 8601, and at most 7 days out. |
+| `SMTP_*`, `MAIL_FROM` | Mailer | How the owner's password is delivered. Unset means the password lands in `email_outbox` and nowhere else. |
+| `OWNER_PINNED_PASSWORD` | Seed | Not used by this project. A hand-chosen owner password, honoured only alongside `OWNER_PINNED_HOLD_UNTIL`, and both stop mattering at the next restart. See [The owner password](#the-owner-password). |
+| `OWNER_PINNED_HOLD_UNTIL` | Seed | Not used by this project. When the weekly rotation takes a pinned password back. ISO 8601, and at most 7 days out. |
 
 ## Copying production data down
 

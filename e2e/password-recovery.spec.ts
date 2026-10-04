@@ -122,7 +122,7 @@ async function openSettings(page: Page) {
     }
     return route.fulfill({
       json: {
-        token: 'e2e-session-token',
+        token: '3f1c9a52-8d47-4e6b-9a10-2c5b7e8d4f31',
         expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
         user: adminUser,
       },
