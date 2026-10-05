@@ -22,6 +22,25 @@ export type MailConfig = {
   from: string;
 };
 
+/**
+ * Reads the first value that is actually set, in the order given.
+ *
+ * The order is the precedence. `SMTP_*` is what this project has always used, and
+ * `MAIL_*` is the other spelling these settings turn up in - a hosting provider's
+ * mail variables, a framework's own `.env.example`, a settings screen somebody
+ * copied in. Both shapes are in the wild for the same four facts about a relay,
+ * so both are accepted here rather than asking whoever deploys this to know which
+ * one the code happens to read. The first name in each list is the one that wins,
+ * so an existing `SMTP_*` deployment is not changed by this at all.
+ */
+function firstSet(env: NodeJS.ProcessEnv, names: string[]): string {
+  for (const name of names) {
+    const value = env[name];
+    if (value !== undefined && value.trim() !== '') return value.trim();
+  }
+  return '';
+}
+
 export type OutboxMessage = {
   id: string;
   kind: string;
@@ -35,7 +54,90 @@ export type DeliveryOutcome =
   | { delivered: false; id: string; reason: 'not_configured' | 'wrong_kind' | 'wrong_recipient' | 'send_failed' };
 
 /**
- * Reads the SMTP settings, or `null` when the deployment has none.
+ * Turns a host setting into the bare hostname a relay expects.
+ *
+ * Three shapes turn up for the same host and only one of them works: `smtp.x.com`,
+ * `smtps://smtp.x.com` copied out of a provider's settings page, and `://gmail.com`
+ * from a hand-written config that lost the word after the scheme. A scheme is
+ * dropped, because nodemailer connects to a host and port and not to a URL, and
+ * anything left with no dot before the first label is assumed to be a bare domain
+ * and gets the `smtp.` prefix - `gmail.com` and `outlook.com` both mean their
+ * submission relay that way, and getting it wrong fails at connect time with an
+ * error that does not mention the host at all.
+ */
+function normaliseHost(raw: string): string {
+  // A scheme copied out of a provider's settings page, then the bare `://` left
+  // behind by a config that lost the word after it. Both are stripped because
+  // nodemailer connects to a host and a port and not to a URL, and both fail at
+  // connect time with an error that never mentions the host.
+  const host = raw
+    .replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')
+    .replace(/^:?\/\//, '')
+    .replace(/\/+$/, '')
+    .trim();
+  // Only Google's, and only because it is the one this project's own settings
+  // name. Guessing for everybody else would be worse than the problem: providers
+  // do not all put their relay under `smtp.` (Yahoo's is `smtp.mail.`), so a rule
+  // that looked general would silently break the next one after Gmail.
+  return bareProviderHosts.has(host.toLowerCase()) ? `smtp.${host}` : host;
+}
+
+const bareProviderHosts = new Set(['gmail.com', 'googlemail.com']);
+
+/** Whether the connection is encrypted up front, or negotiated after connecting. */
+type EncryptionStyle = 'implicit' | 'starttls';
+
+/**
+ * Reads an encryption setting as a style of encryption, or `null` to defer.
+ *
+ * The two spellings do not mean the same thing and must not be collapsed. `SMTP_SECURE`
+ * is a plain boolean about the connection mode, and `false` has always meant "not
+ * implicit TLS" here, which for every relay that matters is STARTTLS. `MAIL_ENCRYPTION`
+ * is the word people reach for, and it names the protocol rather than the mode: `ssl`
+ * is encryption up front, while `tls` and `starttls` are encryption negotiated after
+ * connecting. Reading `MAIL_ENCRYPTION=tls` as "implicit TLS" would be the single
+ * most damaging thing this function could do, because port 587 expects the opposite
+ * and the connection fails with a protocol error that names neither.
+ *
+ * `none` is answered as STARTTLS rather than as plain text on purpose. There is no
+ * setting here that ships a password in the clear, and a relay that advertises no
+ * STARTTLS would refuse the login anyway, so the worst case is identical and the
+ * best case is a working connection.
+ *
+ * An unrecognised word is `null` rather than a refusal, because losing a deployment's
+ * mail over a spelling is worse than falling back to the port's own convention.
+ */
+function encryptionStyle(env: NodeJS.ProcessEnv): EncryptionStyle | null {
+  const secure = firstSet(env, ['SMTP_SECURE']).toLowerCase();
+  if (secure) {
+    if (secure === 'true' || secure === '1' || secure === 'yes') return 'implicit';
+    if (secure === 'false' || secure === '0' || secure === 'no') return 'starttls';
+  }
+  const encryption = firstSet(env, ['MAIL_ENCRYPTION']).toLowerCase();
+  if (encryption) {
+    if (encryption === 'ssl' || encryption === 'smtps' || encryption === 'tls_implicit') return 'implicit';
+    if (encryption === 'tls' || encryption === 'starttls' || encryption === 'none' || encryption === 'off' || encryption === 'null') {
+      return 'starttls';
+    }
+  }
+  return null;
+}
+
+/**
+ * Builds the `From` header, with a display name when one was given.
+ *
+ * A mailbox on its own reads as a bare address in the recipient's inbox, which is
+ * not what a sender name is for. The name is quoted and the address put in angle
+ * brackets because a display name containing a space, a comma or a quote would
+ * otherwise produce a header that parses as two addresses.
+ */
+function formatFrom(address: string, name: string): string {
+  if (!name) return address;
+  return `"${name.replace(/["\\]/g, '')}" <${address}>`;
+}
+
+/**
+ * Reads the mail settings, or `null` when the deployment has none.
  *
  * A missing configuration is not an error: a local checkout, a test run and a
  * preview deployment all legitimately have no mail server, and the outbox row is
@@ -43,22 +145,32 @@ export type DeliveryOutcome =
  * because mail is unavailable, so an unconfigured transport reports that it had
  * nothing to do rather than throwing.
  *
+ * Both spellings of each setting are read, `SMTP_*` first - see `firstSet`. A host,
+ * a user and a password are all required; the rest have defaults that are right for
+ * Gmail and for most hosted relays.
+ *
  * `SMTP_PORT` 465 implies implicit TLS, which is what every hosted relay uses;
  * anything else negotiates STARTTLS, so port 587 works without a second flag.
  */
 export function mailConfigFromEnv(env: NodeJS.ProcessEnv = process.env): MailConfig | null {
-  const host = (env.SMTP_HOST ?? '').trim();
-  const user = (env.SMTP_USER ?? '').trim();
-  const password = env.SMTP_PASSWORD ?? '';
+  const host = normaliseHost(firstSet(env, ['SMTP_HOST', 'MAIL_HOST']));
+  const user = firstSet(env, ['SMTP_USER', 'MAIL_USERNAME', 'MAIL_USER']);
+  const password = firstSet(env, ['SMTP_PASSWORD', 'MAIL_PASSWORD']);
   if (!host || !user || !password) return null;
-  const port = Number(env.SMTP_PORT ?? 587) || 587;
+  const port = Number(firstSet(env, ['SMTP_PORT', 'MAIL_PORT'])) || 587;
+  const style = encryptionStyle(env);
+  const from = firstSet(env, ['MAIL_FROM', 'MAIL_FROM_ADDRESS']) || user;
   return {
     host,
     port,
-    secure: env.SMTP_SECURE ? env.SMTP_SECURE === 'true' : port === 465,
+    // Port 465 always means implicit TLS, because no relay offers STARTTLS on it and
+    // asking for STARTTLS there fails at connect time. An explicit `implicit`
+    // elsewhere is honoured, so a provider that does TLS up front on its own port
+    // still works. Everything else negotiates after connecting.
+    secure: port === 465 || style === 'implicit',
     user,
     password,
-    from: (env.MAIL_FROM ?? user).trim(),
+    from: formatFrom(from, firstSet(env, ['MAIL_FROM_NAME'])),
   };
 }
 

@@ -74,6 +74,21 @@ Then open http://localhost:8081 and sign in with the `POSTGRES_*` credentials ab
 docker exec -it glow-grace-local-db psql -U glow_grace -d glow_grace
 ```
 
+## Reading the owner's password out of it
+
+`npm run db:seed` creates the Super Admin account with a generated password and
+prints it, and the API emails it to the owner address when the mail settings are
+present. When they are not, the password is still in the `email_outbox` table:
+
+```sql
+SELECT body FROM email_outbox WHERE kind = 'owner-credentials'
+ORDER BY created_at DESC LIMIT 1;
+```
+
+The body is worded the same way every time, so the password is the line after
+`Password:`. `/superadmin/ggpass` generates another one on demand, and this read
+is how you get at whichever is current.
+
 ## Getting production data into it
 
 The local database starts as a seeded shop. When you need the real catalogue, the
