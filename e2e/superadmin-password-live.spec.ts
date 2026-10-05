@@ -143,13 +143,13 @@ test.describe('the real owner password round trip', () => {
     await signInAsOwner(page, passwordBefore);
     await page.goto('/superadmin/ggpass');
 
-    await expect(page.getByRole('heading', { name: 'Owner password' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Generate password' })).toBeVisible();
     // Enabled rather than merely present: this deployment has a database and mail, so
     // the deployment warnings are absent and the button is live. Against a broken
     // deployment it renders disabled, and `toBeVisible` would pass for a control that
     // cannot do anything.
-    await expect(page.getByRole('button', { name: 'Generate a new password' })).toBeEnabled();
-    await expect(page.getByLabel('Send the new password to')).toHaveValue(ownerEmail);
+    await expect(page.getByRole('button', { name: 'Generate password' })).toBeEnabled();
+    await expect(page.getByLabel('Registered email')).toHaveValue(ownerEmail);
     await auditPage(page, '/superadmin/ggpass (real)');
   });
 
@@ -158,7 +158,7 @@ test.describe('the real owner password round trip', () => {
     const before = await latestOutboxRow();
 
     await page.goto('/superadmin/ggpass');
-    await page.getByRole('button', { name: 'Generate a new password' }).click();
+    await page.getByRole('button', { name: 'Generate password' }).click();
 
     const dialog = page.getByRole('dialog', { name: 'Generate a new owner password?' });
     await expect(dialog).toBeVisible();
@@ -176,7 +176,7 @@ test.describe('the real owner password round trip', () => {
     const before = await latestOutboxRow();
 
     await page.goto('/superadmin/ggpass');
-    await page.getByRole('button', { name: 'Generate a new password' }).click();
+    await page.getByRole('button', { name: 'Generate password' }).click();
     await page.getByRole('dialog').getByRole('button', { name: 'Yes, generate it' }).click();
 
     // The server attempts the real send before it answers, so the wait is a Gmail

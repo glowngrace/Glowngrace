@@ -81,11 +81,10 @@ function AppRoutes() {
           <Route path="/admin" element={<AdminPortal />} />
           {/* Its own address rather than a console section, so it is not reachable
               by clicking and can be bookmarked or linked directly. The guard is on
-              the server; the page asks who is signed in so it can explain itself. */}
-          <Route
-            path="/superadmin/ggpass"
-            element={<section className="section"><div className="page-container"><SuperAdminPasswordPage /></div></section>}
-          />
+              the server; the page asks who is signed in so it can explain itself.
+              Rendered bare, like the sign-in screens, because it is a split screen
+              and the storefront section padding would frame it inside a frame. */}
+          <Route path="/superadmin/ggpass" element={<SuperAdminPasswordPage />} />
           <Route path="*" element={<div className="section"><div className="page-container empty-state"><span className="eyebrow">A little detour</span><h1>This page isn’t in our edit.</h1><p>Let’s get you back to something lovely.</p><a className="button button-dark" href="/">Back to the beauty house</a></div></div>} />
         </Routes>
       </main>
