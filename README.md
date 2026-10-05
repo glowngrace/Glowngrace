@@ -36,7 +36,7 @@ which target was asked for. A remote host reached through a local target inherit
 | | Local | Production |
 | --- | --- | --- |
 | What | PostgreSQL 16 in Docker, port `5435`, named volume | Neon, `neon-glowngraceproddb`, region `aws-ap-southeast-2` |
-| Connection string | `DATABASE_URL` | `NEON_DATABASE_URL` (or `PRODUCTION_DATABASE_URL`) |
+| Connection string | `DATABASE_URL` | `DATABASE_URL` or `NEON_DATABASE_URL` — either one is enough on its own (`PRODUCTION_DATABASE_URL` is *not*, it is sync-only) |
 | TLS | `LOCAL_DATABASE_SSL=disable` — plain TCP on localhost | `DATABASE_SSL=require`, certificate verified |
 | Reached by | `npm run db:up`, `npm start local` | The Vercel deployment |
 
@@ -209,10 +209,11 @@ real passwords go. `.env.local.example` is the committed starting point.
 | Variable | Used by | Description |
 | --- | --- | --- |
 | `USE_LOCAL_DATABASE` | Everything | The switch above. `true` for local work. |
-| `DATABASE_URL` | Local | The local Docker database. The only variable the app reads when the switch is on. |
+| `DATABASE_URL` | Local, production | The local Docker database when `USE_LOCAL_DATABASE` is on — then it is the only variable the app reads. In production it is the first name checked for the connection string, and the one Vercel's Neon integration injects on its own. |
 | `LOCAL_DATABASE_SSL` | Local | `disable` — the container speaks plain TCP, so there is no certificate to verify. |
-| `NEON_DATABASE_URL` | Sync | The pooled Neon connection string. Read only by the sync, never by a request. |
-| `PRODUCTION_DATABASE_URL` | Sync | The same thing under the other name. Either one configures the remote. |
+| `NEON_DATABASE_URL` | Sync, production | The pooled Neon connection string. Also read on every production request, so setting it is enough on its own — it is not sync-only. |
+| `DATABASE_URL_UNPOOLED`, `POSTGRES_URL`, `POSTGRES_PRISMA_URL` | Production | Accepted aliases for the production connection string, in that order after the two above. Use whichever your provider hands you. |
+| `PRODUCTION_DATABASE_URL` | Sync | Configures the remote for the sync only; a request will not read it. |
 | `DATABASE_SSL` | Production | `require` unless the connection string's `sslmode` says otherwise. |
 | `SYNC_FROM_PRODUCTION` | Sync | Whether the console may reach for Neon at all. Off by default. |
 | `NEON_API_KEY`, `NEON_ORG_ID`, `NEON_PROJECT_NAME`, `NEON_REGION_ID` | `neon:provision` | Only needed to create the Neon project. |
@@ -295,10 +296,11 @@ Vercel project's environment, **unset** `USE_LOCAL_DATABASE`, and deploy. Check
 Neon's free tier is per-project; if the script answers that the quota is spent, that
 is the account's limit and not something the script can work around.
 
-**Leave behind anything that looks like a connection string.** A leftover
-`DATABASE_URL` or `POSTGRES_*` in the Vercel project is dead weight at best, and at
-worst a live credential for a database this code no longer talks to. Delete it, then
-rotate anything it held.
+**Leave behind anything that looks like a connection string to the wrong database.**
+The names above are checked in order, so a stray `DATABASE_URL` pointing somewhere
+unintended will be preferred over the variable you meant to use. Check
+`/api/health`, which reports the variable it resolved and a masked host, then unset
+the ones you did not mean and rotate whatever they held.
 
 The mail settings belong in Vercel's environment too, or `/superadmin/ggpass` will
 rotate the owner password into `email_outbox` and nowhere else. The startup log
@@ -347,11 +349,15 @@ because nothing in the request path can tell that a write went into a store that
 be thrown away. Nothing alerted. The first sign of trouble would have been a customer
 reporting a missing order.
 
-So on Vercel the report is `status: "error"` with `reason` naming the variable to set:
+So on Vercel the report is `status: "error"` with `reason` naming the variables it
+accepts:
 
 ```
-{ "status": "error", "store": "memory", "reason": "This deployment has no database configured… Set NEON_DATABASE_URL…" }
+{ "status": "error", "store": "memory", "reason": "This deployment has no database configured… Set one of DATABASE_URL, NEON_DATABASE_URL, DATABASE_URL_UNPOOLED, POSTGRES_URL, POSTGRES_PRISMA_URL…" }
 ```
+
+That list is `runtimeDatabaseVariables` from `src/server/config.ts`, and the message is
+built from it rather than written out, so the two cannot drift apart.
 
 The HTTP status is still 200, because a body that says `error` is a successful answer
 to the question. Off Vercel the same store stays `ok`: in memory is a legitimate choice

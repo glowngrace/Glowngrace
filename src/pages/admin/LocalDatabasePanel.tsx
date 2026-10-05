@@ -7,6 +7,7 @@ import {
   type NeonSyncResult,
 } from '../../lib/admin-api';
 import { Panel, PanelHead } from './AdminUi';
+import { runtimeDatabaseVariables } from '../../server/config';
 
 /**
  * The local development database, and the one button that copies production
@@ -126,7 +127,7 @@ export function LocalDatabasePanel({ onNotice }: { onNotice: (message: string) =
       {report.store !== 'postgres' && (
         <p className="admin-bulk-note" role="note">
           {import.meta.env.PROD
-            ? 'This deployment has no database configured, so it is running on the in-memory store and every restart discards all data. Set NEON_DATABASE_URL in the Vercel project environment variables and redeploy.'
+            ? `This deployment has no database configured, so it is running on the in-memory store and every restart discards all data. Set one of ${runtimeDatabaseVariables.join(', ')} in the Vercel project environment variables and redeploy.`
             : 'This process is running on the in-memory store, so a sync has nowhere to write. Set USE_LOCAL_DATABASE=true in .env.local and restart.'}
         </p>
       )}
