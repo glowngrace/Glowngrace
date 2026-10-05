@@ -67,8 +67,27 @@ function countsQuery() {
   return `SELECT
     version() AS version,
     current_database() AS name,
-    ${allTables.map((table) => `(SELECT count(*)::text FROM "${table}") AS ${table}`).join(',\n    ')}`;
+    ${allTables.map((table) => `(SELECT count(*)::text FROM "${table}") AS ${table}`).join(',\n    ')},
+    ${danglingOrderItems} AS dangling_order_items`;
 }
+
+/**
+ * Order lines whose `product_id` matches no product row.
+ *
+ * `order_items.product_id` has no foreign key, deliberately: a line can name a
+ * product that was later deleted from the catalogue, and blocking that delete
+ * would be a worse failure. The cost is that a line pointing at an id that never
+ * existed is indistinguishable from a deleted one, so it is counted here rather
+ * than left to be found by reading the storefront.
+ *
+ * This is not hypothetical. The seed wrote lines against ids `1..8` while
+ * `products.id` starts at 9, so on every database ever seeded this number was 16
+ * and nothing complained.
+ */
+const danglingOrderItems = `(
+  SELECT count(*)::text FROM order_items AS line
+  WHERE NOT EXISTS (SELECT 1 FROM products AS product WHERE product.id = line.product_id)
+)`;
 
 function presenceQuery() {
   return `SELECT ${allTables.map((table) => `to_regclass('public.${table}') IS NOT NULL AS ${table}`).join(', ')}`;
@@ -95,13 +114,14 @@ function interpret(row: Record<string, unknown>, startedAt: number) {
   }
 
   return {
-    ok: missingTables.length === 0 && missingProductColumns.length === 0,
+    ok: missingTables.length === 0 && missingProductColumns.length === 0 && Number(row.dangling_order_items ?? 0) === 0,
     version: String(row.version ?? '').split(' ').slice(0, 2).join(' '),
     name: String(row.name ?? ''),
     latencyMs: Date.now() - startedAt,
     missingTables,
     missingAdminTables,
     missingProductColumns,
+    danglingOrderItems: Number(row.dangling_order_items ?? 0),
     counts,
   };
 }
@@ -191,6 +211,7 @@ async function inspectProduction(): Promise<Record<string, unknown>> {
       `SELECT version() AS version, current_database() AS name,
       ${tables},
       ${columns},
+      ${danglingOrderItems} AS dangling_order_items,
       ${counted}`,
     );
     return {
@@ -232,11 +253,18 @@ function report(outcome: Record<string, unknown>) {
 
   const missingTables = (outcome.missingTables as string[]) ?? [];
   const missingColumns = (outcome.missingProductColumns as string[]) ?? [];
+  const dangling = (outcome.danglingOrderItems as number) ?? 0;
   console.log(`  reachable:  yes`);
   console.log(`  tables:     ${missingTables.length === 0 ? 'all present' : `missing ${missingTables.join(', ')}`}`);
   console.log(`  columns:    ${missingColumns.length === 0
     ? 'every product column this build reads is present'
     : `products is missing ${missingColumns.join(', ')}`}`);
+  console.log(`  order items: ${dangling === 0
+    ? 'every line points at a product that exists'
+    : `${dangling} line(s) point at a product_id that does not exist`}`);
+  if (dangling > 0) {
+    console.log(`  fix:        apply db/migrations/014_order_item_products.sql, which re-points them by product_name.`);
+  }
   if (missingColumns.length > 0) {
     const migrations = [...new Set(missingColumns.map((column) => migrationFor.get(column)).filter(Boolean))];
     console.log(`  drift:      products is missing ${missingColumns.length} column${missingColumns.length === 1 ? '' : 's'} this build reads.`);

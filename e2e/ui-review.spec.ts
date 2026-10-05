@@ -68,7 +68,11 @@ async function stubConsoleFor(page: Page, account: typeof ownerAccount) {
     reviews: { records: [] },
     users: { users: [account], roles: ['Super Admin', 'Store Administrator', 'Content & Reviews'] },
     pages: { pages: [] },
-    demoData: { datasets: [] },
+    // The path the client asks for is `demo-data`, so this key has to be that.
+    // Keyed `demoData` it silently matched nothing, the read fell through to the
+    // real API with a session that does not exist, and the 401 came back as
+    // "your session has ended" - which used to be a 500 this suite ignored.
+    'demo-data': { datasets: [] },
     settings: { settings: { profile: {}, delivery: {}, notifications: {}, preview: {} } },
     summary: { orders: 0, products: 0, jobs: 0, candidates: 0, partners: 0, customers: 0, reviews: 0, pages: [], hiddenDatasets: [] },
   };
@@ -84,7 +88,7 @@ async function stubConsoleFor(page: Page, account: typeof ownerAccount) {
     if (route.request().method() === 'DELETE') return route.fulfill({ json: { message: 'Signed out of the console.' } });
     return route.fulfill({
       json: {
-        token: 'e2e-owner-token',
+        token: '3f1c9a52-8d47-4e6b-9a10-2c5b7e8d4f31',
         expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
         user: account,
       },

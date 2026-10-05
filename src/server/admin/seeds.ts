@@ -122,21 +122,31 @@ export const orderSeeds: Record<string, SeedRow[]> = {
   ],
 };
 
-export const orderItemSeeds: Array<{ orderNumber: string; productId: number; productName: string; unitPricePaise: number; quantity: number }> = [
-  { orderNumber: 'GG-2046', productId: 1, productName: 'Velvet Matte Luxe Liquid Lipstick', unitPricePaise: 59900, quantity: 2 },
-  { orderNumber: 'GG-2046', productId: 4, productName: 'Glow Ritual Vitamin C Face Serum', unitPricePaise: 84900, quantity: 1 },
-  { orderNumber: 'GG-2045', productId: 5, productName: 'Hydra Dew Hyaluronic Serum', unitPricePaise: 79900, quantity: 1 },
-  { orderNumber: 'GG-2045', productId: 8, productName: 'Radiance Ritual Glow Kit', unitPricePaise: 249900, quantity: 1 },
-  { orderNumber: 'GG-2044', productId: 6, productName: 'Aura Radiance Highlighter', unitPricePaise: 44900, quantity: 1 },
-  { orderNumber: 'GG-2044', productId: 7, productName: 'Bloom Essence Rose Eau De Parfum', unitPricePaise: 119900, quantity: 1 },
-  { orderNumber: 'GG-2043', productId: 3, productName: 'Nude Silk Matte Liquid Lipstick', unitPricePaise: 54900, quantity: 1 },
-  { orderNumber: 'GG-2042', productId: 2, productName: 'Berry Noir Matte Liquid Lipstick', unitPricePaise: 59900, quantity: 2 },
-  { orderNumber: 'GG-2042', productId: 8, productName: 'Radiance Ritual Glow Kit', unitPricePaise: 249900, quantity: 1 },
-  { orderNumber: 'GG-2041', productId: 4, productName: 'Glow Ritual Vitamin C Face Serum', unitPricePaise: 84900, quantity: 2 },
-  { orderNumber: 'GG-2040', productId: 5, productName: 'Hydra Dew Hyaluronic Serum', unitPricePaise: 79900, quantity: 1 },
-  { orderNumber: 'GG-2040', productId: 1, productName: 'Velvet Matte Luxe Liquid Lipstick', unitPricePaise: 59900, quantity: 1 },
-  { orderNumber: 'GG-2039', productId: 8, productName: 'Radiance Ritual Glow Kit', unitPricePaise: 249900, quantity: 1 },
-  { orderNumber: 'GG-2039', productId: 7, productName: 'Bloom Essence Rose Eau De Parfum', unitPricePaise: 119900, quantity: 1 },
-  { orderNumber: 'GG-2039', productId: 6, productName: 'Aura Radiance Highlighter', unitPricePaise: 44900, quantity: 1 },
-  { orderNumber: 'GG-2038', productId: 2, productName: 'Berry Noir Matte Liquid Lipstick', unitPricePaise: 59900, quantity: 1 },
+/**
+ * The lines of the sample orders.
+ *
+ * There is deliberately no `productId` here. These used to carry one, written as
+ * if the catalogue were numbered `1..8`, but `products` is an `IDENTITY` column
+ * declared `START WITH 9`, so every seeded line pointed at a row that has never
+ * existed - and nothing complained, because `order_items.product_id` has no
+ * foreign key on it. The buyer-visible `productName` was correct all along, so it
+ * is what the id is now resolved from, against the real `products` rows.
+ */
+export const orderItemSeeds: Array<{ orderNumber: string; productName: string; unitPricePaise: number; quantity: number }> = [
+  { orderNumber: 'GG-2046', productName: 'Velvet Matte Luxe Liquid Lipstick', unitPricePaise: 59900, quantity: 2 },
+  { orderNumber: 'GG-2046', productName: 'Glow Ritual Vitamin C Face Serum', unitPricePaise: 84900, quantity: 1 },
+  { orderNumber: 'GG-2045', productName: 'Hydra Dew Hyaluronic Serum', unitPricePaise: 79900, quantity: 1 },
+  { orderNumber: 'GG-2045', productName: 'Radiance Ritual Glow Kit', unitPricePaise: 249900, quantity: 1 },
+  { orderNumber: 'GG-2044', productName: 'Aura Radiance Highlighter', unitPricePaise: 44900, quantity: 1 },
+  { orderNumber: 'GG-2044', productName: 'Bloom Essence Rose Eau De Parfum', unitPricePaise: 119900, quantity: 1 },
+  { orderNumber: 'GG-2043', productName: 'Nude Silk Matte Liquid Lipstick', unitPricePaise: 54900, quantity: 1 },
+  { orderNumber: 'GG-2042', productName: 'Berry Noir Matte Liquid Lipstick', unitPricePaise: 59900, quantity: 2 },
+  { orderNumber: 'GG-2042', productName: 'Radiance Ritual Glow Kit', unitPricePaise: 249900, quantity: 1 },
+  { orderNumber: 'GG-2041', productName: 'Glow Ritual Vitamin C Face Serum', unitPricePaise: 84900, quantity: 2 },
+  { orderNumber: 'GG-2040', productName: 'Hydra Dew Hyaluronic Serum', unitPricePaise: 79900, quantity: 1 },
+  { orderNumber: 'GG-2040', productName: 'Velvet Matte Luxe Liquid Lipstick', unitPricePaise: 59900, quantity: 1 },
+  { orderNumber: 'GG-2039', productName: 'Radiance Ritual Glow Kit', unitPricePaise: 249900, quantity: 1 },
+  { orderNumber: 'GG-2039', productName: 'Bloom Essence Rose Eau De Parfum', unitPricePaise: 119900, quantity: 1 },
+  { orderNumber: 'GG-2039', productName: 'Aura Radiance Highlighter', unitPricePaise: 44900, quantity: 1 },
+  { orderNumber: 'GG-2038', productName: 'Berry Noir Matte Liquid Lipstick', unitPricePaise: 59900, quantity: 1 },
 ];

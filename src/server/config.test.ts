@@ -97,6 +97,47 @@ describe('refusing to point local work at production', () => {
   });
 });
 
+describe('the scripts that only ever want the local database', () => {
+  it('refuses a DATABASE_URL that resolves to production', () => {
+    // `db:seed`, `db:migrate` and `db:check` resolve the local database directly
+    // rather than through `resolveRuntimeDatabase`, so before this guard existed a
+    // Neon URL in DATABASE_URL was seeded as if it were the local container.
+    expect(() => resolveLocalDatabase({ DATABASE_URL: neonUrl }))
+      .toThrow(/Local work must never read or write production by accident/);
+  });
+
+  it('never dials a remote host with the local ssl setting', () => {
+    // The defect this closes: the target was `local`, so the resolver read
+    // `LOCAL_DATABASE_SSL` - `disable`, for a container that speaks plain TCP -
+    // and applied it to Neon. `sslmode=require` sat in the connection string and
+    // lost to the explicitly set variable, so the connection was attempted
+    // unencrypted and only failed on timeout.
+    const localSsl = resolveLocalDatabase({
+      DATABASE_URL: localUrl,
+      LOCAL_DATABASE_SSL: 'disable',
+      ALLOW_REMOTE_DATABASE: 'true',
+    });
+    expect(localSsl.ssl).toBe('disable');
+
+    const remoteSsl = resolveLocalDatabase({
+      DATABASE_URL: neonUrl,
+      LOCAL_DATABASE_SSL: 'disable',
+      ALLOW_REMOTE_DATABASE: 'true',
+    });
+    expect(remoteSsl.ssl).toBe('require');
+    expect(remoteSsl.description.provider).toBe('neon');
+  });
+
+  it('still lets somebody who means it reach a remote database deliberately', () => {
+    const resolved = resolveLocalDatabase({
+      DATABASE_URL: neonUrl,
+      LOCAL_DATABASE_SSL: 'disable',
+      ALLOW_REMOTE_DATABASE: 'true',
+    });
+    expect(resolved.description.host).toContain('neon.tech');
+  });
+});
+
 describe('the two ends of a sync', () => {
   it('reads production from either of the two names it goes by', () => {
     expect(resolveProductionDatabase({ NEON_DATABASE_URL: neonUrl }).variable).toBe('NEON_DATABASE_URL');
@@ -121,8 +162,11 @@ describe('the two ends of a sync', () => {
   });
 
   it('refuses a remote target', () => {
+    // Refused by `resolveLocalDatabase` now, before the sync's own guard ever
+    // runs: a DATABASE_URL that resolves to Neon is not a local target whatever
+    // the sync was going to do with it.
     expect(() => resolveSyncEndpoints({ DATABASE_URL: neonUrl, NEON_DATABASE_URL: 'postgresql://u:p@localhost:5437/glow_grace' }))
-      .toThrow(/must be the local Docker database/);
+      .toThrow(/Local work must never read or write production by accident/);
   });
 
   it('reports the local target even when it is the one missing', () => {

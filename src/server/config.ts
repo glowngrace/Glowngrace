@@ -226,10 +226,18 @@ export function resolveDatabase(
   }
   const description = describeConnectionString(picked.connectionString);
   const resolvedTarget: DatabaseTarget = description.provider === 'local' ? 'local' : target;
-  const configured = env[sslVariableFor(resolvedTarget)]?.trim();
+  // Which SSL variable applies is decided by where the host actually is, not by
+  // which target the caller asked for. A remote host reached through a local
+  // target - `resolveLocalDatabase` reading a DATABASE_URL that happens to point at
+  // Neon - would otherwise inherit `LOCAL_DATABASE_SSL`, which is `disable` for the
+  // Docker container, and be dialled with TLS switched off. The connection string
+  // carried `sslmode=require` and it was ignored, because an explicitly set
+  // variable always beats the URL.
+  const sslTarget: DatabaseTarget = description.provider === 'local' ? 'local' : 'production';
+  const configured = env[sslVariableFor(sslTarget)]?.trim();
   const ssl = configured
-    ? parseSslSettingOrThrow(configured, sslVariableFor(resolvedTarget))
-    : resolveSslSettingFromUrlOrDefault(env, description, resolvedTarget);
+    ? parseSslSettingOrThrow(configured, sslVariableFor(sslTarget))
+    : resolveSslSettingFromUrlOrDefault(env, description, sslTarget);
   return {
     connectionString: picked.connectionString,
     variable: picked.variable,
@@ -274,8 +282,20 @@ export function resolveRuntimeDatabase(env: Environment = process.env) {
   return local;
 }
 
+/**
+ * The local Docker database, for the scripts that only ever want that one.
+ *
+ * `db:migrate`, `db:seed` and `db:check` all come through here, and none of them
+ * is the request path, so none of them went through `resolveRuntimeDatabase` and
+ * picked up the local-only guard on the way. That let a `DATABASE_URL` pointing at
+ * Neon resolve as "local", be seeded, and be dialled with `LOCAL_DATABASE_SSL`
+ * applied to it. The guard is applied here rather than left to each caller,
+ * because the mistake it prevents is a script quietly writing to production.
+ */
 export function resolveLocalDatabase(env: Environment = process.env) {
-  return resolveDatabase(env, ['DATABASE_URL'], 'local');
+  const local = resolveDatabase(env, ['DATABASE_URL'], 'local');
+  assertLocalRuntimeUsesLocalDatabase(local, env);
+  return local;
 }
 
 /**

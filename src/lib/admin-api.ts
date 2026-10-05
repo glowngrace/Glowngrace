@@ -374,4 +374,18 @@ export const adminApi = {
       skipImages: options.skipImages === true,
       force: options.force === true,
     }),
+
+  /**
+   * Generates a fresh owner password and emails it to the owner address.
+   *
+   * There is no `password` field on the response and there is not going to be
+   * one. The generated value goes to the outbox and to the owner's inbox, and
+   * this call reports only that it happened - so there is nothing here for a
+   * screen to accidentally render, log, or put in the URL bar.
+   *
+   * Every session is revoked, the caller's included, so whoever pressed the
+   * button is signed out immediately afterwards.
+   */
+  generateOwnerPassword: () =>
+    post<{ rotated: true; email: string; sessionsRevoked: number; nextRotationDays: number }>('owner-password/generate'),
 };

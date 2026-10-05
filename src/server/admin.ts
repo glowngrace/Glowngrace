@@ -10,9 +10,9 @@ import {
   type Collection,
   type Row,
 } from './admin/collections.js';
-import { hashPassword, generateStrongPassword, newSessionToken, newResetToken, passwordHoldError, passwordPolicy, removedDemoPassword, resetTokenExpiry, resetTokenLookup, sessionExpiry, verifyPassword, hashResetToken } from './admin/passwords.js';
+import { hashPassword, generateStrongPassword, newSessionToken, newResetToken, passwordHoldError, passwordPolicy, removedDemoPassword, resetTokenExpiry, resetTokenLookup, sessionExpiry, verifyPassword, hashResetToken, superAdminRotationDays } from './admin/passwords.js';
 import { consoleRoles, signupRoles, superAdminEmail, superAdminRole } from '../auth/roles.js';
-import { ownerCredentialsMessage } from './admin/owner-password.js';
+import { ownerCredentialsMessage, rotateOwnerPassword } from './admin/owner-password.js';
 import { tryDeliverPendingMail } from './mailer.js';
 import { datasetCountSql, mapDatasetRowCounts } from './admin/datasets.js';
 import { normalizeStoreSettings, validateStoreSettings, type StoreSettings } from './admin/settings.js';
@@ -193,6 +193,24 @@ const productImageWrite = z.union([
 ]);
 
 const productImageUploads = z.array(productImageUpload).max(10).optional();
+
+/**
+ * The session token a request is answered against, or null.
+ *
+ * `newSessionToken()` mints a UUID and `admin_sessions.token` is a `uuid`
+ * column, so anything else cannot match a session. It has to be recognised
+ * here rather than by the query: passed through, a token that is not a UUID
+ * makes Postgres raise `invalid input syntax for type uuid`, which the route
+ * catches as a 500. A browser holding a stale or truncated token would then be
+ * told the console is broken instead of being asked to sign in again.
+ */
+const sessionTokenSchema = z.string().uuid();
+
+function sessionToken(token?: string | null) {
+  if (!token) return null;
+  const parsed = sessionTokenSchema.safeParse(token);
+  return parsed.success ? parsed.data : null;
+}
 
 const productUpdateSchema = z.object({
   name: z.string().trim().min(2).max(180).optional(),
@@ -578,6 +596,15 @@ function seededOwnerCredentials(now: Date) {
   return { password: pinned, holdUntil, pinned: true };
 }
 
+/**
+ * Creates the console's own starting content, including the sample orders.
+ *
+ * Returns the sample order lines that could not be attached to a product. A line
+ * is only written when a `products` row matches its name, so seeding before the
+ * catalogue exists produces orders with no lines rather than lines pointing at
+ * products that do not exist. Callers that have a catalogue to offer should seed
+ * that first and check this came back empty.
+ */
 export async function seedAdminData(database: Database) {
   await insertSeedRows(
     database,
@@ -601,14 +628,26 @@ export async function seedAdminData(database: Database) {
     ['order_number', 'customer_name', 'email', 'phone', 'street_address', 'locality', 'city', 'state', 'postal_code', 'landmark', 'delivery_method', 'payment_method', 'status', 'subtotal_paise', 'shipping_paise', 'tax_paise', 'total_paise', 'created_at'],
     orderSeeds.orders.map((row) => [...row.slice(0, 11), 'cod', ...row.slice(11)]),
   );
+  // `product_id` is resolved from `products` by name rather than written as a
+  // literal, so a line can only be attached to a product that exists. The name is
+  // looked up first, separately, because the insert's own `rowCount` of 0 means
+  // two different things - the line is already there, or there was no product to
+  // attach it to - and only the second is worth reporting.
+  const unattachedOrderItems: string[] = [];
   for (const item of orderItemSeeds) {
+    const product = await database.query('SELECT id FROM products WHERE name = $1 LIMIT 1', [item.productName]);
+    if (product.rows.length === 0) {
+      unattachedOrderItems.push(`${item.orderNumber} / ${item.productName}`);
+      continue;
+    }
+    const productId = (product.rows[0] as { id: number }).id;
     await database.query(
       `INSERT INTO order_items (order_id, product_id, product_name, unit_price_paise, quantity)
        SELECT id, $2, $3, $4, $5 FROM orders WHERE order_number = $1 AND NOT EXISTS (
          SELECT 1 FROM order_items AS existing
          WHERE existing.order_id = orders.id AND existing.product_id = $2 AND existing.quantity = $5
        )`,
-      [item.orderNumber, item.productId, item.productName, item.unitPricePaise, item.quantity],
+      [item.orderNumber, productId, item.productName, item.unitPricePaise, item.quantity],
     );
   }
   for (const dataset of demoDatasets) {
@@ -658,6 +697,7 @@ export async function seedAdminData(database: Database) {
     // already in place. The row stays in the outbox either way.
     await tryDeliverPendingMail(database);
   }
+  return { unattachedOrderItems };
 }
 
 async function resetDataset(database: Database, dataset: DemoDatasetKey) {
@@ -670,7 +710,14 @@ async function resetDataset(database: Database, dataset: DemoDatasetKey) {
   if (dataset === 'partners') await database.query('DELETE FROM partner_salons');
   if (dataset === 'customers') await database.query('DELETE FROM customers');
   if (dataset === 'reviews') await database.query('DELETE FROM reviews');
-  await seedAdminData(database);
+  const reseeded = await seedAdminData(database);
+  if (reseeded.unattachedOrderItems.length > 0) {
+    // A shop with no products yet: the sample orders are created, but their lines
+    // name products that are not there, so they are left out rather than written
+    // against an invented id. Worth a line in the log, because "I reseeded orders
+    // and they have no items" is otherwise a confusing thing to find.
+    console.warn(`Reseeding orders left ${reseeded.unattachedOrderItems.length} line(s) out: this database has no matching products.`);
+  }
   await database.query(
     'UPDATE demo_datasets SET visible = TRUE, seeded = TRUE, updated_at = NOW() WHERE key = $1',
     [dataset],
@@ -761,7 +808,9 @@ async function syncNeonIntoLocal(body: unknown): Promise<AdminResult> {
 export function createAdminHandlers(database: Database) {
   let seeded: Promise<void> | undefined;
   const ensureSeeded = () => {
-    seeded ??= seedAdminData(database).catch((error: unknown) => {
+    // Discarded here: this is the boot path on an empty database, where the
+    // catalogue is not written, so unattached order lines are expected.
+    seeded ??= seedAdminData(database).then(() => undefined).catch((error: unknown) => {
       console.error('Unable to seed admin data', error);
       // A rejected promise must not stay cached, or every later request would
       // replay a failure that has already been fixed.
@@ -1339,6 +1388,13 @@ async function listPages() {
     const [resource, ...rest] = request.segments;
     const method = request.method.toUpperCase();
     const id = rest[0];
+    // `admin_sessions.token` is a `uuid`, so a token that is not one cannot
+    // match a session however long somebody keeps sending it. Handing it to
+    // Postgres instead raises `22P02`, which escapes as a 500 and a stack
+    // trace: a stale token in localStorage, a truncated copy and a stray
+    // header would all read as the console being broken. It is an ordinary
+    // failed sign-in, so it is treated as one before any query runs.
+    const session = sessionToken(request.token);
 
     if (resource === 'session') {
       if (method === 'POST') {
@@ -1359,7 +1415,7 @@ async function listPages() {
         return { status: 201, body: { token, expiresAt: expiresAt.toISOString(), user: mapUser(row) } };
       }
       if (method === 'DELETE') {
-        if (request.token) await database.query('DELETE FROM admin_sessions WHERE token = $1', [request.token]);
+        if (session) await database.query('DELETE FROM admin_sessions WHERE token = $1', [session]);
         return { status: 200, body: { message: 'Signed out of the console.' } };
       }
       return fail(405, 'method_not_allowed', 'Use POST to sign in and DELETE to sign out.');
@@ -1383,7 +1439,7 @@ async function listPages() {
       if (method === 'POST' && id === 'confirm') return confirmPasswordReset(request.body);
     }
 
-    const user = await currentUser(request.token);
+    const user = await currentUser(session);
     if (!user) {
       return fail(401, 'unauthenticated', 'Sign in to the console to continue.');
     }
@@ -1429,6 +1485,47 @@ async function listPages() {
         if (method !== 'GET') return fail(405, 'method_not_allowed', 'The local database report is read-only.');
         return { status: 200, body: describeLocalDatabase(database) };
       }
+    }
+
+    /**
+     * Generating a fresh owner password on demand.
+     *
+     * The schedule in `owner-password.ts` already rotates this account every
+     * week; this is the button for the times a person needs it to happen now -
+     * a suspected compromise, a lost mailbox, a contractor leaving.
+     *
+     * Gated on the role rather than on the address, and always checked again
+     * here even though the caller has a session: a session proves who somebody
+     * is, not what they are allowed to do, and this endpoint hands over the
+     * account that cannot be locked out of the deployment. `rotateOwnerPassword`
+     * revokes every session as it goes, which includes the caller's, so the
+     * response is the last thing this session sees.
+     *
+     * Nothing in the response is a secret. The password is written to the outbox
+     * and emailed; it is never returned, logged, or held in the browser.
+     */
+    if (resource === 'owner-password') {
+      if (user.role !== superAdminRole) {
+        return fail(403, 'forbidden', `Only the ${superAdminRole} account can generate a new owner password.`);
+      }
+      if (method !== 'POST') return fail(405, 'method_not_allowed', 'Use POST to generate a new owner password.');
+      if (id && id !== 'generate') return fail(404, 'not_found', 'That endpoint does not exist.');
+
+      const result = await rotateOwnerPassword(database);
+      if (!result.rotated) {
+        return fail(409, 'owner_missing', 'There is no owner account to give a password to. Seed the console first.');
+      }
+      return {
+        status: 200,
+        body: {
+          rotated: true,
+          email: result.email,
+          sessionsRevoked: result.sessionsRevoked,
+          // Deliberately absent: the password. It exists in the outbox row and in
+          // the owner's inbox and nowhere else.
+          nextRotationDays: superAdminRotationDays,
+        },
+      };
     }
 
     if (resource === 'summary') {
@@ -1639,13 +1736,13 @@ async function listPages() {
         if (!(await verifyPassword(parsed.data.currentPassword, String(row.password_hash)))) {
           return fail(400, 'wrong_password', 'The current password does not match. Nothing was changed.');
         }
-        await setPassword(id, parsed.data.newPassword, request.token);
+        await setPassword(id, parsed.data.newPassword, session);
         return { status: 200, body: { message: 'Password changed. Other sessions were signed out.' } };
       }
       if (id && rest[1] === 'recover' && method === 'POST') {
         const parsed = passwordRecoverSchema.safeParse(request.body);
         if (!parsed.success) return fail(400, 'invalid_password', parsed.error.issues[0]?.message ?? 'Check the new password and try again.');
-        return recoverPassword(id, parsed.data.newPassword, request.token ?? null);
+        return recoverPassword(id, parsed.data.newPassword, session);
       }
       if (id && (method === 'PATCH' || method === 'PUT')) {
         const parsed = userUpdateSchema.safeParse(request.body);

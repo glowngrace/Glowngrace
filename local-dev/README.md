@@ -52,6 +52,7 @@ match the old password or running `npm run db:destroy` and starting over.
 | Schema | `db/init.sql` is applied by the image on the first start, when the volume is still empty. |
 | Migrations | `db/migrations/*.sql`, applied by `npm run db:migrate`. All `IF NOT EXISTS`, so re-running is safe. |
 | Catalogue | `npm run db:seed`. Idempotent: it only inserts the bundled products when `products` is empty. |
+| Order | The catalogue is seeded **before** the sample orders, because `order_items.product_id` is resolved from `products` by name. Lines whose product name matches nothing are skipped and reported. |
 
 So a brand-new volume gets `init.sql` from the image and then every migration on
 top of it, which is why the migrations have to be safe to run against a schema that

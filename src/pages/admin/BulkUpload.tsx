@@ -85,6 +85,13 @@ export function BulkUpload({ dataset, plural }: { dataset: BulkDatasetKey; plura
         id={`bulk-${dataset}`}
         type="file"
         accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv"
+        // `sr-only` hides this from the eye without taking it out of the tab
+        // order, so a keyboard or screen-reader user reaches it directly and it
+        // has to announce itself. Without a name it is announced as an unlabelled
+        // file control, which is worse than the button that normally opens it.
+        // The template's singular reads as a sentence ("Upload a product from a
+        // spreadsheet"); its plural would not - there is no "a products".
+        aria-label={`Upload a ${template.label.toLowerCase()} from a spreadsheet`}
         aria-describedby={`bulk-${dataset}-note`}
         onChange={(event) => { const file = event.currentTarget.files?.[0]; if (file) void upload(file); }}
       />
