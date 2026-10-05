@@ -1134,6 +1134,9 @@ button.admin-stat:hover { border-color: var(--a-rose); transform: translateY(-2p
 .admin-field textarea { min-height: 80px; resize: vertical; line-height: 1.55; }
 .admin-field input::placeholder, .admin-field textarea::placeholder { color: #b6a9b0; }
 .admin-field input:focus, .admin-field select:focus, .admin-field textarea:focus { border-color: var(--a-rose); outline: 2px solid rgb(201 115 127 / 22%); }
+/* A field the operator cannot change reads as settled, not broken: muted and flat
+   rather than greyed to the point of looking disabled by an error. */
+.admin-field input:disabled, .admin-field select:disabled, .admin-field textarea:disabled { background: #f6f2f0; color: var(--a-muted); border-color: #e6ddd8; cursor: not-allowed; -webkit-text-fill-color: var(--a-muted); }
 .admin-form-actions { display: flex; flex-wrap: wrap; gap: 9px; }
 .admin-alert-inline { padding: 10px 12px; border: 1px solid #e4c3c3; border-radius: var(--a-r); background: var(--a-bad-bg); color: var(--a-bad); font-size: .79rem; }
 .admin-alert-inline[role='note'] { border-color: var(--a-line); background: var(--a-cream-2); color: var(--a-soft); }

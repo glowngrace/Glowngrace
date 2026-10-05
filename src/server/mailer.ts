@@ -293,7 +293,110 @@ export async function tryDeliverPendingMail(database: Database) {
 }
 
 /**
+ * Whether anything is still owed a delivery attempt.
+ *
+ * Separate from `deliverPendingMail` because the caller on the request path needs
+ * to know the answer without paying for a send. This is one indexed lookup against
+ * the partial index on pending owner credentials, which on a store that is not
+ * Neon is a fraction of a millisecond and on Neon is a query the pooler already
+ * has warm.
+ */
+export async function hasPendingMail(database: Database): Promise<boolean> {
+  const pending = await database.query(
+    `SELECT 1 FROM email_outbox
+     WHERE sent_at IS NULL AND kind = $1
+     LIMIT 1`,
+    [deliverableKind],
+  );
+  return pending.rows.length > 0;
+}
+
+/**
+ * One delivery pass at a time, per process.
+ *
+ * Module scope rather than function scope, and that is the whole point. Two
+ * concurrent admin requests both finding the same pending row would open two
+ * connections and could send the same credential twice, which is the one outcome
+ * the `sent_at` marker exists to prevent. A local variable inside the function
+ * would be fresh on every call and guard nothing.
+ *
+ * Reset in a `finally`, so a pass that throws or a transport that hangs cannot
+ * wedge the console's mail off permanently - which would trade a duplicate send
+ * for a silent one, and the silent one is worse.
+ */
+let passInFlight = false;
+
+/**
+ * Hands any queued owner credential to the relay, on whatever request happens to
+ * arrive next.
+ *
+ * The reason this exists: `startMailDelivery` owns the retry, and it is started by
+ * the Express server only. On Vercel there is no Express server — every request is
+ * a fresh function that freezes the moment it answers — so an interval never runs
+ * there. A rotation whose first send attempt failed wrote the row, logged the
+ * failure and left `sent_at` null, and then nothing ever picked it up. The design
+ * assumes "the next pass tries again", and on serverless there is no next pass.
+ *
+ * Rather than a background timer, the retry rides along on requests. An admin
+ * request is a good clock: it only happens when somebody is using the console, and
+ * the console is where a person who needs the password already is. So the first
+ * admin request after a failed send retries it, which is exactly the moment the
+ * password is wanted.
+ *
+ * Two rules keep this from costing anything in the ordinary case:
+ *
+ *   The queue is checked first and the pass only runs if something is waiting. An
+ *   empty outbox - which is almost always - costs one indexed lookup and no
+ *   network at all, so there is no SMTP connection opened on the request path
+ *   unless a password genuinely needs delivering.
+ *
+ *   The pass is not awaited. It is fired and reported on, so a slow relay adds
+ *   nothing to the response the admin is waiting on. The response goes back as
+ *   soon as the router has its own answer. A send that outlives the function is
+ *   lost, but the row stays unsent and the next request tries again, which is the
+ *   same guarantee the Express schedule gives - and unlike a fire-and-forget send
+ *   it never marks a row sent without having sent it.
+ *
+ * A throw is logged and swallowed, for the reason every other call here swallows
+ * one: the password cannot be regenerated, and nothing about the request that
+ * happened to trigger the retry should fail because mail is down.
+ *
+ * The returned promise resolves when the pass settles. Nothing on the request path
+ * awaits it - `void tryDeliverOnRequest(...)` is the whole point - but it is
+ * returned so that a caller which genuinely needs to know the pass finished can
+ * wait, rather than the guard above being a lock that only a timeout can clear.
+ */
+export function tryDeliverOnRequest(
+  database: Database,
+  options: {
+    config?: MailConfig | null;
+    transport?: Parameters<typeof deliverOutboxMessage>[2];
+  } = {},
+): Promise<void> {
+  if (passInFlight) return Promise.resolve();
+  passInFlight = true;
+
+  return (async () => {
+    try {
+      if (!(await hasPendingMail(database))) return;
+      const { attempted, delivered } = await deliverPendingMail(database, options);
+      if (delivered > 0) console.log(`Owner credentials waiting to be sent: ${attempted}, sent: ${delivered}.`);
+    } catch (error) {
+      console.error('Unable to deliver pending mail. Anything still queued will be sent on the next request.', error);
+    } finally {
+      passInFlight = false;
+    }
+  })();
+}
+
+/**
  * Starts the delivery pass and returns a way to stop it.
+ *
+ * Only meaningful for the Express server. On Vercel this never runs — the function
+ * is frozen between requests — so `tryDeliverOnRequest` is what carries the retry
+ * there. Both are kept: the schedule is the one that works without anybody using
+ * the console, and the request path is the one that works without a long-running
+ * process.
  *
  * The interval is unref'd so importing the server from a script or a test is never
  * held open by it, and a failure is logged rather than thrown: mail being down is

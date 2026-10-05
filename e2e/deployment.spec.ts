@@ -57,6 +57,25 @@ test('no request on a built page returns 404 or 500', async ({ page }) => {
   expect(failures).toEqual([]);
 });
 
+test('a Vercel deployment without a database reports itself as an error, not as healthy', async ({ request }) => {
+  // The regression this exists for: production was serving from the in-memory store
+  // for a week because the database variable was missing from the project settings,
+  // and /api/health answered `status: ok` the whole time. Every request succeeded, so
+  // nothing alerted and nothing failed a check, while every write was discarded on the
+  // next cold start.
+  //
+  // The status is still 200 - a body that says `error` is a successful answer to the
+  // question - so this asserts the payload rather than the code.
+  const response = await request.get('/api/health');
+  expect(response.status()).toBe(200);
+  const report = await response.json() as { status?: string; store?: string; reason?: string };
+  if (process.env.VERCEL) {
+    expect(report.status, report.reason).toBe('error');
+    expect(report.store).toBe('memory');
+    expect(report.reason).toContain('NEON_DATABASE_URL');
+  }
+});
+
 test('API requests still reach the API layer and are never rewritten to the single-page app', async ({ request }) => {
   const products = await request.get('/api/products');
   expect(products.status()).toBe(200);
@@ -66,7 +85,10 @@ test('API requests still reach the API layer and are never rewritten to the sing
   const health = await request.get('/api/health');
   expect(health.status()).toBe(200);
   expect(health.headers()['cache-control']).toContain('no-store');
-  expect(await health.json()).toMatchObject({ status: 'ok', store: 'memory', productCount: 0 });
+  // `ok` because this test suite runs the in-memory store outside Vercel, which is
+  // the legitimate case. The Vercel case is asserted separately below, because it is
+  // the one that silently ships and the whole reason the distinction exists.
+  expect(await health.json()).toMatchObject({ status: 'ok', store: 'memory', productCount: 0, mailPending: 0 });
 
   // /api/admin/products/11 is the path the old `[...path]` function could not
   // match. It belongs here so a nested console route can never fall through to

@@ -1,5 +1,6 @@
 import { createHandlers as createStorefrontHandlers, type Database } from './handlers.js';
 import { createAdminHandlers } from './admin.js';
+import { tryDeliverOnRequest } from './mailer.js';
 
 export type RawRequest = {
   method?: string;
@@ -36,12 +37,21 @@ export function createApiRouter(database: Database) {
     const method = (request.method ?? 'GET').toUpperCase();
 
     if (path === '/api/admin' || path.startsWith('/api/admin/')) {
-      return admin.handle({
+      const result = await admin.handle({
         method,
         segments: segmentsAfter(path, '/api/admin'),
         body: request.body,
         token: bearerToken(request.headers),
       });
+      // Not awaited, and after the handler rather than before it: the response goes
+      // back as soon as the router has its own answer, and a queued owner credential
+      // rides out on this request rather than on a timer that does not exist on a
+      // serverless deployment. Fired on every admin request including the failures,
+      // because a retry that only ran on success would skip exactly the requests
+      // that follow a bad moment. It checks the queue first, so an empty outbox
+      // costs one indexed lookup and opens no connection.
+      tryDeliverOnRequest(database);
+      return result;
     }
 
     if (path === '/api/site/pages') {

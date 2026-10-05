@@ -9,7 +9,14 @@ The shop runs on **PostgreSQL**. Which PostgreSQL depends on one switch.
 
 There is also an in-memory store, kept for the unit tests that never open a socket.
 A process with no connection string and no flag uses it, and `/api/health` then says
-`"store": "memory"`. Nothing in development or production takes that path.
+`"store": "memory"`. Nothing in development or production is *meant* to take that
+path.
+
+On Vercel it reports `"status": "error"` rather than `ok`, and names the fix. That is
+deliberate: the in-memory store answers every request successfully while keeping
+nothing, so a deployment missing its database variable looks like a healthy site right
+up until a cold start discards it. It was, in fact, live that way - see
+[`/api/health` on a deployment with no database](#api-health-on-a-deployment-with-no-database).
 
 With `USE_LOCAL_DATABASE=true`, a `DATABASE_URL` that resolves to a remote host is
 **refused** rather than obeyed. Local work must never read or write production by
@@ -113,10 +120,38 @@ response, so a screen recording, a shared screen or the network tab has nothing
 to pick up. If the mail does not arrive, generate another one — that is cheap and
 safe to repeat, which is a better failure mode than a password on a page.
 
+The destination is shown in a fixed field — the owner address, prefilled, readonly and
+disabled. Nobody can send the owner password somewhere else by typing over it, and the
+address is on screen *before* anything is pressed, so nobody discovers at the last
+moment that they cannot reach the mailbox.
+
+The page also reads `/api/health` on arrival. If the deployment has no database, or no
+mail settings, it says which and disables the button rather than reporting a rotation
+that cannot survive the next request — see
+[`/api/health` on a deployment with no database](#api-health-on-a-deployment-with-no-database).
+An unreachable health route is treated as unknown, not as a fault, so a network hiccup
+does not take a working feature away.
+
 The page hiding the button is a courtesy. The guard that counts is on the server:
 the endpoint re-reads the session and answers `403` to anything but the owner
 role, so it is safe to reach by typing the URL and safe to call directly. Both
 gates are covered by tests.
+
+### How the retry reaches a serverless deployment
+
+A rotation whose first send attempt failed leaves the row in `email_outbox` with
+`sent_at` null, and something later has to try again. Locally that is
+`startMailDelivery`, an interval started by the Express server.
+
+Vercel has no such server. Every request is its own function, frozen the moment it
+answers, so no interval ever fires and nothing was retrying a failed send. The design
+assumed "the next pass tries again"; on serverless there is no next pass.
+
+So the retry also rides along on admin requests. An empty outbox costs one indexed
+lookup and no network, and a pass only runs if something is waiting, so the ordinary
+request path is unaffected. The pass is fired rather than awaited — a slow relay adds
+nothing to the response — and one pass runs at a time, so two concurrent requests
+cannot send the same credential twice.
 
 ### Getting the password into an inbox
 
@@ -289,13 +324,43 @@ where it is remote, and no connection string is echoed back.
 | `status` | Meaning | Fix |
 | --- | --- | --- |
 | `ok` (HTTP 200) | The process came up with its tables. | Nothing. |
-| `error` (HTTP 503) | The store could not be read. `reason` explains which. | `npm run db:check`, then restart. |
+| `error` (HTTP 503) | The store could not be read, or the deployment has no database at all. `reason` explains which. | `npm run db:check`, then restart. Or see below. |
 
 `store` is `postgres` or `memory`. `tables`, `rows` and `productCount` describe
 **the database this process is connected to**. Against `memory` they describe this
 instance and return to zero when it is replaced; against PostgreSQL they survive a
 restart, and on a deployed Neon they are the production numbers, which is worth
 remembering before pasting `/api/health` into a chat.
+
+`mail` is `configured` or `absent`, and `mailPending` counts owner credentials written
+but not yet sent. `configured` only means the settings were *read* — whether the relay
+accepts mail is something only a real send would find out. `mailPending` staying above
+zero is a send that failed and has not been retried yet; see
+[How the retry reaches a serverless deployment](#how-the-retry-reaches-a-serverless-deployment).
+
+### `/api/health` on a deployment with no database
+
+On Vercel, in-memory is not a choice — it is what happens when the database variable
+is missing from the project settings. This is not hypothetical: the deployment served
+from memory for a week while `/api/health` answered `status: ok` and every page worked,
+because nothing in the request path can tell that a write went into a store that will
+be thrown away. Nothing alerted. The first sign of trouble would have been a customer
+reporting a missing order.
+
+So on Vercel the report is `status: "error"` with `reason` naming the variable to set:
+
+```
+{ "status": "error", "store": "memory", "reason": "This deployment has no database configured… Set NEON_DATABASE_URL…" }
+```
+
+The HTTP status is still 200, because a body that says `error` is a successful answer
+to the question. Off Vercel the same store stays `ok`: in memory is a legitimate choice
+for an unconfigured checkout and for the unit tests, and only on a deployment does it
+mean a setting is missing.
+
+`/superadmin/ggpass` reads this and refuses to generate a password when the store is
+`memory` or mail is `absent`, rather than reporting a rotation that cannot survive the
+next request.
 
 ## The store's schema
 

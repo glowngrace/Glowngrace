@@ -52,6 +52,13 @@ const generated = {
 async function stubConsole(page: Page, options: {
   user?: typeof owner;
   onGenerate?: () => { status: number; json: unknown } | null;
+  /**
+   * What `/api/health` answers. Defaults to a healthy deployment, because that is
+   * the case every other test is about. A deployment with no database or no mail is
+   * the thing the new warnings exist for, and a test that leaves this at the default
+   * would silently stop covering them the moment somebody tightened the page.
+   */
+  health?: Record<string, unknown> | null;
 } = {}) {
   const user = options.user ?? owner;
   const generateCalls: Array<Record<string, unknown> | null> = [];
@@ -74,6 +81,15 @@ async function stubConsole(page: Page, options: {
       ? route.fulfill({ status: override.status, json: override.json })
       : route.fulfill({ json: generated });
   });
+
+  // Public health route, not an admin one. `null` means unreachable, which the page
+  // has to treat as unknown rather than as a fault.
+  const health = options.health === undefined
+    ? { status: 'ok', store: 'postgres', mail: 'configured', mailPending: 0 }
+    : options.health;
+  await page.route('**/api/health', (route: Route) => (
+    health === null ? route.abort() : route.fulfill({ json: health })
+  ));
 
   return { generateCalls };
 }
@@ -116,7 +132,89 @@ test.describe('/superadmin/ggpass', () => {
     await expect(page.getByRole('button', { name: 'Generate a new password' })).toBeVisible();
     // The destination is on screen before anything is pressed, so nobody
     // discovers at the last moment that they cannot reach the mailbox.
-    await expect(page.getByText('glowngracebiz@gmail.com').first()).toBeVisible();
+    await expect(page.getByLabel('Send the new password to')).toHaveValue('glowngracebiz@gmail.com');
+  });
+
+  test('shows the destination as a fixed field rather than something to type', async ({ page }) => {
+    await stubConsole(page);
+    await openScreen(page);
+
+    const field = page.getByLabel('Send the new password to');
+    await expect(field).toHaveValue('glowngracebiz@gmail.com');
+    // Readonly as well as disabled: the value is the owner address by construction,
+    // not an editable default, and a browser autofill must not be able to change it.
+    await expect(field).toHaveAttribute('readonly', '');
+    await expect(field).toBeDisabled();
+    await expect(page.getByText('Fixed to the Super Admin account.')).toBeVisible();
+  });
+
+  test('refuses to generate on a deployment with no database, and says why', async ({ page }) => {
+    const { generateCalls } = await stubConsole(page, {
+      health: {
+        status: 'error',
+        store: 'memory',
+        mail: 'configured',
+        mailPending: 0,
+        reason: 'This deployment has no database configured.',
+      },
+    });
+    await openScreen(page);
+
+    // Without this the page reports a successful rotation and the password exists
+    // only until the next cold start, with nothing on screen to say so.
+    await expect(page.getByRole('heading', { name: 'This deployment has no database.' })).toBeVisible();
+    await expect(page.getByText('NEON_DATABASE_URL').first()).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Generate a new password' })).toBeDisabled();
+    expect(generateCalls).toHaveLength(0);
+  });
+
+  test('refuses to generate when mail is not configured, and says why', async ({ page }) => {
+    const { generateCalls } = await stubConsole(page, {
+      health: { status: 'ok', store: 'postgres', mail: 'absent', mailPending: 0 },
+    });
+    await openScreen(page);
+
+    await expect(page.getByRole('heading', { name: 'Mail is not configured on this deployment.' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Generate a new password' })).toBeDisabled();
+    expect(generateCalls).toHaveLength(0);
+  });
+
+  test('tells a signed-out owner to fix the deployment rather than to sign in again', async ({ page }) => {
+    // With no database there is no account to sign in as, so the usual "sign in and
+    // come back" would send the owner round in a circle.
+    await stubConsole(page, {
+      health: {
+        status: 'error',
+        store: 'memory',
+        mail: 'configured',
+        mailPending: 0,
+        reason: 'This deployment has no database configured.',
+      },
+    });
+    await page.route('**/api/admin/me', (route) => route.fulfill({
+      status: 401,
+      json: { error: 'unauthenticated', message: 'Sign in to continue.' },
+    }));
+
+    await page.goto('/superadmin/ggpass');
+
+    await expect(page.getByRole('heading', { name: 'This deployment has no database, so signing in is impossible.' })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Sign in' })).toHaveCount(0);
+  });
+
+  test('still offers the button when the health route cannot be reached', async ({ page }) => {
+    // Unreachable is not the same as broken. Blocking on a network hiccup would take
+    // away a working feature on the strength of a signal that never arrived.
+    const { generateCalls } = await stubConsole(page, { health: null });
+    await openScreen(page);
+
+    await expect(page.getByRole('heading', { name: 'This deployment has no database.' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Generate a new password' })).toBeEnabled();
+
+    await page.getByRole('button', { name: 'Generate a new password' }).click();
+    await page.getByRole('dialog').getByRole('button', { name: 'Yes, generate it' }).click();
+    await expect(page.getByRole('status')).toContainText('A new password has been sent to');
+    expect(generateCalls).toHaveLength(1);
   });
 
   test('never renders the password it generated', async ({ page }) => {

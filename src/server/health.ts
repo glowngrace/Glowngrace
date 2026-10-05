@@ -1,5 +1,6 @@
 import { database, resolvedDatabase, store, storeKind, tables } from './database.js';
 import { adminTables, maskHost, requiredTables } from './config.js';
+import { mailConfigFromEnv } from './mailer.js';
 
 /**
  * What /api/health reports.
@@ -9,7 +10,10 @@ import { adminTables, maskHost, requiredTables } from './config.js';
  *
  *   memory    there is no database. The only honest question is whether this
  *             process came up with its tables, so the report describes the
- *             in-process store and nothing else.
+ *             in-process store and nothing else - except on Vercel, where memory
+ *             means a deployment variable is missing rather than a choice, and
+ *             where losing every write on restart is a production fault, so the
+ *             status is `error` with the fix named.
  *   postgres  there is a database, so the report says which one, whether it
  *             answered, how long it took, and which tables are missing. A
  *             migrated-but-empty database is `ok` with zero rows; an unmigrated
@@ -25,6 +29,25 @@ export type HealthReport = {
   tables: number;
   rows: Record<string, number>;
   productCount: number;
+  /**
+   * Whether the owner's generated password can actually leave the machine.
+   *
+   * Reported because the alternative was a deployment that believed it was
+   * emailing owner credentials for weeks and never did: the settings were named
+   * in a shape the code does not read, so every send reported "not configured",
+   * nothing threw, and the outbox quietly became the only copy. A health check
+   * that says `absent` is the thing that would have caught it on day one.
+   *
+   * Two values rather than a boolean, because they need different fixes:
+   *
+   *   absent     the settings are not readable. Either unset or misspelled, and
+   *              the password is going to the outbox and nowhere else.
+   *   configured the settings were read. It says nothing about whether the relay
+   *              accepts mail, which only a real send would find out.
+   */
+  mail?: 'configured' | 'absent';
+  /** How many owner credentials are written but not yet sent. */
+  mailPending?: number;
   database?: {
     variable: string;
     provider: string;
@@ -53,15 +76,39 @@ const cacheMs = (() => {
 let cached: { expiresAt: number; report: HealthReport } | null = null;
 
 function memoryReport(): HealthReport {
+  const mail: HealthReport['mail'] = mailConfigFromEnv() ? 'configured' : 'absent';
+  // In memory is a legitimate choice in exactly two places: a checkout that has
+  // never been configured, and a test. Both run on a developer's own machine.
+  // On Vercel it is not a choice at all - it is what happens when the database
+  // variable is missing from the project settings, and it looks exactly like a
+  // working app: every request succeeds, every write is accepted, and every
+  // process restart throws the lot away.
+  //
+  // That is the failure worth being loud about. Reported as `ok`, a deployment with
+  // no database is indistinguishable from a healthy one, so nothing alerts, nothing
+  // fails a check, and the first sign of trouble is a customer reporting that their
+  // order vanished. Reported as `error`, it is obvious the moment anybody looks.
+  const ephemeral = Boolean(process.env.VERCEL);
   try {
     const rows: Record<string, number> = {};
     for (const table of tables) rows[table.name] = store.rows.get(table.name)?.length ?? 0;
     return {
-      status: 'ok',
+      status: ephemeral ? 'error' : 'ok',
       store: 'memory',
       tables: tables.length,
       rows,
       productCount: rows.products ?? 0,
+      // Said rather than omitted: the in-memory store has no outbox, so nothing is
+      // queued and nothing ever will be, and a reader should not have to guess
+      // whether the field is missing because it is unknown or not applicable.
+      mail,
+      mailPending: 0,
+      ...(ephemeral
+        ? {
+            reason:
+              'This deployment has no database configured, so it is running on an in-memory store. Every restart loses all data. Set NEON_DATABASE_URL in the Vercel project environment variables and redeploy.',
+          }
+        : {}),
     };
   } catch (error) {
     return {
@@ -70,6 +117,8 @@ function memoryReport(): HealthReport {
       tables: 0,
       rows: {},
       productCount: 0,
+      mail,
+      mailPending: 0,
       reason: error instanceof Error ? error.message : 'The in-memory store could not be read.',
     };
   }
@@ -92,6 +141,12 @@ async function postgresReport(): Promise<HealthReport> {
     tables: 0,
     rows: {},
     productCount: 0,
+    // Computed once here rather than per branch. The relay's reachability is not
+    // something a health check can answer - only a real send would - so this is a
+    // claim about the settings being readable, which is the half that goes wrong by
+    // being misspelled.
+    mail: mailConfigFromEnv() ? 'configured' : 'absent',
+    mailPending: 0,
     database: {
       variable,
       provider: description.provider,
@@ -132,12 +187,29 @@ async function postgresReport(): Promise<HealthReport> {
   const rows: Record<string, number> = {};
   for (const table of allTables) rows[table] = Number(row[table] ?? 0);
 
+  // How many owner credentials are written but still unsent. Non-zero on a store
+  // with no pending work is the signal worth having: it means a send failed and
+  // nothing has retried it yet, and on a serverless deployment that is the only
+  // place it will ever be noticed. Counted rather than merely tested for, because a
+  // queue that grows is the difference between a blip and a relay that is refusing
+  // every message.
+  let mailPending = 0;
+  if (rows.email_outbox !== undefined) {
+    const pending = await database.query(
+      `SELECT count(*)::int AS total FROM email_outbox
+       WHERE sent_at IS NULL AND kind = 'owner-credentials'`,
+    );
+    mailPending = Number((pending.rows[0] as { total: number } | undefined)?.total ?? 0);
+  }
+
   return {
     status: 'ok',
     store: 'postgres',
     tables: allTables.length - missingAdminTables.length,
     rows,
     productCount: rows.products ?? 0,
+    mail: summary.mail,
+    mailPending,
     database: {
       variable,
       provider: description.provider,

@@ -144,8 +144,12 @@ test.describe('the real owner password round trip', () => {
     await page.goto('/superadmin/ggpass');
 
     await expect(page.getByRole('heading', { name: 'Owner password' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Generate a new password' })).toBeVisible();
-    await expect(page.getByText(ownerEmail).first()).toBeVisible();
+    // Enabled rather than merely present: this deployment has a database and mail, so
+    // the deployment warnings are absent and the button is live. Against a broken
+    // deployment it renders disabled, and `toBeVisible` would pass for a control that
+    // cannot do anything.
+    await expect(page.getByRole('button', { name: 'Generate a new password' })).toBeEnabled();
+    await expect(page.getByLabel('Send the new password to')).toHaveValue(ownerEmail);
     await auditPage(page, '/superadmin/ggpass (real)');
   });
 
