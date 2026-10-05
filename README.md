@@ -118,6 +118,53 @@ the endpoint re-reads the session and answers `403` to anything but the owner
 role, so it is safe to reach by typing the URL and safe to call directly. Both
 gates are covered by tests.
 
+### Getting the password into an inbox
+
+Delivery needs a mail server, and nothing here works without one being named. The
+password is generated and stored either way — a rotation cannot fail because mail
+is unavailable — but until the settings below are present the `email_outbox` row is
+the only copy, and it has to be read out of the table by hand:
+
+```sql
+SELECT body FROM email_outbox WHERE kind = 'owner-credentials'
+ORDER BY created_at DESC LIMIT 1;
+```
+
+With them set, the same row is emailed and `sent_at` is stamped on it. That column
+is the delivery marker: `NULL` means the message is still the only copy of that
+password and the next pass retries it, and a timestamp means it went out and must
+never be repeated — a superseded message is never sent even after a rotation,
+because it holds a password that no longer opens anything.
+
+Gmail needs an **App Password**, not the account password. Create one at
+<https://myaccount.google.com/apppasswords> with 2-Step Verification on; it is 16
+characters and Gmail displays it with spaces, which must be stripped.
+
+Both spellings of each setting are read, and `SMTP_*` wins where both are set —
+so a hosting provider's own names work without being translated first:
+
+| `SMTP_*` | `MAIL_*` alias | Default |
+| --- | --- | --- |
+| `SMTP_HOST` | `MAIL_HOST` | required |
+| `SMTP_PORT` | `MAIL_PORT` | `587` |
+| `SMTP_USER` | `MAIL_USERNAME` | required |
+| `SMTP_PASSWORD` | `MAIL_PASSWORD` | required |
+| `SMTP_SECURE` | `MAIL_ENCRYPTION` | `true` on port 465, `false` everywhere else |
+| `MAIL_FROM` | `MAIL_FROM_ADDRESS` | `SMTP_USER` |
+| — | `MAIL_FROM_NAME` | none; the inbox shows the bare address |
+
+The two encryption spellings are deliberately not interchangeable.
+`SMTP_SECURE` is a boolean about the connection mode; `MAIL_ENCRYPTION` names the
+protocol, so `tls`/`starttls` means *negotiated after connecting* (port 587) and
+`ssl` means *encrypted up front*. Reading `MAIL_ENCRYPTION=tls` as implicit TLS
+would fail the connection against a protocol error that names neither the setting
+nor the port, so it is not what it does. Port 465 always means implicit TLS — no
+relay offers STARTTLS there — and there is deliberately no setting that ships the
+password in plain text.
+
+`MAIL_FROM_NAME` is quoted and bracketed for you, because an unquoted display name
+containing a space parses as two addresses.
+
 ## Environment
 
 Nothing is hard-coded and no secret is committed. `.env` is ignored by Git and is
@@ -137,7 +184,7 @@ real passwords go. `.env.local.example` is the committed starting point.
 | `DATABASE_POOL_MAX` | Pool | Defaults to `1`. Every request is a single short query, and a second connection on a pooled endpoint buys a second compute slot, not throughput. |
 | `PORT` | Local API | Express API port (defaults to `3001`). |
 | `VITE_API_BASE_URL` | Vite | Browser-visible API prefix; keep this as `/api`. Never put secrets in a `VITE_` variable. |
-| `SMTP_*`, `MAIL_FROM` | Mailer | How the owner's password is delivered. Unset means the password lands in `email_outbox` and nowhere else. |
+| `SMTP_*` / `MAIL_*`, `MAIL_FROM`, `MAIL_FROM_NAME` | Mailer | How the owner's password is delivered. Unset means the password lands in `email_outbox` and nowhere else. See [Getting the password into an inbox](#getting-the-password-into-an-inbox). |
 | `OWNER_PINNED_PASSWORD` | Seed | Not used by this project. A hand-chosen owner password, honoured only alongside `OWNER_PINNED_HOLD_UNTIL`, and both stop mattering at the next restart. See [The owner password](#the-owner-password). |
 | `OWNER_PINNED_HOLD_UNTIL` | Seed | Not used by this project. When the weekly rotation takes a pinned password back. ISO 8601, and at most 7 days out. |
 
@@ -217,6 +264,22 @@ is the account's limit and not something the script can work around.
 `DATABASE_URL` or `POSTGRES_*` in the Vercel project is dead weight at best, and at
 worst a live credential for a database this code no longer talks to. Delete it, then
 rotate anything it held.
+
+The mail settings belong in Vercel's environment too, or `/superadmin/ggpass` will
+rotate the owner password into `email_outbox` and nowhere else. The startup log
+says which it found:
+
+```
+Owner credentials will be emailed through smtp.gmail.com:587 as "GG Security" <…>.
+```
+
+If it instead says `No SMTP settings found`, the names are missing or misspelled
+rather than merely unconfigured — a missing value and an unread one are the same
+failure here, and both leave the password sitting in the outbox. Set the same
+variables documented under
+[Getting the password into an inbox](#getting-the-password-into-an-inbox). The
+App Password is a live credential for the mailbox: rotate it if it has been in a
+file that was committed, a screenshot, or a chat.
 
 ## Store health
 

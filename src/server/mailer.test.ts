@@ -65,6 +65,109 @@ describe('smtp configuration', () => {
     expect(mailConfigFromEnv(base)?.from).toBe('postmaster@example.com');
     expect(mailConfigFromEnv({ ...base, MAIL_FROM: 'no-reply@glowandgrace.in' })?.from).toBe('no-reply@glowandgrace.in');
   });
+
+  it('adds the sender name to the From header, and quotes it', () => {
+    // Gmail shows the bracketed name in the inbox and the bare address on hover.
+    // Unquoted, a name with a space parses as two addresses and the message is
+    // either rejected or delivered to the wrong one.
+    const base = { SMTP_HOST: 'smtp.example.com', SMTP_USER: 'postmaster@example.com', SMTP_PASSWORD: 'x' };
+    expect(mailConfigFromEnv({ ...base, MAIL_FROM_NAME: 'GG Security' })?.from)
+      .toBe('"GG Security" <postmaster@example.com>');
+    expect(mailConfigFromEnv({ ...base, MAIL_FROM: 'no-reply@glowandgrace.in', MAIL_FROM_NAME: 'GG Security' })?.from)
+      .toBe('"GG Security" <no-reply@glowandgrace.in>');
+    // A quote or a backslash in the name would end the quoted string early and
+    // splice the rest of the header into it.
+    expect(mailConfigFromEnv({ ...base, MAIL_FROM_NAME: 'GG "Sec"\\urity' })?.from)
+      .toBe('"GG Security" <postmaster@example.com>');
+  });
+
+  describe('the MAIL_* spelling of the same settings', () => {
+    // Both spellings are in the wild for the same four facts about a relay: this
+    // project has always used SMTP_*, and a hosting provider or a framework
+    // template hands out MAIL_*. Reading only one of them means a deployment
+    // configured the other way round has no mail and no error - it just quietly
+    // never sends, which is what this started as.
+    const gmail = {
+      MAIL_HOST: 'smtp.gmail.com',
+      MAIL_PORT: '587',
+      MAIL_ENCRYPTION: 'tls',
+      MAIL_USERNAME: 'glowngracebiz@gmail.com',
+      MAIL_PASSWORD: 'app-password',
+      MAIL_FROM_ADDRESS: 'glowngracebiz@gmail.com',
+      MAIL_FROM_NAME: 'GG Security',
+    };
+
+    it('configures Gmail from the MAIL_* names alone', () => {
+      expect(mailConfigFromEnv(gmail)).toEqual({
+        host: 'smtp.gmail.com',
+        port: 587,
+        secure: false,
+        user: 'glowngracebiz@gmail.com',
+        password: 'app-password',
+        from: '"GG Security" <glowngracebiz@gmail.com>',
+      });
+    });
+
+    it('lets SMTP_* win where a deployment sets both', () => {
+      // Precedence is what makes adding the alias safe: nothing that works today
+      // changes, because anything already set under SMTP_* is still the one read.
+      expect(mailConfigFromEnv({ ...gmail, SMTP_HOST: 'smtp.example.com', SMTP_PORT: '465' })).toMatchObject({
+        host: 'smtp.example.com',
+        port: 465,
+        secure: true,
+      });
+    });
+
+    it('reads tls as STARTTLS and ssl as encryption up front', () => {
+      // The one thing that must not be got wrong: port 587 expects STARTTLS, so
+      // reading `tls` as "implicit TLS" fails the connection with a protocol error
+      // that names neither the setting nor the port. `ssl` names the other style
+      // and is honoured wherever it is asked for.
+      expect(mailConfigFromEnv({ ...gmail, MAIL_ENCRYPTION: 'tls' })?.secure).toBe(false);
+      expect(mailConfigFromEnv({ ...gmail, MAIL_ENCRYPTION: 'TLS' })?.secure).toBe(false);
+      expect(mailConfigFromEnv({ ...gmail, MAIL_ENCRYPTION: 'starttls' })?.secure).toBe(false);
+      expect(mailConfigFromEnv({ ...gmail, MAIL_ENCRYPTION: 'ssl' })?.secure).toBe(true);
+    });
+
+    it('never negotiates STARTTLS on port 465, whatever the setting says', () => {
+      // No relay offers STARTTLS on 465, so asking for it there fails at connect
+      // time. The port wins, because the port is the one that cannot be wrong.
+      expect(mailConfigFromEnv({ ...gmail, MAIL_PORT: '465' })?.secure).toBe(true);
+      expect(mailConfigFromEnv({ ...gmail, MAIL_PORT: '465', MAIL_ENCRYPTION: 'tls' })?.secure).toBe(true);
+      expect(mailConfigFromEnv({ ...gmail, MAIL_PORT: '465', MAIL_ENCRYPTION: 'none' })?.secure).toBe(true);
+    });
+
+    it('encrypts even when told not to, and falls back to the port when the word is not one', () => {
+      // A misspelling must not turn encryption off silently, and must not refuse the
+      // deployment's mail either: the port's own convention is the safe answer. And
+      // there is deliberately no way to ask for plain text - a relay that advertises
+      // no STARTTLS refuses the login anyway, so the worst case is identical.
+      expect(mailConfigFromEnv({ ...gmail, MAIL_ENCRYPTION: 'none' })?.secure).toBe(false);
+      expect(mailConfigFromEnv({ ...gmail, MAIL_ENCRYPTION: 'gibberish' })?.secure).toBe(false);
+      expect(mailConfigFromEnv({ ...gmail, MAIL_ENCRYPTION: 'gibberish', MAIL_PORT: '465' })?.secure).toBe(true);
+    });
+
+    it('still refuses to configure anything without a host, a user and a password', () => {
+      // The alias must not become a way to half-configure a transport.
+      expect(mailConfigFromEnv({ ...gmail, MAIL_HOST: '' })).toBeNull();
+      expect(mailConfigFromEnv({ ...gmail, MAIL_USERNAME: '' })).toBeNull();
+      expect(mailConfigFromEnv({ ...gmail, MAIL_PASSWORD: '' })).toBeNull();
+    });
+
+    it('recovers a host that arrived as a URL or as a bare domain', () => {
+      // nodemailer connects to a host and a port, not to a URL, so a scheme copied
+      // out of a provider's settings page fails at connect time with an error that
+      // never mentions the host. `gmail.com` on its own means the submission relay.
+      expect(mailConfigFromEnv({ ...gmail, MAIL_HOST: 'smtps://smtp.gmail.com' })?.host).toBe('smtp.gmail.com');
+      expect(mailConfigFromEnv({ ...gmail, MAIL_HOST: '://gmail.com' })?.host).toBe('smtp.gmail.com');
+      expect(mailConfigFromEnv({ ...gmail, MAIL_HOST: 'gmail.com' })?.host).toBe('smtp.gmail.com');
+      // A subdomain already names a host, so nothing is added to it - and nothing is
+      // added to any other provider either, because they do not all put their relay
+      // under `smtp.`.
+      expect(mailConfigFromEnv({ ...gmail, MAIL_HOST: 'email.example.com' })?.host).toBe('email.example.com');
+      expect(mailConfigFromEnv({ ...gmail, MAIL_HOST: 'yahoo.com' })?.host).toBe('yahoo.com');
+    });
+  });
 });
 
 describe('what may be emailed', () => {
