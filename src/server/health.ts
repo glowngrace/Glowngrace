@@ -1,5 +1,5 @@
 import { database, resolvedDatabase, store, storeKind, tables } from './database.js';
-import { adminTables, maskHost, requiredTables } from './config.js';
+import { adminTables, maskHost, requiredTables, runtimeDatabaseVariables } from './config.js';
 import { mailConfigFromEnv } from './mailer.js';
 
 /**
@@ -75,6 +75,20 @@ const cacheMs = (() => {
 
 let cached: { expiresAt: number; report: HealthReport } | null = null;
 
+/**
+ * The fix, named.
+ *
+ * Built from `runtimeDatabaseVariables` rather than written out, because this
+ * sentence once named a single variable that the README described as
+ * sync-only - so following it would not have fixed anything. Two lists that
+ * have to agree should be one list.
+ */
+export function missingDatabaseReason(): string {
+  return 'This deployment has no database configured, so it is running on an in-memory store. '
+    + `Every restart loses all data. Set one of ${runtimeDatabaseVariables.join(', ')} `
+    + 'in the Vercel project environment variables and redeploy.';
+}
+
 function memoryReport(): HealthReport {
   const mail: HealthReport['mail'] = mailConfigFromEnv() ? 'configured' : 'absent';
   // In memory is a legitimate choice in exactly two places: a checkout that has
@@ -105,8 +119,7 @@ function memoryReport(): HealthReport {
       mailPending: 0,
       ...(ephemeral
         ? {
-            reason:
-              'This deployment has no database configured, so it is running on an in-memory store. Every restart loses all data. Set NEON_DATABASE_URL in the Vercel project environment variables and redeploy.',
+            reason: missingDatabaseReason(),
           }
         : {}),
     };
