@@ -40,6 +40,8 @@ export function SuperAdminPasswordPage() {
   const [running, setRunning] = useState(false);
   const [done, setDone] = useState<{ email: string; sessionsRevoked: number } | null>(null);
   const [error, setError] = useState('');
+  const [deployment, setDeployment] = useState<Awaited<ReturnType<typeof adminApi.health>>>(null);
+  const emailId = useId();
   const cancelRef = useRef<HTMLButtonElement>(null);
   const titleId = useId();
 
@@ -52,6 +54,20 @@ export function SuperAdminPasswordPage() {
       .then((user) => { if (active) setAccount(user); })
       .catch(() => { if (active) setAccount(null); })
       .finally(() => { if (active) setChecking(false); });
+    return () => { active = false; };
+  }, []);
+
+  // Whether this deployment can actually keep the password. Worth asking for on
+  // arrival rather than after a failed generation, because the failure mode is
+  // otherwise invisible: a rotation against an unconfigured store reports success
+  // and the only copy of the password dies with the next request.
+  //
+  // Started together with the session check rather than after it, so the two land in
+  // the same paint. Waiting for the first would show "needs a signed-in owner", then
+  // swap to a database warning, which reads as the page making things up.
+  useEffect(() => {
+    let active = true;
+    void adminApi.health().then((report) => { if (active) setDeployment(report); });
     return () => { active = false; };
   }, []);
 
@@ -68,6 +84,11 @@ export function SuperAdminPasswordPage() {
       if (opener instanceof HTMLElement) opener.focus();
     };
   }, [confirming, running]);
+
+  // Whether pressing the button could do anything useful. Only a positive report of
+  // a broken deployment blocks it - an unreachable health route is unknown, and
+  // blocking on a network hiccup would take away a working feature.
+  const blocked = deployment?.store === 'memory' || deployment?.mail === 'absent';
 
   const generate = useCallback(async () => {
     setRunning(true);
@@ -101,6 +122,30 @@ export function SuperAdminPasswordPage() {
   }
 
   if (!account) {
+    // This is what the page shows on a deployment with no database, because a
+    // sign-in against an in-memory store can never succeed. Saying "sign in and
+    // come back" would send the owner in a circle; the deployment is what needs
+    // fixing, and that is worth saying instead of implying the person is at fault.
+    if (deployment?.store === 'memory') {
+      return (
+        <>
+          <PageHead crumb="Owner password" title="Owner password" sub={superAdminRole} />
+          <Panel>
+            <div className="empty-state">
+              <h2>This deployment has no database, so signing in is impossible.</h2>
+              <p>
+                The server is running on an in-memory store that is emptied on every
+                restart, which means there is no owner account to sign in as. Set{' '}
+                <code>NEON_DATABASE_URL</code> in the Vercel project environment
+                variables and redeploy. Your account and passwords are in the database and
+                are not affected - they are simply not reachable until it is connected.
+              </p>
+              <Link className="button button-dark" to="/admin">Back to the console</Link>
+            </div>
+          </Panel>
+        </>
+      );
+    }
     return (
       <>
         <PageHead crumb="Owner password" title="Owner password" sub={superAdminRole} />
@@ -140,12 +185,49 @@ export function SuperAdminPasswordPage() {
       <Panel>
         <PanelHead title="Generate a new password" sub="Emailed to the owner address. Never shown here." />
 
-        <p>
-          Generate a new password for the <strong>{superAdminRole}</strong> account
-          ({superAdminEmail}). It is emailed to that address and shown nowhere else.
-        </p>
+        {deployment?.store === 'memory' && (
+          <div className="admin-danger-confirm" role="alert">
+            <h4>This deployment has no database.</h4>
+            <p>
+              Nothing generated here can be kept: the server is running on an in-memory
+              store, so the password, the outbox row and the account itself all disappear
+              on the next restart. Set <code>NEON_DATABASE_URL</code> in the Vercel
+              project environment variables and redeploy before using this screen.
+            </p>
+          </div>
+        )}
 
-      <ul className="admin-team-list">
+        {deployment?.mail === 'absent' && (
+          <div className="admin-danger-confirm" role="alert">
+            <h4>Mail is not configured on this deployment.</h4>
+            <p>
+              The password would be written to the outbox and go nowhere, which makes
+              the outbox the only copy. Set <code>MAIL_HOST</code>, <code>MAIL_PORT</code>,{' '}
+              <code>MAIL_USERNAME</code>, <code>MAIL_PASSWORD</code>,{' '}
+              <code>MAIL_FROM_ADDRESS</code> and <code>MAIL_FROM_NAME</code> in the Vercel
+              environment variables first.
+            </p>
+          </div>
+        )}
+
+        <div className="admin-field admin-span-2" style={{ maxWidth: 420 }}>
+          <label htmlFor={emailId}>Send the new password to</label>
+          <input
+            id={emailId}
+            type="email"
+            name="email"
+            value={superAdminEmail}
+            readOnly
+            disabled
+            aria-describedby={`${emailId}-hint`}
+          />
+          <small className="admin-field-hint" id={`${emailId}-hint`}>
+            Fixed to the {superAdminRole} account. A password generated here is only ever
+            delivered to this address.
+          </small>
+        </div>
+
+        <ul className="admin-team-list">
         <li>
           <span className="admin-team-info">
             <strong>The password is never displayed here</strong>
@@ -176,7 +258,7 @@ export function SuperAdminPasswordPage() {
         <button
           className="admin-btn admin-btn-dark"
           type="button"
-          disabled={running}
+          disabled={running || blocked}
           aria-busy={running}
           onClick={() => setConfirming(true)}
         >
@@ -186,10 +268,11 @@ export function SuperAdminPasswordPage() {
 
       <p className="admin-bulk-note" role="status" aria-live="polite">
         {running && 'Replacing the password and handing it to the mail server.'}
-        {!running && done && (
+        {!running && blocked && 'Fix the deployment above, then this button becomes available.'}
+        {!running && !blocked && done && (
           <>A new password has been sent to {done.email}. Sign in with it to continue.</>
         )}
-        {!running && !done && error && <span role="alert">{error}</span>}
+        {!running && !blocked && !done && error && <span role="alert">{error}</span>}
       </p>
 
       {confirming && (

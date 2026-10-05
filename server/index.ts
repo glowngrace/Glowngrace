@@ -139,4 +139,4 @@ startMailDelivery(database);
 const mail = mailConfigFromEnv();
 console.log(mail
   ? `Owner credentials will be emailed through ${mail.host}:${mail.port} as ${mail.from}.`
-  : 'No SMTP settings found, so owner credentials stay in the outbox instead of being emailed. Set SMTP_HOST, SMTP_USER and SMTP_PASSWORD to send them.');
+  : 'No SMTP settings found, so owner credentials stay in the outbox instead of being emailed. Set SMTP_HOST (or MAIL_HOST), SMTP_USER and SMTP_PASSWORD to send them.');

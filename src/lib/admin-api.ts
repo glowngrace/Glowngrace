@@ -297,6 +297,32 @@ export const adminApi = {
     }
   },
   me: () => get<{ user: AdminUser }>('me').then((result) => result.user),
+  /**
+   * The deployment's own report on itself, read from the public health route
+   * rather than an admin one.
+   *
+   * Not through `request`, because that prefixes `/admin/` and this lives at the
+   * root, and not because it needs a session - `/api/health` is deliberately
+   * public, which is what makes it useful as a signal before anybody is signed
+   * in. A failure is returned as `null` rather than thrown: the caller is
+   * decorating a screen with a warning, and a health route that is briefly
+   * unreachable must not take the page down with it.
+   */
+  async health() {
+    try {
+      const response = await fetch(`${API_BASE_URL}/health`, { headers: { Accept: 'application/json' } });
+      if (!response.ok) return null;
+      return (await response.json()) as {
+        status?: string;
+        store?: string;
+        mail?: string;
+        mailPending?: number;
+        reason?: string;
+      };
+    } catch {
+      return null;
+    }
+  },
   summary: () => get<AdminSummary>('summary'),
   settings: () => get<StoreSettingsResponse>('settings'),
   saveSettings: (settings: unknown) => put<StoreSettingsResponse & { message: string }>('settings', settings),

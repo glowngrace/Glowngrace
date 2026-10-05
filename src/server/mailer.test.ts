@@ -2,9 +2,11 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   deliverOutboxMessage,
   deliverPendingMail,
+  hasPendingMail,
   isDeliverable,
   mailConfigFromEnv,
   startMailDelivery,
+  tryDeliverOnRequest,
   tryDeliverPendingMail,
   type MailConfig,
   type OutboxMessage,
@@ -386,5 +388,146 @@ describe('the delivery schedule', () => {
       consoleError.mockRestore();
       log.mockRestore();
     }
+  });
+});
+
+describe('the retry that rides along on requests', () => {
+  /**
+   * Why any of this exists, stated once so the tests below do not have to.
+   *
+   * The delivery *schedule* is started by the Express server. On Vercel there is no
+   * Express server: every request is a function that is frozen the moment it
+   * answers, so an interval never fires. A rotation whose first send attempt failed
+   * wrote the row, logged the failure, left `sent_at` null, and then nothing ever
+   * retried it - which quietly contradicts the promise the `sent_at` marker and the
+   * pending index are there to keep.
+   */
+
+  it('does nothing at all when the outbox is empty', async () => {
+    // The common case, and the one that has to stay free. An SMTP connection opened
+    // on every admin request would slow the console down for a queue that does not
+    // exist, so the pass is gated behind a lookup that comes back empty.
+    const { database, query } = outboxDatabase([]);
+    const sendMail = vi.fn(async () => ({ messageId: '1' }));
+
+    await tryDeliverOnRequest(database, { config, transport: { sendMail } });
+
+    // The gate query, and nothing else. No select of the queue, no send.
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(String(query.mock.calls[0]?.[0])).toContain('sent_at IS NULL');
+    expect(sendMail).not.toHaveBeenCalled();
+  });
+
+  it('delivers a queued credential on the next request', async () => {
+    const { database, marked } = outboxDatabase([
+      { id: 'm1', kind: 'owner-credentials', recipient: superAdminEmail, subject: 's', body: 'b' },
+    ]);
+
+    await tryDeliverOnRequest(database, { config, transport: { sendMail: vi.fn(async () => ({ messageId: '1' })) } });
+    expect(marked).toEqual(['m1']);
+  });
+
+  it('leaves a credential queued rather than marking it sent when the relay refuses it', async () => {
+    // The whole point of the retry: a row that failed is still the only copy of a
+    // password that works, so nothing may record it as delivered.
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const { database, marked } = outboxDatabase([
+        { id: 'm1', kind: 'owner-credentials', recipient: superAdminEmail, subject: 's', body: 'b' },
+      ]);
+      const sendMail = vi.fn(async () => { throw new Error('relay refused'); });
+
+      await tryDeliverOnRequest(database, { config, transport: { sendMail } });
+
+      expect(sendMail).toHaveBeenCalledTimes(1);
+      expect(marked, 'a refused credential must not be recorded as sent').toEqual([]);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('does not wait for the relay before answering', async () => {
+    // A slow relay must not add to the response an admin is waiting on, so the pass
+    // is fired rather than awaited. Measured by the transport being mid-send while
+    // control has already returned.
+    const { database, marked } = outboxDatabase([
+      { id: 'm1', kind: 'owner-credentials', recipient: superAdminEmail, subject: 's', body: 'b' },
+    ]);
+    let release = () => {};
+    const sendMail = vi.fn(() => new Promise((resolve) => { release = () => resolve({ messageId: '1' }); }));
+
+    const startedAt = Date.now();
+    const pass = tryDeliverOnRequest(database, { config, transport: { sendMail } });
+    const returnedAfter = Date.now() - startedAt;
+
+    // The call returns immediately even though the transport is still hanging. This
+    // is the property that keeps a slow relay off the request path, and it is the
+    // reason the router does not await this.
+    expect(returnedAfter, 'returned before the transport could have finished').toBeLessThan(200);
+
+    // The pass reaches the relay on its own, and the relay never settles. Nothing is
+    // recorded, because nothing has actually been sent yet.
+    await vi.waitFor(() => expect(sendMail).toHaveBeenCalledTimes(1));
+    expect(marked, 'nothing is recorded while the send is still open').toEqual([]);
+
+    release();
+    await pass;
+    expect(marked).toEqual(['m1']);
+  });
+
+  it('survives a store it cannot read, because the request must not fail', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const database: Database = { query: vi.fn(async () => { throw new Error('database gone'); }) };
+      // Awaiting must not reject either, not merely not throw synchronously.
+      await expect(tryDeliverOnRequest(database)).resolves.toBeUndefined();
+      expect(consoleError).toHaveBeenCalledTimes(1);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('runs one pass at a time, so a credential cannot be sent twice', async () => {
+    // Two concurrent admin requests both finding the same pending row would open two
+    // connections and could both send it. The `sent_at` marker is what prevents a
+    // duplicate delivery, and it can only do that if there is one pass to mark it.
+    // The guard has to survive between calls, so these overlap deliberately: each
+    // one is fired before the previous has finished.
+    const { database, query, marked } = outboxDatabase([
+      { id: 'm1', kind: 'owner-credentials', recipient: superAdminEmail, subject: 's', body: 'b' },
+    ]);
+    const sendMail = vi.fn(() => new Promise((resolve) => { setTimeout(() => resolve({ messageId: '1' }), 20); }));
+    const options = { config, transport: { sendMail } };
+
+    // Fired together without awaiting, so all three overlap and the guard is under
+    // test rather than incidental.
+    const passes = [
+      tryDeliverOnRequest(database, options),
+      tryDeliverOnRequest(database, options),
+      tryDeliverOnRequest(database, options),
+    ];
+    await Promise.all(passes);
+
+    // Only the first asked the store anything; the other two returned on the guard.
+    // Matched tightly, because the delivery select contains a correlated
+    // `SELECT 1 FROM email_outbox ... NOT EXISTS` subquery of its own, and counting
+    // that instead would turn this into a test that always passes.
+    const gates = query.mock.calls.filter((call) => /SELECT 1 FROM email_outbox\s+WHERE sent_at IS NULL/.test(String(call[0])));
+    expect(gates).toHaveLength(1);
+    expect(sendMail, 'the credential was sent once, not once per request').toHaveBeenCalledTimes(1);
+    expect(marked).toEqual(['m1']);
+  });
+});
+
+describe('asking whether anything is waiting', () => {
+  it('is true when a credential is unsent, and false once it is marked', async () => {
+    const { database } = outboxDatabase([
+      { id: 'm1', kind: 'owner-credentials', recipient: superAdminEmail, subject: 's', body: 'b' },
+    ]);
+    const queued = await hasPendingMail(database);
+    expect(queued).toBe(true);
+
+    const empty = outboxDatabase([]);
+    expect(await hasPendingMail(empty.database)).toBe(false);
   });
 });
