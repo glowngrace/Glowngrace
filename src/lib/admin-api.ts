@@ -304,21 +304,31 @@ export const adminApi = {
    * Not through `request`, because that prefixes `/admin/` and this lives at the
    * root, and not because it needs a session - `/api/health` is deliberately
    * public, which is what makes it useful as a signal before anybody is signed
-   * in. A failure is returned as `null` rather than thrown: the caller is
-   * decorating a screen with a warning, and a health route that is briefly
-   * unreachable must not take the page down with it.
+   * in.
+   *
+   * The body is read whatever the status code, because a deployment reporting
+   * itself broken answers 503 and puts the diagnosis - which store, which mail, and
+   * what to set - in that body. Returning early on a non-2xx would throw away the
+   * one response that matters and hand the caller a tidy `null`, which is how a
+   * dead deployment ends up looking like an unconfigured one with nothing to say.
+   *
+   * Only a genuinely unreadable answer comes back as `null`: the caller is
+   * decorating a screen with a warning, so an unreachable health route must not
+   * take the page down, and `null` reads as "unknown" rather than "fine".
    */
   async health() {
     try {
       const response = await fetch(`${API_BASE_URL}/health`, { headers: { Accept: 'application/json' } });
-      if (!response.ok) return null;
-      return (await response.json()) as {
+      const report = (await response.json()) as {
         status?: string;
         store?: string;
         mail?: string;
         mailPending?: number;
         reason?: string;
       };
+      // A non-JSON error page from a proxy in front of the app would have thrown
+      // above, so anything that parses is worth showing.
+      return typeof report === 'object' && report !== null ? report : null;
     } catch {
       return null;
     }
