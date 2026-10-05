@@ -749,6 +749,114 @@ h3 { font-size: 1.25rem; }
 .role-option small { color: var(--muted); font-size: .73rem; line-height: 1.4; }
 .login-optional { color: var(--muted); font-weight: 400; letter-spacing: 0; text-transform: lowercase; }
 
+/* `/superadmin/ggpass` - the owner password doorway, from
+   Design/glow-and-grace-generate-password.html.
+
+   A full-bleed split screen like the sign-in screens rather than another panel
+   in the console workspace, so the design file's own values are scoped to the
+   page here instead of being forced onto the storefront tokens: those are a
+   little cooler and would read as a different house on the one screen whose job
+   is getting the owner back into their own account. */
+.ggpass {
+  --g-ink: #241c1f;
+  --g-soft: #5d5157;
+  --g-line: #e9dfd9;
+  --g-cream-2: #f6efe9;
+  --g-rose-deep: #a8515f;
+  --g-gold: #b99154;
+  --g-gold-soft: #d9bd8c;
+  --g-ok: #3f7a56;
+  --g-ok-bg: #eef7f1;
+  --g-shadow: 0 18px 50px -24px rgb(60 32 38 / 35%);
+  display: grid;
+  min-height: 100vh;
+  /* The design file writes this as `1.05fr 1fr`. Bare `fr` floors at the column's
+     min-content width, so between the 900px breakpoint and roughly 1100px the
+     panel's own padding plus the locked field's intrinsic width can push the
+     grid wider than the viewport. `minmax(0, ...)` lets the columns shrink and
+     is the same guard the storefront grids below already use. */
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+}
+.ggpass-art { position: relative; display: grid; place-items: center; padding: 3rem; overflow: hidden; }
+.ggpass-art > img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.ggpass-art::after { position: absolute; inset: 0; background: linear-gradient(145deg, rgb(36 28 31 / 88%), rgb(36 28 31 / 50%)); content: ''; }
+.ggpass-art-inner { position: relative; z-index: 2; max-width: 420px; color: #fff; text-align: center; }
+.ggpass-seal { width: 150px; height: 150px; margin: 0 auto 1.7rem; filter: drop-shadow(0 6px 22px rgb(0 0 0 / 50%)); }
+.ggpass-art-inner .eyebrow { color: var(--g-gold-soft); }
+.ggpass-art-inner h2 { margin: .7rem 0 .9rem; color: #fff; font-family: var(--serif); font-size: 2.1rem; font-weight: 400; line-height: 1.25; }
+.ggpass-art-inner h2 em { color: var(--g-gold-soft); font-style: italic; }
+.ggpass-art-inner p { margin: 0; color: rgb(255 255 255 / 85%); }
+
+.ggpass-panel { display: grid; place-items: center; padding: clamp(2rem, 5vw, 4rem); }
+.ggpass-card { width: min(420px, 100%); }
+/* The card's own mark, shown only where the art panel is not. */
+.ggpass-mark { display: none; width: 64px; height: 64px; margin-bottom: 1.4rem; }
+.ggpass-card h1 { margin: .4rem 0 0; font-family: var(--serif); font-size: 2.2rem; font-weight: 400; line-height: 1.2; }
+.ggpass-sub { margin: .55rem 0 2rem; color: var(--g-soft); font-size: .93rem; }
+.ggpass-waiting { display: flex; align-items: center; gap: .6rem; }
+
+.ggpass-field { margin-bottom: 1.4rem; }
+.ggpass-field label { display: block; margin-bottom: .45rem; color: var(--g-soft); font-size: .62rem; font-weight: 500; letter-spacing: .2em; text-transform: uppercase; }
+.ggpass-input-wrap { position: relative; }
+.ggpass-input-wrap svg { position: absolute; top: 50%; left: 1rem; width: 17px; height: 17px; transform: translateY(-50%); fill: none; stroke: var(--g-gold); stroke-width: 1.4; }
+.ggpass-lock { position: absolute; top: 50%; right: .9rem; padding: .22rem .55rem; transform: translateY(-50%); border: 1px solid var(--g-line); background: #fff; color: var(--g-soft); font-size: .56rem; letter-spacing: .16em; line-height: 1.5; text-transform: uppercase; }
+.ggpass-field input { width: 100%; padding: .9rem 5.2rem .9rem 2.8rem; border: 1px solid var(--g-line); border-radius: 2px; background: var(--g-cream-2); color: var(--g-soft); font-family: var(--sans); font-size: .95rem; outline: none; }
+.ggpass-field input:disabled { opacity: 1; cursor: not-allowed; -webkit-text-fill-color: var(--g-soft); }
+.ggpass-hint { margin: .45rem 0 0; color: var(--g-soft); font-size: .76rem; }
+
+.ggpass-btn { display: flex; width: 100%; align-items: center; justify-content: center; gap: .7rem; padding: 1rem 2rem; border: 0; border-radius: 2px; background: var(--g-ink); color: #fff; cursor: pointer; font-family: var(--sans); font-size: .7rem; font-weight: 500; letter-spacing: .22em; line-height: 1.5; text-align: center; text-transform: uppercase; transition: background-color .35s ease; }
+.ggpass-btn:hover:not(:disabled) { background: var(--g-rose-deep); }
+.ggpass-btn:disabled { opacity: .75; cursor: wait; }
+.ggpass-btn.is-quiet { border: 1px solid var(--g-line); background: transparent; color: var(--g-ink); }
+.ggpass-btn.is-quiet:hover:not(:disabled) { border-color: var(--g-rose-deep); background: transparent; color: var(--g-rose-deep); }
+
+.ggpass-note { display: flex; gap: .7rem; margin-top: 1.6rem; padding: 1rem 1.1rem; border: 1px solid var(--g-line); background: var(--g-cream-2); color: var(--g-soft); font-size: .8rem; }
+.ggpass-note > i { width: 6px; height: 6px; flex: none; margin-top: .5rem; border-radius: 50%; background: var(--g-gold); }
+.ggpass-note b { color: var(--g-ink); font-weight: 500; }
+.ggpass-note code { font-size: .95em; }
+.ggpass-note.is-error { border-color: #e7ceca; background: #fbeeec; color: #7b4348; }
+.ggpass-note.is-error > i { background: var(--g-rose-deep); }
+.ggpass-note.is-error b, .ggpass-note.is-error code { color: #6b3439; }
+
+.ggpass-back { display: block; margin-top: 1.6rem; color: var(--g-rose-deep); font-size: .66rem; letter-spacing: .2em; line-height: 2.2; text-align: center; text-transform: uppercase; }
+.ggpass-back:hover { text-decoration: underline; text-underline-offset: 3px; }
+.ggpass-foot { margin: 1.4rem 0 0; color: var(--g-soft); font-size: .8rem; line-height: 1.6; text-align: center; }
+.ggpass-copyright { margin: 2rem 0 0; color: var(--g-soft); font-size: .72rem; letter-spacing: .1em; text-align: center; }
+
+/* The confirmation is an overlay rather than a strip in the card, because the
+   thing it asks about ends every session including this one - it should read as
+   a separate decision from filling in the form, not as another field. */
+.ggpass-confirm-layer { position: fixed; inset: 0; z-index: 200; display: grid; place-items: center; padding: 20px; background: rgb(36 28 31 / 55%); }
+.ggpass-confirm { width: min(420px, 100%); padding: 26px 24px 22px; border: 1px solid var(--g-line); background: #fffdfa; box-shadow: var(--g-shadow); }
+.ggpass-confirm h2 { margin: 0 0 .7rem; font-family: var(--serif); font-size: 1.5rem; font-weight: 500; line-height: 1.25; }
+.ggpass-confirm p { margin: 0; color: var(--g-soft); font-size: .84rem; }
+.ggpass-confirm-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 1.2rem; }
+
+.ggpass-toast { position: fixed; top: 1.6rem; right: 1.6rem; z-index: 300; display: flex; width: min(370px, calc(100vw - 2rem)); align-items: start; gap: .85rem; padding: 1rem 1.2rem; border: 1px solid #bcd9c8; border-left: 3px solid var(--g-ok); background: #fff; box-shadow: var(--g-shadow); animation: ggpass-toast-in .5s cubic-bezier(.22, 1, .36, 1); }
+.ggpass-toast-icon { display: grid; width: 30px; height: 30px; flex: none; place-items: center; border-radius: 50%; background: var(--g-ok-bg); }
+.ggpass-toast-icon svg { width: 15px; height: 15px; fill: none; stroke: var(--g-ok); stroke-width: 2.2; }
+.ggpass-toast b { display: block; color: var(--g-ink); font-family: var(--serif); font-size: 1.1rem; font-weight: 500; }
+.ggpass-toast > div span { color: var(--g-soft); font-size: .82rem; }
+.ggpass-toast-close { display: grid; width: 24px; height: 24px; flex: none; margin-left: auto; place-items: center; padding: 0; border: 0; background: none; color: var(--g-soft); cursor: pointer; font-size: 1rem; line-height: 1; }
+.ggpass-toast-close:hover { color: var(--g-ink); }
+.ggpass-toast-bar { position: absolute; bottom: 0; left: 0; height: 2px; width: 0; background: var(--g-ok); animation: ggpass-toast-bar 4.5s linear forwards; }
+/* Same toast, failed. Only the three accents move, so the two read as one
+   component that is either telling you it worked or telling you it did not. */
+.ggpass-toast.is-error { border-color: #e7ceca; border-left-color: #b4505c; }
+.ggpass-toast.is-error .ggpass-toast-icon { background: #fbeeec; }
+.ggpass-toast.is-error .ggpass-toast-icon svg { stroke: #b4505c; }
+.ggpass-toast.is-error .ggpass-toast-bar { background: #b4505c; }
+@keyframes ggpass-toast-in { from { transform: translateX(calc(100% + 2.5rem)); } }
+@keyframes ggpass-toast-bar { from { width: 100%; } to { width: 0; } }
+
+@media (max-width: 900px) {
+  .ggpass { grid-template-columns: 1fr; min-height: auto; }
+  .ggpass-art { display: none; }
+  .ggpass-mark { display: block; }
+  .ggpass-panel { padding: 40px 20px 48px; }
+  .ggpass-toast { top: 1rem; right: 1rem; }
+}
+
 /* Candidate, salon partner, and administrator dashboards */
 .portal-page { display: grid; min-height: 720px; grid-template-columns: 260px minmax(0, 1fr); background: var(--cream); }
 .portal-sidebar { display: flex; flex-direction: column; padding: 24px 18px 18px; border-right: 1px solid var(--line); background: #fffdfa; }
@@ -1544,4 +1652,3 @@ button.admin-stat:hover { border-color: var(--a-rose); transform: translateY(-2p
   .admin-product-gallery { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
-@media (max-width: 980px) { .ggpass { grid-template-columns: 1fr; min-height: auto; } .ggpass-art { display: none; } .ggpass-panel { padding: 40px 20px 48px; } .ggpass-card { gap: 12px; } }

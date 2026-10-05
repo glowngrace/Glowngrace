@@ -3,7 +3,7 @@ import { createMemoryDatabase } from './database';
 import { createHandlers } from './handlers';
 import { createApiRouter } from './router';
 import { createAdminHandlers } from './admin';
-import { rotateOwnerPasswordIfDue } from './admin/owner-password';
+import { rotateOwnerPassword, rotateOwnerPasswordIfDue } from './admin/owner-password';
 import { superAdminEmail } from '../auth/roles';
 
 /**
@@ -315,3 +315,148 @@ describe('the owner account on a freshly started store', () => {
     expect(outbox.rows).toEqual([{ recipient: superAdminEmail }]);
   });
 });
+
+/**
+ * The whole journey, on the real store.
+ *
+ * Each of the three things the owner is promised is checked somewhere already -
+ * the rotation writes a hash, the outbox holds the message, the login verifies -
+ * but all three were checked against mocks that answer whatever they were told.
+ * That combination can pass while the seam between them is broken: a password
+ * mailed to the wrong place, or a hash written under a parameter the verifier
+ * never reads, is invisible to all of them at once.
+ *
+ * So this drives the actual round trip the button starts, and then signs in with
+ * whatever ended up in the mailbox. Nothing here is stubbed, which is also why it
+ * is the only place that can catch a query the in-memory engine parses
+ * differently from Postgres.
+ */
+describe('the round trip the generate button starts', () => {
+  beforeEach(() => {
+    delete process.env.OWNER_PINNED_PASSWORD;
+    delete process.env.OWNER_PINNED_HOLD_UNTIL;
+  });
+
+  /** The password from the most recent credential message in the outbox. */
+  async function mailedPassword(database: Awaited<ReturnType<typeof createMemoryDatabase>>['database']) {
+    const outbox = await database.query(
+      `SELECT recipient, body FROM email_outbox
+       WHERE kind = 'owner-credentials' AND recipient = $1
+       ORDER BY created_at DESC, id DESC LIMIT 1`,
+      [superAdminEmail],
+    );
+    const row = outbox.rows[0] as { recipient: string; body: string } | undefined;
+    if (!row) throw new Error('no owner credential was queued for the owner address');
+    const password = /Password:\s*(\S+)/.exec(row.body)?.[1];
+    if (!password) throw new Error(`the queued message carried no password:\n${row.body}`);
+    return { recipient: row.recipient, password };
+  }
+
+  it('emails the owner a password they can then sign in with', async () => {
+    const { database } = createMemoryDatabase();
+    const admin = createAdminHandlers(database);
+    await admin.seed();
+
+    // Whatever the seed mailed is the starting credential, so the test does not
+    // depend on how a fresh store happens to be set up.
+    const before = await mailedPassword(database);
+    const signedInBefore = await admin.handle({
+      method: 'POST',
+      segments: ['session'],
+      body: { email: superAdminEmail, password: before.password },
+    });
+    expect(signedInBefore.status).toBe(201);
+
+    // Now the button: rotate.
+    const rotated = await rotateOwnerPassword(database);
+    expect(rotated.rotated).toBe(true);
+
+    // A second message exists, addressed to the owner, carrying a different
+    // password from the one that used to work.
+    const after = await mailedPassword(database);
+    expect(after.recipient).toBe(superAdminEmail);
+    // A fresh password every time. Two rotations handing back the same string
+    // would make "generate again" useless to somebody locked out.
+    expect(after.password).not.toBe(before.password);
+    // And one an attacker could not guess: the rotation is only worth anything if
+    // the password it mints is stronger than the one it replaced.
+    expect(after.password.length).toBeGreaterThanOrEqual(20);
+    expect(after.password).toMatch(/[a-z]/);
+    expect(after.password).toMatch(/[A-Z]/);
+    expect(after.password).toMatch(/[0-9]/);
+
+    // One character different, so the password is checked rather than merely
+    // present in the mailbox.
+    const wrong = `${after.password.slice(0, -1)}${after.password.endsWith('a') ? 'b' : 'a'}`;
+
+    // The old password is dead. A rotation that only added a second working
+    // password would leave a compromised credential valid for ever.
+    expect((await admin.handle({
+      method: 'POST',
+      segments: ['session'],
+      body: { email: superAdminEmail, password: before.password },
+    })).status).toBe(401);
+
+    expect((await admin.handle({
+      method: 'POST',
+      segments: ['session'],
+      body: { email: superAdminEmail, password: wrong },
+    })).status).toBe(401);
+
+    // And this is the promise the whole screen rests on: the address in the
+    // mailbox is the address that opens the console.
+    const signedInAfter = await admin.handle({
+      method: 'POST',
+      segments: ['session'],
+      body: { email: superAdminEmail, password: after.password },
+    });
+    expect(signedInAfter.status).toBe(201);
+    const body = signedInAfter.body as { user: { email: string; role: string } };
+    expect(body.user.email).toBe(superAdminEmail);
+    expect(body.user.role).toBe('Super Admin');
+  });
+
+  it('never puts the password in the response the browser sees', async () => {
+    const { database } = createMemoryDatabase();
+    const admin = createAdminHandlers(database);
+    await admin.seed();
+    await rotateOwnerPassword(database);
+
+    const { password } = await mailedPassword(database);
+    const result = await admin.handle({
+      method: 'POST',
+      segments: ['owner-password', 'generate'],
+      // A session is needed to get past the role check. Any token the store has
+      // never issued is fine here, because the assertion is about the response
+      // body, not about who was allowed to ask.
+      token: await ownerToken(database, admin),
+    });
+
+    expect(result.status).toBe(200);
+    // Not in the body, and not under any key that could be added by accident
+    // later: the fields are enumerated, so a future `password` field fails here
+    // instead of shipping to a screen.
+    expect(Object.keys(result.body as object).sort()).toEqual(['email', 'nextRotationDays', 'rotated', 'sessionsRevoked']);
+    expect(JSON.stringify(result.body)).not.toContain(password);
+  });
+});
+
+/** A real session token for the owner, taken from a real sign-in. */
+async function ownerToken(
+  database: Awaited<ReturnType<typeof createMemoryDatabase>>['database'],
+  admin: ReturnType<typeof createAdminHandlers>,
+) {
+  const { password } = await (async () => {
+    const outbox = await database.query(
+      `SELECT body FROM email_outbox WHERE kind = 'owner-credentials' ORDER BY created_at DESC, id DESC LIMIT 1`,
+    );
+    const body = String((outbox.rows[0] as { body: string }).body);
+    return { password: /Password:\s*(\S+)/.exec(body)![1] };
+  })();
+  const login = await admin.handle({
+    method: 'POST',
+    segments: ['session'],
+    body: { email: superAdminEmail, password },
+  });
+  return (login.body as { token: string }).token;
+}

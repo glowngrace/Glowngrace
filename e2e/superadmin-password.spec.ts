@@ -44,6 +44,12 @@ const generated = {
 };
 
 /**
+ * The success toast's own timer, mirrored here rather than fast-forwarded past by
+ * guesswork, so the redirect test proves the bounce is independent of it.
+ */
+const TOAST_MS = 4500;
+
+/**
  * A console whose `me` and `owner-password/generate` routes answer as instructed.
  *
  * `generate` records every call and answers whatever `onGenerate` says, so a
@@ -128,24 +134,24 @@ test.describe('/superadmin/ggpass', () => {
     await stubConsole(page);
     await openScreen(page);
 
-    await expect(page.getByRole('heading', { name: 'Owner password' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Generate a new password' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Generate password' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Generate password' })).toBeVisible();
     // The destination is on screen before anything is pressed, so nobody
     // discovers at the last moment that they cannot reach the mailbox.
-    await expect(page.getByLabel('Send the new password to')).toHaveValue('glowngracebiz@gmail.com');
+    await expect(page.getByLabel('Registered email')).toHaveValue('glowngracebiz@gmail.com');
   });
 
   test('shows the destination as a fixed field rather than something to type', async ({ page }) => {
     await stubConsole(page);
     await openScreen(page);
 
-    const field = page.getByLabel('Send the new password to');
+    const field = page.getByLabel('Registered email');
     await expect(field).toHaveValue('glowngracebiz@gmail.com');
     // Readonly as well as disabled: the value is the owner address by construction,
     // not an editable default, and a browser autofill must not be able to change it.
     await expect(field).toHaveAttribute('readonly', '');
     await expect(field).toBeDisabled();
-    await expect(page.getByText('Fixed to the Super Admin account.')).toBeVisible();
+    await expect(page.getByText('This email is linked to the business account and cannot be changed.')).toBeVisible();
   });
 
   test('refuses to generate on a deployment with no database, and says why', async ({ page }) => {
@@ -162,9 +168,9 @@ test.describe('/superadmin/ggpass', () => {
 
     // Without this the page reports a successful rotation and the password exists
     // only until the next cold start, with nothing on screen to say so.
-    await expect(page.getByRole('heading', { name: 'This deployment has no database.' })).toBeVisible();
+    await expect(page.getByText('This deployment has no database, so nothing generated here can be kept.')).toBeVisible();
     await expect(page.getByText('NEON_DATABASE_URL').first()).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Generate a new password' })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Generate password' })).toBeDisabled();
     expect(generateCalls).toHaveLength(0);
   });
 
@@ -174,8 +180,8 @@ test.describe('/superadmin/ggpass', () => {
     });
     await openScreen(page);
 
-    await expect(page.getByRole('heading', { name: 'Mail is not configured on this deployment.' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Generate a new password' })).toBeDisabled();
+    await expect(page.getByText('Mail is not configured here, so the password would be written to')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Generate password' })).toBeDisabled();
     expect(generateCalls).toHaveLength(0);
   });
 
@@ -198,8 +204,10 @@ test.describe('/superadmin/ggpass', () => {
 
     await page.goto('/superadmin/ggpass');
 
-    await expect(page.getByRole('heading', { name: 'This deployment has no database, so signing in is impossible.' })).toBeVisible();
-    await expect(page.getByRole('link', { name: 'Sign in' })).toHaveCount(0);
+    await expect(page.getByText('This deployment has no database, so signing in is impossible.')).toBeVisible();
+    // Not just the obvious call to action: nothing on this state may point at the
+    // sign-in page, including the way out at the bottom of the card.
+    await expect(page.locator('a[href="/login"]')).toHaveCount(0);
   });
 
   test('still offers the button when the health route cannot be reached', async ({ page }) => {
@@ -208,10 +216,10 @@ test.describe('/superadmin/ggpass', () => {
     const { generateCalls } = await stubConsole(page, { health: null });
     await openScreen(page);
 
-    await expect(page.getByRole('heading', { name: 'This deployment has no database.' })).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'Generate a new password' })).toBeEnabled();
+    await expect(page.getByText('nothing generated here can be kept')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Generate password' })).toBeEnabled();
 
-    await page.getByRole('button', { name: 'Generate a new password' }).click();
+    await page.getByRole('button', { name: 'Generate password' }).click();
     await page.getByRole('dialog').getByRole('button', { name: 'Yes, generate it' }).click();
     await expect(page.getByRole('status')).toContainText('A new password has been sent to');
     expect(generateCalls).toHaveLength(1);
@@ -221,7 +229,7 @@ test.describe('/superadmin/ggpass', () => {
     const { generateCalls } = await stubConsole(page);
     await openScreen(page);
 
-    await page.getByRole('button', { name: 'Generate a new password' }).click();
+    await page.getByRole('button', { name: 'Generate password' }).click();
     await page.getByRole('dialog').getByRole('button', { name: 'Yes, generate it' }).click();
 
     await expect(page.getByRole('status')).toContainText('A new password has been sent to glowngracebiz@gmail.com');
@@ -240,7 +248,7 @@ test.describe('/superadmin/ggpass', () => {
     const { generateCalls } = await stubConsole(page);
     await openScreen(page);
 
-    await page.getByRole('button', { name: 'Generate a new password' }).click();
+    await page.getByRole('button', { name: 'Generate password' }).click();
 
     const dialog = page.getByRole('dialog', { name: 'Generate a new owner password?' });
     await expect(dialog).toBeVisible();
@@ -255,14 +263,14 @@ test.describe('/superadmin/ggpass', () => {
     await expect(dialog).toHaveCount(0);
     expect(generateCalls).toHaveLength(0);
     // And focus comes back to the button that opened it, not the top of the page.
-    await expect(page.getByRole('button', { name: 'Generate a new password' })).toBeFocused();
+    await expect(page.getByRole('button', { name: 'Generate password' })).toBeFocused();
   });
 
   test('cancels without generating', async ({ page }) => {
     const { generateCalls } = await stubConsole(page);
     await openScreen(page);
 
-    await page.getByRole('button', { name: 'Generate a new password' }).click();
+    await page.getByRole('button', { name: 'Generate password' }).click();
     await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
 
     await expect(page.getByRole('dialog')).toHaveCount(0);
@@ -275,9 +283,9 @@ test.describe('/superadmin/ggpass', () => {
     const { generateCalls } = await stubConsole(page, { user: administrator });
     await openScreen(page, administrator);
 
-    await expect(page.getByRole('heading', { name: 'This screen is for the owner account only.' })).toBeVisible();
+    await expect(page.getByText('This screen is for the Super Admin account only.')).toBeVisible();
     await expect(page.getByText('Store Administrator')).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Generate a new password' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Generate password' })).toHaveCount(0);
     expect(generateCalls).toHaveLength(0);
   });
 
@@ -291,12 +299,17 @@ test.describe('/superadmin/ggpass', () => {
 
     await page.goto('/superadmin/ggpass');
 
-    await expect(page.getByRole('heading', { name: 'This screen needs a signed-in owner.' })).toBeVisible();
-    await expect(page.getByRole('link', { name: 'Sign in' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Generate a new password' })).toHaveCount(0);
+    await expect(page.getByText('This screen is for the Super Admin account. Sign in to continue.')).toBeVisible();
+    // The one control the design puts on this screen keeps its label in every
+    // state. Rewording it to name the next step made the card read as a different
+    // page the moment somebody arrived from a different route.
+    await expect(page.getByRole('link', { name: 'Generate Password' })).toBeVisible();
+    // Nothing to press here: no session, so there is no owner to generate for.
+    await expect(page.getByRole('button', { name: 'Generate Password' })).toHaveCount(0);
+    await expect(page.locator('a[href="/login"]').first()).toBeVisible();
   });
 
-  test('reports a refused request and stays usable', async ({ page }) => {
+  test('reports a refused request as a toast and stays usable', async ({ page }) => {
     const { generateCalls } = await stubConsole(page, {
       onGenerate: () => ({
         status: 403,
@@ -305,22 +318,91 @@ test.describe('/superadmin/ggpass', () => {
     });
     await openScreen(page);
 
-    await page.getByRole('button', { name: 'Generate a new password' }).click();
+    await page.getByRole('button', { name: 'Generate password' }).click();
     await page.getByRole('dialog').getByRole('button', { name: 'Yes, generate it' }).click();
 
+    // A failure is announced the same way a success is: same corner, same shape.
+    // Text under the button is invisible to somebody watching the button light up
+    // and start working, and this is the outcome they most need to notice.
+    const toast = page.getByRole('alert');
+    await expect(toast).toBeVisible();
+    await expect(toast).toContainText('Password not generated');
     // The server's own message, not a generic failure: the page does not get to
     // decide that this was a permissions problem.
-    await expect(page.getByRole('alert')).toHaveText('Only the Super Admin account can generate a new owner password.');
+    await expect(toast).toContainText('Only the Super Admin account can generate a new owner password.');
+    // Not the success toast, at the same time.
+    await expect(page.getByRole('status')).toHaveCount(0);
     // The button comes back rather than staying stuck on "Generating…".
-    await expect(page.getByRole('button', { name: 'Generate a new password' })).toBeEnabled();
+    await expect(page.getByRole('button', { name: 'Generate password' })).toBeEnabled();
     expect(generateCalls).toHaveLength(1);
+  });
+
+  test('retires the failure toast on its own', async ({ page }) => {
+    await stubConsole(page, {
+      onGenerate: () => ({ status: 500, json: { error: 'smtp_failed', message: 'The mail relay refused the message.' } }),
+    });
+    await openScreen(page);
+
+    await page.getByRole('button', { name: 'Generate password' }).click();
+    await page.getByRole('dialog').getByRole('button', { name: 'Yes, generate it' }).click();
+    await expect(page.getByRole('alert')).toBeVisible();
+
+    // And it can be dismissed by hand, for somebody who wants the screen back
+    // now rather than in seven seconds.
+    await page.getByRole('button', { name: 'Close' }).click();
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Generate password' })).toBeEnabled();
+  });
+
+  test('answers "where is it" under the button in every state', async ({ page }) => {
+    await stubConsole(page, {
+      onGenerate: () => ({ status: 500, json: { error: 'smtp_failed', message: 'The mail relay refused the message.' } }),
+    });
+    await openScreen(page);
+
+    // The design puts this directly under the button. It is the only thing on the
+    // page that says what happens next, and it has to survive a failure - somebody
+    // whose generation just failed needs to know a retry is safe.
+    const wait = page.getByText('The password email usually arrives within');
+    await expect(wait).toBeVisible();
+
+    await page.getByRole('button', { name: 'Generate password' }).click();
+    await page.getByRole('dialog').getByRole('button', { name: 'Yes, generate it' }).click();
+    await expect(page.getByRole('alert')).toBeVisible();
+    await expect(wait).toBeVisible();
+  });
+
+  test('walks the owner back to sign-in a minute after generating', async ({ page }) => {
+    await page.clock.install();
+    const { generateCalls } = await stubConsole(page);
+    await openScreen(page);
+
+    await page.getByRole('button', { name: 'Generate password' }).click();
+    await page.getByRole('dialog').getByRole('button', { name: 'Yes, generate it' }).click();
+    await expect(page.getByRole('status')).toContainText('A new password has been sent to');
+    expect(generateCalls).toHaveLength(1);
+
+    // The toast retires long before the wait is over, so the redirect cannot be
+    // riding on it - and the owner is still left with a minute to go and find the
+    // mail rather than being bounced the instant the button works.
+    await page.clock.fastForward(TOAST_MS);
+    await expect(page.getByRole('status')).toHaveCount(0);
+    await expect(page).toHaveURL(/\/superadmin\/ggpass$/);
+
+    await page.clock.fastForward(30_000);
+    await expect(page).toHaveURL(/\/superadmin\/ggpass$/);
+
+    await page.clock.fastForward(31_000);
+    await expect(page).toHaveURL(/\/login$/);
+    // And the page it left is the real sign-in screen, not a dead route.
+    await expect(page.getByRole('heading', { level: 1, name: 'Sign in' })).toBeVisible();
   });
 
   test('ends the session in the browser, because the server ended every one', async ({ page }) => {
     await stubConsole(page);
     await openScreen(page);
 
-    await page.getByRole('button', { name: 'Generate a new password' }).click();
+    await page.getByRole('button', { name: 'Generate password' }).click();
     await page.getByRole('dialog').getByRole('button', { name: 'Yes, generate it' }).click();
     await expect(page.getByRole('status')).toContainText('A new password has been sent to');
 
@@ -342,7 +424,7 @@ test.describe('/superadmin/ggpass', () => {
 
     // With the confirmation open: the dialog is a second layer over the page, so
     // it is audited on its own terms rather than trusted to inherit anything.
-    await page.getByRole('button', { name: 'Generate a new password' }).click();
+    await page.getByRole('button', { name: 'Generate password' }).click();
     await expect(page.getByRole('dialog')).toBeVisible();
     await auditPage(page, '/superadmin/ggpass (confirming)');
   });
@@ -362,7 +444,7 @@ test.describe('/superadmin/ggpass', () => {
     }));
 
     await page.goto('/superadmin/ggpass');
-    await expect(page.getByRole('heading', { name: 'This screen needs a signed-in owner.' })).toBeVisible();
+    await expect(page.getByText('This screen is for the Super Admin account. Sign in to continue.')).toBeVisible();
 
     await auditPage(page, '/superadmin/ggpass (signed out)');
   });
