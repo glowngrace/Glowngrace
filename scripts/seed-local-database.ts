@@ -174,7 +174,7 @@ try {
   console.log('\nThe local database is ready. Sign in at /login with the owner account:');
   console.log(`  email    ${superAdminEmail}`);
   console.log(`  password ${process.env.OWNER_PINNED_PASSWORD
-    ? 'the one in OWNER_PINNED_PASSWORD, held until OWNER_PINNED_HOLD_UNTIL'
+    ? 'the one in OWNER_PINNED_PASSWORD, until you replace it at /superadmin/ggpass'
     : 'generated, and written to the email_outbox table:'
   }`);
   if (!process.env.OWNER_PINNED_PASSWORD) {

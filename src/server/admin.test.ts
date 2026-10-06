@@ -973,18 +973,19 @@ describe('admin demo seeding', () => {
     const values = ownerInsert[1] as unknown[];
     expect(values).toContain('Super Admin');
     // The hash is of a generated password, so there is nothing to publish: the
-    // owner learns it from the rotation message.
+    // owner learns it from the seed mail, and replaces it from the screen.
     const hash = String(values[3]);
     expect(hash.startsWith('scrypt$')).toBe(true);
-    // Stamped at creation, so the first rotation is a week away rather than a
-    // second after the server boots.
-    expect(String(ownerInsert[0])).toContain('password_rotated_at');
+    // Nothing is stamped, because nothing runs on a clock. The owner holds the
+    // password until they choose a different one.
+    expect(String(ownerInsert[0])).not.toContain('password_rotated_at');
+    expect(String(ownerInsert[0])).not.toContain('password_hold_until');
   });
 
   it('mails the owner the password the account was created with', async () => {
-    // An account whose generated password was never written down is the same as
-    // no account at all, so the first one has to be delivered like every later
-    // rotation is.
+    // Seeding happens with nobody at the keyboard, so there is no screen to show
+    // the first password on and the outbox is the only way it can arrive.
+    // Everything after this is replaced from `/superadmin/ggpass`.
     const { database, query } = makeDatabase(async (text, values) => (
       text.includes('INSERT INTO admin_users') && (values as unknown[]).includes(superAdminEmail)
         ? { rows: [], rowCount: 1 }
@@ -1805,8 +1806,8 @@ describe('owner account protection', () => {
 
     const result = await admin.handle({ method: 'DELETE', segments: ['users', ownerId], token });
 
-    // This is the account a deployment is opened with once every password has
-    // been rotated away, so a console session cannot remove it.
+    // This is the only account that can replace every other credential, so a
+    // console session cannot remove it.
     expect(result.status).toBe(400);
     expect(result.body.error).toBe('owner_protected');
     expect(deleted).toEqual([]);
@@ -1849,8 +1850,8 @@ describe('owner account protection', () => {
     // The owner address was misspelled until this branch. Nothing renames a row now,
     // because nothing outlives a restart, but if an account is still sitting on the
     // old spelling then that
-    // account is an ordinary team member: it is not the way back in after every
-    // credential has been rotated, so it must not be mistaken for one and
+    // account is an ordinary team member: it is not the way back in when the owner
+    // password is lost, so it must not be mistaken for one and
     // protected from the cleanup it needs.
     const { database, deleted, rows } = ownerConsole();
     rows[1].email = retiredSuperAdminEmail;
@@ -2001,12 +2002,12 @@ it('answers 503 when the owner presses the button with nothing to copy from', as
   });
 });
 
-describe('generating a new owner password', () => {
+describe('the two owner password endpoints', () => {
   const ownerRow = { ...activeAdminRow, id: '00000000-0000-4000-8000-0000000000f1', name: 'Glow & Grace Super Admin', email: superAdminEmail, role: 'Super Admin' };
 
   /**
    * A console session answering as `row`, plus a database that recognises the
-   * owner account when `rotateOwnerPassword` goes looking for it.
+   * owner account when the save goes looking for it.
    */
   function consoleFor(row: Record<string, unknown>, ownerExists = true) {
     const { database, query } = makeDatabase(async (text) => {
@@ -2017,7 +2018,7 @@ describe('generating a new owner password', () => {
       if (text.includes('FROM admin_sessions')) return { rows: [row], rowCount: 1 };
       if (text.includes('FROM admin_users WHERE email = $1')) {
         return ownerExists
-          ? { rows: [{ id: ownerRow.id, email: superAdminEmail, role: 'Super Admin', password_hold_until: null }], rowCount: 1 }
+          ? { rows: [{ id: ownerRow.id, email: superAdminEmail, role: 'Super Admin' }], rowCount: 1 }
           : { rows: [], rowCount: 0 };
       }
       return { rows: [], rowCount: 0 };
@@ -2025,100 +2026,229 @@ describe('generating a new owner password', () => {
     return { admin: createAdminHandlers(database), query };
   }
 
-  it('replaces the password and mails it to the owner address', async () => {
-    const { admin, query } = consoleFor(ownerRow);
-    const result = await admin.handle({ method: 'POST', segments: ['owner-password', 'generate'], token });
-
+  /** The plaintext out of a generated response, for the save half of a round trip. */
+  function generated(result: { status: number; body: unknown }) {
     expect(result.status).toBe(200);
-    const body = result.body as { rotated: boolean; email: string; sessionsRevoked: number };
-    expect(body.rotated).toBe(true);
-    expect(body.email).toBe(superAdminEmail);
-    expect(body.sessionsRevoked).toBe(3);
+    return (result.body as { generated: true; password: string }).password;
+  }
 
-    const hash = query.mock.calls.find(([text]) => String(text).includes('SET password_hash = $1'));
-    expect(hash).toBeDefined();
-    // `password_hold_until = NULL` is on the same statement: there is no
-    // hand-chosen password left to come back to.
-    expect(String(hash![0])).toContain('password_hold_until = NULL');
+  describe('generating', () => {
+    it('hands a password back to the owner and changes nothing', async () => {
+      const { admin, query } = consoleFor(ownerRow);
+      const password = generated(await admin.handle({ method: 'POST', segments: ['owner-password', 'generate'], token }));
 
-    const mail = query.mock.calls.find(([text]) => String(text).includes('INSERT INTO email_outbox'));
-    expect(mail).toBeDefined();
-    expect((mail![1] as unknown[])[0]).toBe(superAdminEmail);
-  });
+      expect(password).toHaveLength(8);
+      expect(password).toMatch(/[A-Z]/);
+      expect(password).toMatch(/[0-9]/);
 
-  it('never puts the generated password in the response', async () => {
-    // The whole design of `/superadmin/ggpass` rests on this. If the password ever
-    // came back over the wire, it would be in the browser, in a screen recording,
-    // and in whatever the network tab kept.
-    const { admin, query } = consoleFor(ownerRow);
-    const result = await admin.handle({ method: 'POST', segments: ['owner-password', 'generate'], token });
-
-    expect(result.status).toBe(200);
-    const body = result.body as Record<string, unknown>;
-    expect(Object.keys(body).sort()).toEqual(['email', 'nextRotationDays', 'rotated', 'sessionsRevoked']);
-    expect(JSON.stringify(body)).not.toMatch(/password/i);
-
-    // And the stored value is a hash, so the plaintext only ever exists in the
-    // outbox row on its way to the mailbox.
-    const hash = query.mock.calls.find(([text]) => String(text).includes('SET password_hash = $1'));
-    expect(String((hash![1] as unknown[])[0])).toMatch(/^scrypt\$/);
-    const mail = query.mock.calls.find(([text]) => String(text).includes('INSERT INTO email_outbox'));
-    expect(String((mail![1] as unknown[])[2])).toMatch(/Password: /);
-  });
-
-  it('ends every session, the caller included', async () => {
-    const { admin, query } = consoleFor(ownerRow);
-    await admin.handle({ method: 'POST', segments: ['owner-password', 'generate'], token });
-
-    const revoke = query.mock.calls.find(([text]) => String(text).includes('DELETE FROM admin_sessions WHERE user_id = $1'));
-    expect(revoke).toBeDefined();
-    expect((revoke![1] as unknown[])[0]).toBe(ownerRow.id);
-  });
-
-  it('refuses anybody who is not the owner account', async () => {
-    // The gate that counts. The page hides the button from other roles, but a
-    // hidden button is not access control - this has to hold for a direct POST
-    // from anything signed in as somebody else.
-    for (const row of [
-      activeAdminRow,
-      { ...activeAdminRow, role: 'Content Editor' },
-      { ...activeAdminRow, role: 'Candidate' },
-    ]) {
-      const { admin, query } = consoleFor(row);
-      const result = await admin.handle({ method: 'POST', segments: ['owner-password', 'generate'], token });
-
-      expect(result.status).toBe(403);
-      expect((result.body as { error?: string }).error).toBe('forbidden');
-      // Nothing was rotated.
+      // The whole reason this is a separate request. Nothing is written and
+      // nobody is signed out until the owner presses save, so a closed tab or a
+      // second look costs nobody their access.
       expect(query.mock.calls.some(([text]) => String(text).includes('SET password_hash'))).toBe(false);
-    }
+      expect(query.mock.calls.some(([text]) => String(text).includes('DELETE FROM admin_sessions'))).toBe(false);
+      expect(query.mock.calls.some(([text]) => String(text).includes('INSERT INTO email_outbox'))).toBe(false);
+    });
+
+    it('gives a different one every time, because a repeat is useless to a locked-out owner', async () => {
+      const seen = new Set<string>();
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        const { admin } = consoleFor(ownerRow);
+        seen.add(generated(await admin.handle({ method: 'POST', segments: ['owner-password', 'generate'], token })));
+      }
+      expect(seen.size).toBe(6);
+    });
+
+    it('returns the password only to the account it belongs to', async () => {
+      const { admin } = consoleFor(ownerRow);
+      const result = await admin.handle({ method: 'POST', segments: ['owner-password', 'generate'], token });
+      const body = result.body as Record<string, unknown>;
+
+      expect(Object.keys(body).sort()).toEqual(['email', 'generated', 'password']);
+      // The address is echoed so the page can say where the password is going,
+      // and it has to be the caller's own.
+      expect(body.email).toBe(superAdminEmail);
+    });
+
+    it('refuses anybody who is not the owner account', async () => {
+      // The gate that counts. The page hides the button from other roles, but a
+      // hidden button is not access control - this has to hold for a direct POST
+      // from anything signed in as somebody else.
+      for (const row of [
+        activeAdminRow,
+        { ...activeAdminRow, role: 'Content Editor' },
+        { ...activeAdminRow, role: 'Candidate' },
+      ]) {
+        const { admin, query } = consoleFor(row);
+        const result = await admin.handle({ method: 'POST', segments: ['owner-password', 'generate'], token });
+
+        expect(result.status).toBe(403);
+        expect((result.body as { error?: string }).error).toBe('forbidden');
+        // Nothing was written.
+        expect(query.mock.calls.some(([text]) => String(text).includes('SET password_hash'))).toBe(false);
+      }
+    });
+
+    it('needs a session', async () => {
+      const { admin } = consoleFor(ownerRow);
+      const result = await admin.handle({ method: 'POST', segments: ['owner-password', 'generate'], token: undefined });
+      expect(result.status).toBe(401);
+    });
+
+    it('will only generate on a POST', async () => {
+      const { admin } = consoleFor(ownerRow);
+      const result = await admin.handle({ method: 'GET', segments: ['owner-password', 'generate'], token });
+
+      expect(result.status).toBe(405);
+    });
   });
 
-  it('needs a session', async () => {
-    const { admin } = consoleFor(ownerRow);
-    const result = await admin.handle({ method: 'POST', segments: ['owner-password', 'generate'], token: undefined });
-    expect(result.status).toBe(401);
-  });
+  describe('saving', () => {
+    it('hashes what it was given, ends every session and confirms the address', async () => {
+      const { admin, query } = consoleFor(ownerRow);
+      const result = await admin.handle({
+        method: 'POST',
+        segments: ['owner-password', 'save'],
+        body: { password: 'Mango!Tree9' },
+        token,
+      });
 
-  it('will only generate on a POST', async () => {
-    const { admin, query } = consoleFor(ownerRow);
-    const result = await admin.handle({ method: 'GET', segments: ['owner-password', 'generate'], token });
+      expect(result.status).toBe(200);
+      const body = result.body as { saved: boolean; email: string; sessionsRevoked: number };
+      expect(body.saved).toBe(true);
+      expect(body.email).toBe(superAdminEmail);
+      expect(body.sessionsRevoked).toBe(3);
 
-    expect(result.status).toBe(405);
-    expect(query.mock.calls.some(([text]) => String(text).includes('SET password_hash'))).toBe(false);
-  });
+      const hash = query.mock.calls.find(([text]) => String(text).includes('SET password_hash = $1'));
+      expect(hash).toBeDefined();
+      // A hash, never the value that came off the screen. The plaintext has nowhere
+      // else to live: the session is being torn down the same moment.
+      expect(String((hash![1] as unknown[])[0])).toMatch(/^scrypt\$/);
+      expect(String((hash![1] as unknown[])[0])).not.toContain('Mango');
 
-  it('says so when there is no owner account to give a password to', async () => {
-    const { admin } = consoleFor(ownerRow, false);
-    const result = await admin.handle({ method: 'POST', segments: ['owner-password', 'generate'], token });
+      const revoke = query.mock.calls.find(([text]) => String(text).includes('DELETE FROM admin_sessions WHERE user_id = $1'));
+      expect(revoke).toBeDefined();
+      expect((revoke![1] as unknown[])[0]).toBe(ownerRow.id);
 
-    expect(result.status).toBe(409);
-    expect((result.body as { error?: string }).error).toBe('owner_missing');
+      const mail = query.mock.calls.find(([text]) => String(text).includes('INSERT INTO email_outbox'));
+      expect(mail).toBeDefined();
+      expect((mail![1] as unknown[])[0]).toBe(superAdminEmail);
+    });
+
+    it('confirms to the owner address without carrying the password', async () => {
+      // The one mail in the project with no working credential in it. This is what
+      // makes it safe to say out loud that the password was changed, and it is why
+      // the page can drop the value once the save is through.
+      const { admin, query } = consoleFor(ownerRow);
+      await admin.handle({ method: 'POST', segments: ['owner-password', 'save'], body: { password: 'Mango!Tree9' }, token });
+
+      const mail = query.mock.calls.find(([text]) => String(text).includes('INSERT INTO email_outbox'));
+      const [recipient, subject, body] = mail![1] as unknown[];
+      // The kind is in the statement, not the parameters, so it is checked there.
+      expect(String(mail![0])).toContain("'owner-password-saved'");
+      expect(recipient).toBe(superAdminEmail);
+      expect(String(subject)).toContain('saved');
+      expect(String(body)).not.toContain('Mango');
+      expect(String(body)).not.toMatch(/Password:\s*\S/);
+    });
+
+    it('accepts a password the owner typed instead of one it generated', async () => {
+      // The field is editable on purpose, so this is the path a busy owner takes.
+      const { admin, query } = consoleFor(ownerRow);
+      const result = await admin.handle({
+        method: 'POST',
+        segments: ['owner-password', 'save'],
+        body: { password: 'Mango!Tree9' },
+        token,
+      });
+
+      expect(result.status).toBe(200);
+      const hash = query.mock.calls.find(([text]) => String(text).includes('SET password_hash = $1'));
+      expect(hash).toBeDefined();
+    });
+
+    it('refuses anything outside the password policy, and writes nothing', async () => {
+      // Otherwise the owner could set a password the console would not accept, and
+      // lock themselves out on the screen that was supposed to help. The policy is
+      // length only - the same one every other password in the project is held to.
+      for (const password of ['short', 'M'.repeat(129)]) {
+        const { admin, query } = consoleFor(ownerRow);
+        const result = await admin.handle({
+          method: 'POST',
+          segments: ['owner-password', 'save'],
+          body: { password },
+          token,
+        });
+
+        expect(result.status).toBe(400);
+        expect((result.body as { error?: string }).error).toBe('invalid_password');
+        expect(query.mock.calls.some(([text]) => String(text).includes('SET password_hash'))).toBe(false);
+        // And nobody was signed out for a refused change.
+        expect(query.mock.calls.some(([text]) => String(text).includes('DELETE FROM admin_sessions'))).toBe(false);
+      }
+    });
+
+    it('refuses anybody who is not the owner account', async () => {
+      for (const row of [
+        activeAdminRow,
+        { ...activeAdminRow, role: 'Content Editor' },
+      ]) {
+        const { admin, query } = consoleFor(row);
+        const result = await admin.handle({
+          method: 'POST',
+          segments: ['owner-password', 'save'],
+          body: { password: 'Mango!Tree9' },
+          token,
+        });
+
+        expect(result.status).toBe(403);
+        expect(query.mock.calls.some(([text]) => String(text).includes('SET password_hash'))).toBe(false);
+      }
+    });
+
+    it('needs a session', async () => {
+      const { admin } = consoleFor(ownerRow);
+      const result = await admin.handle({
+        method: 'POST',
+        segments: ['owner-password', 'save'],
+        body: { password: 'Mango!Tree9' },
+        token: undefined,
+      });
+      expect(result.status).toBe(401);
+    });
+
+    it('will only save on a POST', async () => {
+      const { admin } = consoleFor(ownerRow);
+      const result = await admin.handle({
+        method: 'GET',
+        segments: ['owner-password', 'save'],
+        token,
+      });
+
+      expect(result.status).toBe(405);
+    });
+
+    it('says so when there is no owner account to save a password for', async () => {
+      const { admin } = consoleFor(ownerRow, false);
+      const result = await admin.handle({
+        method: 'POST',
+        segments: ['owner-password', 'save'],
+        body: { password: 'Mango!Tree9' },
+        token,
+      });
+
+      expect(result.status).toBe(409);
+      expect((result.body as { error?: string }).error).toBe('owner_missing');
+    });
   });
 
   it('is not reachable at any other path under its name', async () => {
-    const { admin } = consoleFor(ownerRow);
-    const result = await admin.handle({ method: 'POST', segments: ['owner-password', 'something-else'], token });
+    // The old route was a single POST to /generate that rotated as it went. There
+    // is no verb left for that here, so a stale bookmark gets a 404 rather than a
+    // silent password change.
+    const { admin, query } = consoleFor(ownerRow);
+    const result = await admin.handle({ method: 'POST', segments: ['owner-password', 'rotate'], token });
+
     expect(result.status).toBe(404);
+    expect(query.mock.calls.some(([text]) => String(text).includes('SET password_hash'))).toBe(false);
   });
 });

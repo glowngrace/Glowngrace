@@ -412,16 +412,20 @@ export const adminApi = {
     }),
 
   /**
-   * Generates a fresh owner password and emails it to the owner address.
+   * Makes a password for the owner to look at, and hands it back.
    *
-   * There is no `password` field on the response and there is not going to be
-   * one. The generated value goes to the outbox and to the owner's inbox, and
-   * this call reports only that it happened - so there is nothing here for a
-   * screen to accidentally render, log, or put in the URL bar.
-   *
-   * Every session is revoked, the caller's included, so whoever pressed the
-   * button is signed out immediately afterwards.
+   * The one response in this project that carries a credential, and it goes to the
+   * one account allowed to have it. Nothing is written and no session is touched,
+   * so the previous password still works and a tab that closes loses nothing - the
+   * operator types the new one in and saves it with `saveOwnerPassword`.
    */
   generateOwnerPassword: () =>
-    post<{ rotated: true; email: string; sessionsRevoked: number; nextRotationDays: number }>('owner-password/generate'),
+    post<{ generated: true; password: string; email: string }>('owner-password/generate'),
+  /**
+   * Stores the owner password. From here on it is the only one that works, every
+   * session is ended including this caller's, and a confirmation that carries no
+   * password is emailed to the owner address.
+   */
+  saveOwnerPassword: (password: string) =>
+    post<{ saved: true; email: string; sessionsRevoked: number; message: string }>('owner-password/save', { password }),
 };

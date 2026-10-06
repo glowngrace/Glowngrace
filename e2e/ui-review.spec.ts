@@ -253,7 +253,7 @@ test('the owner account signs in at its real address and opens the console', asy
   // in each database was renamed to match. Nothing in the browser can check that
   // spelling - the server decides who the owner is - so the one place a
   // regression would show is a sign-in that stops working for the account a
-  // deployment is opened with when every other credential has been rotated away.
+  // deployment is opened with when no other credential is on record.
   await stubConsoleFor(page, ownerAccount);
   await page.goto('/login');
 
@@ -270,11 +270,11 @@ test('the owner account signs in at its real address and opens the console', asy
   expect(errors).toEqual([]);
 });
 
-test('a held owner password does not open the console to anybody else', async ({ page }) => {
+test('an owner password does not open the console to anybody else', async ({ page }) => {
   const errors = watchConsole(page);
-  // The hold exists so a known password survives the weekly rotation for a
-  // window. It changes when the owner password is replaced, not who may use it,
-  // so a portal account with a valid session still meets the locked console.
+  // The owner password is set from a screen, by whoever is signed in as the owner,
+  // so it changes what the owner can sign in with and never who may use it. A portal
+  // account with a valid session still meets the locked console.
   await stubConsoleFor(page, { ...ownerAccount, id: 'portal-1', name: 'Anjali Verma', role: 'Candidate' });
   await page.goto('/login');
 

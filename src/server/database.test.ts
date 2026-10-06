@@ -3,7 +3,6 @@ import { createMemoryDatabase } from './database';
 import { createHandlers } from './handlers';
 import { createApiRouter } from './router';
 import { createAdminHandlers } from './admin';
-import { rotateOwnerPassword, rotateOwnerPasswordIfDue } from './admin/owner-password';
 import { superAdminEmail } from '../auth/roles';
 
 /**
@@ -246,14 +245,19 @@ describe('the SQL the engine supports', () => {
 /**
  * Getting into the console on a store that starts empty.
  *
- * The owner's password is generated and mailed, which is right for production
- * but leaves a machine with no mail host with no way in at all, because the
- * outbox dies with the process. The pinned password is the escape hatch, and it
- * only earns to exist if a hand-chosen one cannot quietly become permanent.
+ * The owner's password is generated and mailed, which is right for the seed and
+ * wrong for `/superadmin/ggpass`: seeding happens with nobody at the keyboard, so
+ * there is no screen to show a password on. The pinned password is the escape hatch
+ * for a machine with no mail host at all, where the outbox row would die with the
+ * process.
+ *
+ * A pinned password used to need a date it would be taken back on, because the
+ * weekly rotation would otherwise have replaced it. There is no rotation now, so it
+ * is simply a seed-time value that lasts until the owner replaces it from the
+ * screen - and a pin that does not meet the password policy is refused outright.
  */
 describe('the owner account on a freshly started store', () => {
   const pinned = { OWNER_PINNED_PASSWORD: 'Andy@1983$$' };
-  const sevenDaysOut = () => new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
 
   beforeEach(() => {
     delete process.env.OWNER_PINNED_PASSWORD;
@@ -262,7 +266,7 @@ describe('the owner account on a freshly started store', () => {
 
   it('signs in with the pinned password', async () => {
     const { database } = createMemoryDatabase();
-    Object.assign(process.env, pinned, { OWNER_PINNED_HOLD_UNTIL: sevenDaysOut() });
+    Object.assign(process.env, pinned);
     const admin = createAdminHandlers(database);
     await admin.seed();
 
@@ -270,37 +274,36 @@ describe('the owner account on a freshly started store', () => {
     expect(login.status).toBe(201);
   });
 
-  it('refuses a pinned password that was given no expiry', async () => {
+  it('needs no expiry date for a pinned password, because nothing takes it back', async () => {
     const { database } = createMemoryDatabase();
     Object.assign(process.env, pinned);
-    await expect(createAdminHandlers(database).seed()).rejects.toThrow(/hold date is not optional/);
+    // A refusal would come back as a rejected promise, so reaching here at all is
+    // the assertion; the account is proven usable by the sign-in above.
+    await expect(createAdminHandlers(database).seed()).resolves.toBeUndefined();
   });
 
-  it('refuses a hold that has already passed, or one further out than a month', async () => {
+  it('refuses a pinned password the sign-in form would refuse', async () => {
     const { database } = createMemoryDatabase();
-    Object.assign(process.env, pinned, { OWNER_PINNED_HOLD_UNTIL: '2020-01-01T00:00:00Z' });
-    await expect(createAdminHandlers(database).seed()).rejects.toThrow(/already passed/);
-
-    const tooFar = createMemoryDatabase().database;
-    Object.assign(process.env, { OWNER_PINNED_HOLD_UNTIL: '2099-01-01T00:00:00Z' });
-    await expect(createAdminHandlers(tooFar).seed()).rejects.toThrow(/at most 30 days/);
+    Object.assign(process.env, { OWNER_PINNED_PASSWORD: 'short' });
+    await expect(createAdminHandlers(database).seed()).rejects.toThrow(/at least 8 characters/);
   });
 
-  it('stores the hold so the rotation gives the password back', async () => {
+  it('stores no rotation or hold columns, because there is nothing left to schedule', async () => {
     const { database } = createMemoryDatabase();
-    Object.assign(process.env, pinned, { OWNER_PINNED_HOLD_UNTIL: sevenDaysOut() });
     await createAdminHandlers(database).seed();
 
-    const owner = await database.query('SELECT email, password_hold_until FROM admin_users WHERE email = $1', [superAdminEmail]);
-    expect(owner.rows[0]?.password_hold_until).toBeInstanceOf(Date);
-    // A hold in the future means the account is not due, whatever the rotation
-    // stamp says.
-    expect((await rotateOwnerPasswordIfDue(database)).rotated).toBe(false);
+    // `SELECT *` returns the columns the store actually declares, so this is a
+    // statement about the schema and not about one row's contents. The in-memory
+    // store declares its own, and migration 015 drops the same two from Postgres.
+    // If either side ever grows them back, this is the test that notices.
+    const owner = await database.query('SELECT * FROM admin_users WHERE email = $1', [superAdminEmail]);
+    expect(Object.keys(owner.rows[0] as object)).not.toContain('password_rotated_at');
+    expect(Object.keys(owner.rows[0] as object)).not.toContain('password_hold_until');
   });
 
   it('does not mail a password the operator already has', async () => {
     const { database } = createMemoryDatabase();
-    Object.assign(process.env, pinned, { OWNER_PINNED_HOLD_UNTIL: sevenDaysOut() });
+    Object.assign(process.env, pinned);
     await createAdminHandlers(database).seed();
 
     const outbox = await database.query('SELECT recipient FROM email_outbox WHERE kind = $1', ['owner-credentials']);
@@ -314,45 +317,41 @@ describe('the owner account on a freshly started store', () => {
     const outbox = await database.query('SELECT recipient FROM email_outbox WHERE kind = $1', ['owner-credentials']);
     expect(outbox.rows).toEqual([{ recipient: superAdminEmail }]);
   });
+
+  it('generates one the owner can actually read off the page and type back in', async () => {
+    const { database } = createMemoryDatabase();
+    await createAdminHandlers(database).seed();
+
+    const { password } = await mailedPassword(database);
+    expect(password).toHaveLength(8);
+    // No glyphs that are hard to tell apart, because this one is not going to be
+    // emailed to anybody - it is going to be handed to a person and typed back.
+    expect(password).not.toMatch(/[Il1O0]/);
+  });
 });
 
-/**
+  /**
  * The whole journey, on the real store.
  *
  * Each of the three things the owner is promised is checked somewhere already -
- * the rotation writes a hash, the outbox holds the message, the login verifies -
- * but all three were checked against mocks that answer whatever they were told.
- * That combination can pass while the seam between them is broken: a password
- * mailed to the wrong place, or a hash written under a parameter the verifier
- * never reads, is invisible to all of them at once.
+ * the save writes a hash, the sign-in verifies, the confirmation carries no
+ * password - but all three were checked against mocks that answer whatever they
+ * were told. That combination can pass while the seam between them is broken: a
+ * hash written under a parameter the verifier never reads is invisible to all of
+ * them at once.
  *
- * So this drives the actual round trip the button starts, and then signs in with
- * whatever ended up in the mailbox. Nothing here is stubbed, which is also why it
- * is the only place that can catch a query the in-memory engine parses
- * differently from Postgres.
+ * So this drives the actual round trip the screen starts - generate, then save
+ * exactly what came back - and then signs in with it. Nothing here is stubbed,
+ * which is also why it is the only place that can catch a query the in-memory
+ * engine parses differently from Postgres.
  */
-describe('the round trip the generate button starts', () => {
+describe('the round trip the generate and save buttons start', () => {
   beforeEach(() => {
     delete process.env.OWNER_PINNED_PASSWORD;
     delete process.env.OWNER_PINNED_HOLD_UNTIL;
   });
 
-  /** The password from the most recent credential message in the outbox. */
-  async function mailedPassword(database: Awaited<ReturnType<typeof createMemoryDatabase>>['database']) {
-    const outbox = await database.query(
-      `SELECT recipient, body FROM email_outbox
-       WHERE kind = 'owner-credentials' AND recipient = $1
-       ORDER BY created_at DESC, id DESC LIMIT 1`,
-      [superAdminEmail],
-    );
-    const row = outbox.rows[0] as { recipient: string; body: string } | undefined;
-    if (!row) throw new Error('no owner credential was queued for the owner address');
-    const password = /Password:\s*(\S+)/.exec(row.body)?.[1];
-    if (!password) throw new Error(`the queued message carried no password:\n${row.body}`);
-    return { recipient: row.recipient, password };
-  }
-
-  it('emails the owner a password they can then sign in with', async () => {
+  it('signs the owner in with the password it generated and then saved', async () => {
     const { database } = createMemoryDatabase();
     const admin = createAdminHandlers(database);
     await admin.seed();
@@ -360,37 +359,50 @@ describe('the round trip the generate button starts', () => {
     // Whatever the seed mailed is the starting credential, so the test does not
     // depend on how a fresh store happens to be set up.
     const before = await mailedPassword(database);
-    const signedInBefore = await admin.handle({
+    const token = await admin.handle({
       method: 'POST',
       segments: ['session'],
       body: { email: superAdminEmail, password: before.password },
+    }).then((result) => (result.body as { token: string }).token);
+    expect(token).toBeTruthy();
+
+    // The generate step. Nothing is written and the session still works, which is
+    // the whole reason it is a separate request.
+    const generated = await admin.handle({
+      method: 'POST',
+      segments: ['owner-password', 'generate'],
+      token,
     });
-    expect(signedInBefore.status).toBe(201);
+    expect(generated.status).toBe(200);
+    const fresh = (generated.body as { password: string }).password;
+    expect(fresh).toHaveLength(8);
+    // A fresh password every time. Two generations handing back the same string
+    // would make "generate again" useless to somebody who wants a different one.
+    expect(fresh).not.toBe(before.password);
 
-    // Now the button: rotate.
-    const rotated = await rotateOwnerPassword(database);
-    expect(rotated.rotated).toBe(true);
+    // Generating has changed nothing at all: the old password still opens the
+    // console, so a closed tab or a refresh costs nobody their access.
+    expect((await admin.handle({
+      method: 'POST',
+      segments: ['session'],
+      body: { email: superAdminEmail, password: before.password },
+    })).status).toBe(201);
 
-    // A second message exists, addressed to the owner, carrying a different
-    // password from the one that used to work.
-    const after = await mailedPassword(database);
-    expect(after.recipient).toBe(superAdminEmail);
-    // A fresh password every time. Two rotations handing back the same string
-    // would make "generate again" useless to somebody locked out.
-    expect(after.password).not.toBe(before.password);
-    // And one an attacker could not guess: the rotation is only worth anything if
-    // the password it mints is stronger than the one it replaced.
-    expect(after.password.length).toBeGreaterThanOrEqual(20);
-    expect(after.password).toMatch(/[a-z]/);
-    expect(after.password).toMatch(/[A-Z]/);
-    expect(after.password).toMatch(/[0-9]/);
+    // Now the save, with the value that came back from the generate step.
+    const saved = await admin.handle({
+      method: 'POST',
+      segments: ['owner-password', 'save'],
+      body: { password: fresh },
+      token,
+    });
+    expect(saved.status).toBe(200);
 
     // One character different, so the password is checked rather than merely
-    // present in the mailbox.
-    const wrong = `${after.password.slice(0, -1)}${after.password.endsWith('a') ? 'b' : 'a'}`;
+    // present in the response.
+    const wrong = `${fresh.slice(0, -1)}${fresh.endsWith('a') ? 'b' : 'a'}`;
 
-    // The old password is dead. A rotation that only added a second working
-    // password would leave a compromised credential valid for ever.
+    // The old password is dead. A save that only added a second working password
+    // would leave a compromised credential valid for ever.
     expect((await admin.handle({
       method: 'POST',
       segments: ['session'],
@@ -403,43 +415,181 @@ describe('the round trip the generate button starts', () => {
       body: { email: superAdminEmail, password: wrong },
     })).status).toBe(401);
 
-    // And this is the promise the whole screen rests on: the address in the
-    // mailbox is the address that opens the console.
-    const signedInAfter = await admin.handle({
+    // And this is the promise the whole screen rests on: the value on the screen
+    // is the one that opens the console.
+    const signedIn = await admin.handle({
       method: 'POST',
       segments: ['session'],
-      body: { email: superAdminEmail, password: after.password },
+      body: { email: superAdminEmail, password: fresh },
     });
-    expect(signedInAfter.status).toBe(201);
-    const body = signedInAfter.body as { user: { email: string; role: string } };
+    expect(signedIn.status).toBe(201);
+    const body = signedIn.body as { user: { email: string; role: string } };
     expect(body.user.email).toBe(superAdminEmail);
     expect(body.user.role).toBe('Super Admin');
   });
 
-  it('never puts the password in the response the browser sees', async () => {
+  it('ends every session when it saves, so the old password stops working everywhere', async () => {
     const { database } = createMemoryDatabase();
     const admin = createAdminHandlers(database);
     await admin.seed();
-    await rotateOwnerPassword(database);
+    const { password: seeded } = await mailedPassword(database);
 
-    const { password } = await mailedPassword(database);
-    const result = await admin.handle({
+    const tokens = await Promise.all([1, 2, 3].map(() => admin.handle({
+      method: 'POST',
+      segments: ['session'],
+      body: { email: superAdminEmail, password: seeded },
+    }).then((result) => (result.body as { token: string }).token)));
+
+    const generated = await admin.handle({
       method: 'POST',
       segments: ['owner-password', 'generate'],
-      // A session is needed to get past the role check. Any token the store has
-      // never issued is fine here, because the assertion is about the response
-      // body, not about who was allowed to ask.
+      token: tokens[0],
+    });
+    const saved = await admin.handle({
+      method: 'POST',
+      segments: ['owner-password', 'save'],
+      body: { password: (generated.body as { password: string }).password },
+      token: tokens[0],
+    });
+    expect((saved.body as { sessionsRevoked: number }).sessionsRevoked).toBe(3);
+
+    // Every one of them, the caller's included - which is why the page drops its
+    // token and walks to sign-in rather than staying put.
+    for (const token of tokens) {
+      expect((await admin.handle({ method: 'GET', segments: ['me'], token })).status).toBe(401);
+    }
+  });
+
+  it('queues a confirmation that carries no password', async () => {
+    const { database } = createMemoryDatabase();
+    const admin = createAdminHandlers(database);
+    await admin.seed();
+    const token = await ownerToken(database, admin);
+
+    const generated = await admin.handle({ method: 'POST', segments: ['owner-password', 'generate'], token });
+    const fresh = (generated.body as { password: string }).password;
+    await admin.handle({ method: 'POST', segments: ['owner-password', 'save'], body: { password: fresh }, token });
+
+    const confirmations = await database.query(
+      `SELECT recipient, subject, body FROM email_outbox WHERE kind = 'owner-password-saved'`,
+    );
+    expect(confirmations.rows).toHaveLength(1);
+    const row = confirmations.rows[0] as { recipient: string; body: string };
+    expect(row.recipient).toBe(superAdminEmail);
+    // The one mail in the project that carries no working credential.
+    expect(row.body).not.toContain(fresh);
+    expect(row.body).not.toMatch(/Password:\s*\S/);
+  });
+
+  it('refuses to save anything the sign-in form would refuse, and keeps the account usable', async () => {
+    const { database } = createMemoryDatabase();
+    const admin = createAdminHandlers(database);
+    await admin.seed();
+    const { password: seeded } = await mailedPassword(database);
+    const token = await ownerToken(database, admin);
+
+    const refused = await admin.handle({
+      method: 'POST',
+      segments: ['owner-password', 'save'],
+      body: { password: 'short' },
+      token,
+    });
+    expect(refused.status).toBe(400);
+    // A refused save must leave the owner exactly as they were, or a typo would
+    // lock the account that cannot be locked out.
+    expect((await admin.handle({
+      method: 'POST',
+      segments: ['session'],
+      body: { email: superAdminEmail, password: seeded },
+    })).status).toBe(201);
+  });
+
+  it('saves a password the operator typed themselves, under the same policy', async () => {
+    // The field is editable on purpose. This is the case that has to work, and it
+    // has to be held to exactly the policy a reset or a team-member change is held
+    // to, or the owner could set something the sign-in form would not accept.
+    const { database } = createMemoryDatabase();
+    const admin = createAdminHandlers(database);
+    await admin.seed();
+    const token = await ownerToken(database, admin);
+
+    expect((await admin.handle({
+      method: 'POST',
+      segments: ['owner-password', 'save'],
+      body: { password: 'Mango!Tree9' },
+      token,
+    })).status).toBe(200);
+
+    const login = await admin.handle({
+      method: 'POST',
+      segments: ['session'],
+      body: { email: superAdminEmail, password: 'Mango!Tree9' },
+    });
+    expect(login.status).toBe(201);
+    expect((login.body as { user: { role: string } }).user.role).toBe('Super Admin');
+  });
+
+  it('answers 403 to anybody who is not the owner', async () => {
+    const { database } = createMemoryDatabase();
+    const admin = createAdminHandlers(database);
+    await admin.seed();
+    const created = await admin.handle({
+      method: 'POST',
+      segments: ['users'],
+      body: { name: 'Rehana Kapoor', email: 'rehana@glowngrace.in', role: 'Store Administrator', password: 'Andy@1983$$' },
       token: await ownerToken(database, admin),
     });
+    expect((created.body as { user: { id: string } }).user.id).toBeTruthy();
 
-    expect(result.status).toBe(200);
-    // Not in the body, and not under any key that could be added by accident
-    // later: the fields are enumerated, so a future `password` field fails here
-    // instead of shipping to a screen.
-    expect(Object.keys(result.body as object).sort()).toEqual(['email', 'nextRotationDays', 'rotated', 'sessionsRevoked']);
-    expect(JSON.stringify(result.body)).not.toContain(password);
+    // Postgres defaults a new account to Active; the in-memory store declares no
+    // defaults, so it is set here. Without it there is no session to be refused
+    // with, and the test would pass for the wrong reason.
+    await database.query('UPDATE admin_users SET status = $1 WHERE email = $2', ['Active', 'rehana@glowngrace.in']);
+    const otherToken = await admin.handle({
+      method: 'POST',
+      segments: ['session'],
+      body: { email: 'rehana@glowngrace.in', password: 'Andy@1983$$' },
+    }).then((result) => (result.body as { token: string }).token);
+    expect(otherToken).toBeTruthy();
+
+    // Generating is refused as firmly as saving. A store administrator who could
+    // mint a password for the owner would not be stopped by anything.
+    for (const segments of [['owner-password', 'generate'], ['owner-password', 'save']]) {
+      const result = await admin.handle({
+        method: 'POST',
+        segments,
+        body: { password: 'Mango!Tree9' },
+        token: otherToken,
+      });
+      expect(result.status).toBe(403);
+    }
+  });
+
+  it('answers 405 for anything it cannot do, rather than guessing', async () => {
+    const { database } = createMemoryDatabase();
+    const admin = createAdminHandlers(database);
+    await admin.seed();
+    const token = await ownerToken(database, admin);
+
+    expect((await admin.handle({ method: 'GET', segments: ['owner-password', 'generate'], token })).status).toBe(405);
+    expect((await admin.handle({ method: 'POST', segments: ['owner-password', 'rotate'], token })).status).toBe(404);
   });
 });
+
+/** The password from the most recent credential message in the outbox. */
+async function mailedPassword(database: Awaited<ReturnType<typeof createMemoryDatabase>>['database']) {
+  const outbox = await database.query(
+    `SELECT recipient, body FROM email_outbox
+     WHERE kind = 'owner-credentials' AND recipient = $1
+     ORDER BY created_at DESC, id DESC LIMIT 1`,
+    [superAdminEmail],
+  );
+  const row = outbox.rows[0] as { recipient: string; body: string } | undefined;
+  if (!row) throw new Error('no owner credential was queued for the owner address');
+  const password = /Password:\s*(\S+)/.exec(row.body)?.[1];
+  if (!password) throw new Error(`the queued message carried no password:\n${row.body}`);
+  return { recipient: row.recipient, password };
+}
 
 /** A real session token for the owner, taken from a real sign-in. */
 async function ownerToken(

@@ -1,6 +1,6 @@
 import { database, resolvedDatabase, store, storeKind, tables } from './database.js';
 import { adminTables, maskHost, requiredTables, runtimeDatabaseVariables } from './config.js';
-import { mailConfigFromEnv } from './mailer.js';
+import { deliverableKinds, mailConfigFromEnv } from './mailer.js';
 
 /**
  * What /api/health reports.
@@ -29,8 +29,8 @@ export type HealthReport = {
   tables: number;
   rows: Record<string, number>;
   productCount: number;
-  /**
-   * Whether the owner's generated password can actually leave the machine.
+/**
+   * Whether this deployment's owner mail can actually leave the machine.
    *
    * Reported because the alternative was a deployment that believed it was
    * emailing owner credentials for weeks and never did: the settings were named
@@ -40,13 +40,19 @@ export type HealthReport = {
    *
    * Two values rather than a boolean, because they need different fixes:
    *
-   *   absent     the settings are not readable. Either unset or misspelled, and
-   *              the password is going to the outbox and nowhere else.
+   *   absent     the settings are not readable. Either unset or misspelled. The
+   *              seed password is going to the outbox and nowhere else, and every
+   *              saved-password confirmation will be too.
    *   configured the settings were read. It says nothing about whether the relay
    *              accepts mail, which only a real send would find out.
+   *
+   * Worth noting what this is *not* allowed to block any more. Since the owner
+   * password is generated on a screen and saved by hand, a deployment with no mail
+   * configured can still change it - the confirmation is simply queued instead of
+   * delivered.
    */
   mail?: 'configured' | 'absent';
-  /** How many owner credentials are written but not yet sent. */
+  /** How many owner credentials and password confirmations are written but not yet sent. */
   mailPending?: number;
   database?: {
     variable: string;
@@ -200,17 +206,23 @@ async function postgresReport(): Promise<HealthReport> {
   const rows: Record<string, number> = {};
   for (const table of allTables) rows[table] = Number(row[table] ?? 0);
 
-  // How many owner credentials are written but still unsent. Non-zero on a store
-  // with no pending work is the signal worth having: it means a send failed and
-  // nothing has retried it yet, and on a serverless deployment that is the only
-  // place it will ever be noticed. Counted rather than merely tested for, because a
-  // queue that grows is the difference between a blip and a relay that is refusing
-  // every message.
+  // How many owner credentials and password confirmations are written but still
+  // unsent. Non-zero on a store with no pending work is the signal worth having: it
+  // means a send failed and nothing has retried it yet, and on a serverless
+  // deployment that is the only place it will ever be noticed. Counted rather than
+  // merely tested for, because a queue that grows is the difference between a blip
+  // and a relay that is refusing every message.
+  //
+  // Both deliverable kinds, because the confirmation is queued the same way the
+  // credential was and is retried by the same pass. A deployment where the seed
+  // password went out but the "password saved" confirmation never did is exactly
+  // what a count of one is for.
   let mailPending = 0;
   if (rows.email_outbox !== undefined) {
     const pending = await database.query(
       `SELECT count(*)::int AS total FROM email_outbox
-       WHERE sent_at IS NULL AND kind = 'owner-credentials'`,
+       WHERE sent_at IS NULL AND kind = ANY($1::text[])`,
+      [[...deliverableKinds]],
     );
     mailPending = Number((pending.rows[0] as { total: number } | undefined)?.total ?? 0);
   }

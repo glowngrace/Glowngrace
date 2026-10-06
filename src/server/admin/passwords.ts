@@ -74,43 +74,6 @@ export const removedDemoPassword = 'demo123';
  */
 export const sessionDurationMinutes = 10;
 
-/**
- * How often the owner account's password is replaced.
- *
- * Seven days, because the owner credential is the one account whose password is
- * not chosen by a person: nobody sits down to set it, so it is generated and
- * delivered instead of being kept.
- */
-export const superAdminRotationDays = 7;
-
-/**
- * The longest a hand-chosen password may be held past the weekly rotation.
- *
- * A hold exists for a handover, a demo or an incident - a window somebody needs a
- * known password for. It is not a way to switch the rotation off, so it is capped
- * rather than left open-ended: past this the script refuses instead of writing a
- * date far enough out that nobody is still watching when it arrives.
- */
-export const maxPasswordHoldDays = 30;
-
-/**
- * Why a requested password hold cannot be granted, or `null` when it can.
- *
- * A hold in the past is rejected rather than ignored, because the alternative -
- * quietly storing a date that has already gone - produces an account that is due
- * for rotation on the very next tick, which is the opposite of what the operator
- * asking for a hold intends.
- */
-export function passwordHoldError(until: Date, now: Date = new Date()) {
-  if (Number.isNaN(until.getTime())) return 'That is not a date I can read. Use an ISO 8601 timestamp, for example 2026-10-10T23:59:59Z.';
-  if (until.getTime() <= now.getTime()) return 'That moment has already passed, so there is nothing to hold.';
-  const days = (until.getTime() - now.getTime()) / (24 * 60 * 60 * 1000);
-  if (days > maxPasswordHoldDays) {
-    return `A password can be held for at most ${maxPasswordHoldDays} days. Rotate it, or set it again nearer the time you need it.`;
-  }
-  return null;
-}
-
 const GENERATED_PASSWORD_LENGTH = 24;
 const GENERATED_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%&*?';
 
@@ -136,6 +99,45 @@ export function generateStrongPassword(length: number = GENERATED_PASSWORD_LENGT
   }
   const password = characters.join('');
   return passwordPolicyError(password) === null ? password : generateStrongPassword(size);
+}
+
+/**
+ * The owner's password: eight characters a person reads off a screen and types
+ * back in.
+ *
+ * Eight characters is a deliberate trade, and it is why this is not the
+ * digits-only code the screen asks for in words. Eight numbers is 10^8 - a range
+ * an online attempt walks through in hours - while eight characters drawn from
+ * this alphabet is about 2.8e14. Both are short enough to read aloud, and only
+ * one of them is worth putting on an account that cannot be locked out of its own
+ * deployment.
+ *
+ * The alphabet leaves out every glyph that is hard to tell from another at a
+ * glance or in a screenshot - `0`/`O`, `1`/`I`/`l` - because the whole point of a
+ * short password is that it survives the trip through a human being. One letter
+ * and one digit are dealt unconditionally so the result cannot come out as eight
+ * letters, and the deal is then shuffled with a CSPRNG Fisher-Yates, so the
+ * guaranteed characters are not always in the same two places.
+ */
+const OWNER_PASSWORD_LENGTH = 8;
+const OWNER_PASSWORD_LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+const OWNER_PASSWORD_DIGITS = '23456789';
+const OWNER_PASSWORD_ALPHABET = OWNER_PASSWORD_LETTERS + OWNER_PASSWORD_DIGITS;
+
+export function generateOwnerPassword(length: number = OWNER_PASSWORD_LENGTH): string {
+  const size = Math.max(length, passwordPolicy.minLength);
+  const characters = [
+    OWNER_PASSWORD_LETTERS[randomBytes(1)[0] % OWNER_PASSWORD_LETTERS.length],
+    OWNER_PASSWORD_DIGITS[randomBytes(1)[0] % OWNER_PASSWORD_DIGITS.length],
+  ];
+  while (characters.length < size) {
+    characters.push(OWNER_PASSWORD_ALPHABET[randomBytes(1)[0] % OWNER_PASSWORD_ALPHABET.length]);
+  }
+  for (let index = characters.length - 1; index > 0; index -= 1) {
+    const swap = randomBytes(1)[0] % (index + 1);
+    [characters[index], characters[swap]] = [characters[swap], characters[index]];
+  }
+  return characters.join('');
 }
 
 export function newSessionToken() {

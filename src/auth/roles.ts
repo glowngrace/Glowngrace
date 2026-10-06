@@ -42,10 +42,10 @@ export type AccountRole = (typeof signupRoles)[number];
  * The role that owns the deployment, and the one address it is reached at.
  *
  * The address was `glownglancebiz@gmail.com` until this branch, which is a
- * misspelling of the real one and matched no account in any database: the weekly
- * rotation looked for a row that was not there and did nothing. It is spelled
- * correctly here, and no migration can rename a row any more because there are no
- * rows to rename: every deployment starts from the seeds in the store.
+ * misspelling of the real one and matched no account in any database: the seed
+ * looked for a row that was not there and the owner could not sign in. It is
+ * spelled correctly here, and no migration can rename a row any more because there
+ * are no rows to rename: every deployment starts from the seeds in the store.
  */
 export const superAdminRole = 'Super Admin';
 export const superAdminEmail = 'glowngracebiz@gmail.com';
@@ -56,7 +56,7 @@ export const superAdminEmail = 'glowngracebiz@gmail.com';
  * Kept only so the migration and the tests can talk about the old value. Nothing
  * authenticates against it, and it must never be treated as a second owner: two
  * addresses for one account is how a deployment ends up with a way in that
- * nobody rotates.
+ * nobody replaces.
  */
 export const retiredSuperAdminEmail = 'glownglancebiz@gmail.com';
 

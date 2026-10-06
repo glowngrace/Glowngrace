@@ -1,177 +1,137 @@
-import { generateStrongPassword, hashPassword, superAdminRotationDays } from './passwords.js';
-import { superAdminEmail, superAdminRole } from '../../auth/roles.js';
+import { hashPassword, passwordPolicyError } from './passwords.js';
+import { superAdminEmail } from '../../auth/roles.js';
 import { tryDeliverPendingMail } from '../mailer.js';
 import type { Database } from '../handlers.js';
 
-const DAY_MS = 24 * 60 * 60 * 1000;
+/**
+ * The owner account's password, generated on screen and saved by hand.
+ *
+ * There is no schedule and no automatic replacement. The password that is saved is
+ * the password that keeps working until somebody saves another one, which is what
+ * makes the flow on `/superadmin/ggpass` honest: the person who can see the new
+ * password is the person who typed it in, and nobody else ever receives it.
+ *
+ * That is a deliberate change from the rotation this replaced. A weekly rotation
+ * had no operator watching when it happened, so it had to deliver the new
+ * password by mail to an unattended mailbox - a live credential written to a
+ * table, sent over SMTP, and regenerated whether or not anybody was there to
+ * receive it. Sending it to the screen instead puts it in the hands of the one
+ * person allowed to have it and takes the credential out of the mail path
+ * entirely. The confirmation that follows is not a credential: it says a password
+ * was saved and when, which is audit information, not a secret.
+ */
+
+export type SavedOwnerPassword = {
+  saved: true;
+  userId: string;
+  email: string;
+  sessionsRevoked: number;
+};
 
 /**
- * How often the schedule wakes up.
+ * The message that confirms a saved password.
  *
- * A day, so a server that is restarted after a long gap still rotates promptly
- * rather than waiting a whole week from the moment it came back. The check
- * inside `rotateOwnerPasswordIfDue` is what decides whether a wake-up does
- * anything, so waking more often than the rotation period is harmless.
+ * Carries no password, on purpose. This is the one mail in the project that is
+ * safe to leave lying around in a mailbox for years: it records that the owner
+ * credential changed and when, and it cannot be replayed to sign in. The old
+ * design put the live password in the same slot, which meant a forwarded
+ * confirmation mail was a working login.
  */
-export const ownerRotationCheckMs = 24 * 60 * 60 * 1000;
-
-export type OwnerRotationResult =
-  | { rotated: false; reason: 'missing' | 'not-due' }
-  | { rotated: true; userId: string; email: string; sessionsRevoked: number; holdSpentUntil: string | null };
-
-/**
- * The outbox message that carries a generated password to its owner.
- *
- * Both the first password and every later rotation are worded here, so the
- * person holding the mailbox reads the same thing whichever one arrives.
- */
-export function ownerCredentialsMessage(input: { password: string; role: string; now: Date }) {
-  const nextRotationAt = new Date(input.now.getTime() + superAdminRotationDays * DAY_MS);
+export function ownerPasswordSavedMessage(input: { role: string; now: Date }) {
   return {
-    subject: 'Your new Glow & Grace owner password',
+    subject: 'Your Glow & Grace owner password was saved',
     body: [
-      `Hello,`,
+      'Hello,',
       '',
-      `A new password for the ${input.role} account was generated on ${input.now.toISOString()}.`,
-      'It is valid until the next rotation, and until then it is the only one that works.',
+      `A new password for the ${input.role} account was saved on ${input.now.toISOString()}.`,
       '',
-      `Sign in at /login as ${superAdminEmail}`,
-      `Password: ${input.password}`,
+      `Sign in at /login as ${superAdminEmail} using the password you generated and saved on this screen.`,
+      'Every session signed in with the previous password was ended, including the one that saved the new one.',
       '',
-      `The next password is generated on ${nextRotationAt.toISOString()}, and every session signed in with this one is signed out when that happens.`,
-      '',
-      'If you did not expect this, treat it as a warning: the address is the way into the console, so check who holds access to the mailbox.',
+      'If you did not do this, treat it as a warning: the address is the way into the console, so check who holds access to the mailbox.',
     ].join('\n'),
   };
 }
 
 /**
- * Replaces the owner account's password, and tells the owner what it is now.
+ * The outbox message that carries a generated password to its owner.
  *
- * This account exists because a deployment has to have somebody who can always
- * get in. Nobody chooses its password, so it is generated here, stored hashed,
- * and written to the outbox, which is where this project keeps mail it has no
- * server to send. Every session is revoked at the same moment: the old password
- * has stopped working, so a session opened with it should stop working too.
- *
- * Any password hold is cleared on the way through. The hold is what let a
- * hand-chosen password survive the weekly rotation, and it has just run out, so
- * leaving it behind would either hold the *next* generated password for another
- * window - which nobody asked for - or, worse, keep a past date that made every
- * later tick look overdue.
+ * Only the seed writes this one. It is the single case where the password cannot
+ * be shown to anybody: seeding happens with nobody at the keyboard, so the
+ * password has to travel by mail or the deployment comes up with an owner account
+ * that cannot be signed into. `/superadmin/ggpass` no longer does this, because
+ * there is a person on the other end of it.
  */
-export async function rotateOwnerPassword(database: Database, now: Date = new Date()): Promise<OwnerRotationResult> {
+export function ownerCredentialsMessage(input: { password: string; role: string; now: Date }) {
+  return {
+    subject: 'Your Glow & Grace owner password',
+    body: [
+      'Hello,',
+      '',
+      `A password for the ${input.role} account was generated on ${input.now.toISOString()} when this deployment was seeded.`,
+      'It does not change on its own, so keep it somewhere safe.',
+      '',
+      `Sign in at /login as ${superAdminEmail}`,
+      `Password: ${input.password}`,
+      '',
+      'If you would rather choose it yourself, sign in and use /superadmin/ggpass to generate and save a new one.',
+    ].join('\n'),
+  };
+}
+
+/**
+ * Stores the password and tells the owner it was stored.
+ *
+ * The value arrives from the screen rather than from here, because the point of
+ * the flow is that the operator can edit what was generated before keeping it.
+ * That makes this the one place in the project where a password is chosen by a
+ * request body, so it is held to the same policy as every other password, and it
+ * is hashed with the same scrypt parameters - the input is never stored, logged
+ * or echoed.
+ *
+ * Every session is revoked at the same moment: the previous password has stopped
+ * working, so a session opened with it should stop working too. The caller's is
+ * included, which is why the response is the last thing that session sees.
+ *
+ * A password hold used to be cleared on the way through. There is no hold and no
+ * rotation left, so there is nothing to clear and the columns are gone.
+ */
+export async function saveOwnerPassword(database: Database, password: string, now: Date = new Date()): Promise<SavedOwnerPassword | { saved: false; reason: 'missing' }> {
+  const refused = passwordPolicyError(password);
+  if (refused) throw new Error(refused);
+
   const found = await database.query(
-    'SELECT id, email, role, password_hold_until FROM admin_users WHERE email = $1',
+    'SELECT id, email, role FROM admin_users WHERE email = $1',
     [superAdminEmail],
   );
-  const account = found.rows[0] as
-    | { id: string; email: string; role: string; password_hold_until: Date | string | null }
-    | undefined;
+  const account = found.rows[0] as { id: string; email: string; role: string } | undefined;
   // A deployment that has not been seeded yet, or whose owner row was deleted on
-  // purpose, has nothing to rotate. The caller re-seeds; this is not an error.
-  if (!account) return { rotated: false, reason: 'missing' };
+  // purpose, has nothing to give a password to. The caller re-seeds; not an error.
+  if (!account) return { saved: false, reason: 'missing' };
 
-  const password = generateStrongPassword();
   await database.query(
-    'UPDATE admin_users SET password_hash = $1, password_rotated_at = $2, password_hold_until = NULL WHERE id = $3',
+    'UPDATE admin_users SET password_hash = $1, updated_at = $2 WHERE id = $3',
     [await hashPassword(password), now, account.id],
   );
   const revoked = await database.query('DELETE FROM admin_sessions WHERE user_id = $1', [account.id]);
 
-  const message = ownerCredentialsMessage({ password, role: account.role, now });
+  const message = ownerPasswordSavedMessage({ role: account.role, now });
   await database.query(
     `INSERT INTO email_outbox (kind, recipient, subject, body)
-     VALUES ('owner-credentials', $1, $2, $3)`,
+     VALUES ('owner-password-saved', $1, $2, $3)`,
     [superAdminEmail, message.subject, message.body],
   );
   // The outbox row is the record; this is the attempt to put it in the owner's
   // mailbox. A failure here is reported and left to the delivery pass, because the
-  // hash has already been replaced and there is no second chance to generate this
-  // particular password.
+  // hash has already been replaced and there is no second chance to send this
+  // particular confirmation - though unlike a credential, losing it costs an audit
+  // line rather than an account.
   await tryDeliverPendingMail(database);
 
   return {
-    rotated: true,
+    saved: true,
     userId: String(account.id),
     email: account.email,
     sessionsRevoked: revoked.rowCount ?? 0,
-    holdSpentUntil: account.password_hold_until === null ? null : new Date(account.password_hold_until).toISOString(),
-  };
-}
-
-/**
- * Rotates when the weekly clock is up, and when a password hold has run out.
- *
- * The two are mutually exclusive, which is the whole point of the hold: while it
- * is in the future the account is not due however long ago `password_rotated_at`
- * was stamped, so a password somebody chose by hand is not replaced a day later.
- * Once the date is in the past the account is due immediately, whatever the
- * rotation stamp says - the hold was granted instead of the rotation, so the
- * moment it expires the normal schedule takes over rather than starting a fresh
- * week of grace.
- *
- * A row with no hold behaves exactly as it did before the column existed.
- *
- * The comparison stays in the query rather than in JavaScript so a clock skew
- * between the application host and the database cannot cause a rotation on every
- * single request.
- */
-export async function rotateOwnerPasswordIfDue(database: Database, now: Date = new Date()) {
-  const found = await database.query(
-    `SELECT id FROM admin_users
-     WHERE email = $1
-       AND (
-         (password_hold_until IS NOT NULL AND password_hold_until <= $2)
-         OR (password_hold_until IS NULL AND (password_rotated_at IS NULL OR password_rotated_at <= $3))
-       )`,
-    [superAdminEmail, now, new Date(now.getTime() - superAdminRotationDays * DAY_MS)],
-  );
-  if (found.rows.length === 0) {
-    const exists = await database.query('SELECT id FROM admin_users WHERE email = $1', [superAdminEmail]);
-    return exists.rows.length === 0
-      ? ({ rotated: false, reason: 'missing' } as const)
-      : ({ rotated: false, reason: 'not-due' } as const);
-  }
-  return rotateOwnerPassword(database, now);
-}
-
-/**
- * Starts the rotation schedule and returns a way to stop it.
- *
- * The timer is unref'd so a test, or a script that imports the server, is never
- * held open by it. A failure is logged and the schedule carries on: the next
- * wake-up is a day away, and an outage that stops the process is a different
- * problem from one that stops a rotation.
- */
-export function startOwnerPasswordRotation(database: Database, options: { now?: () => Date; intervalMs?: number } = {}) {
-  const now = options.now ?? (() => new Date());
-  let stopped = false;
-
-  const tick = async () => {
-    if (stopped) return;
-    try {
-      const result = await rotateOwnerPasswordIfDue(database, now());
-      if (result.rotated) {
-        // Worth distinguishing in the log: a hold running out is the operator's
-        // own deadline arriving, where a plain rotation is just the week turning
-        // over. Only the first one is ever a surprise.
-        const because = result.holdSpentUntil ? `a password hold that ended ${result.holdSpentUntil}` : 'the weekly rotation';
-        console.log(`Rotated the ${superAdminRole} password after ${because} and mailed the new one to ${result.email}.`);
-      }
-    } catch (error) {
-      console.error('Unable to rotate the owner password', error);
-    }
-  };
-
-  const timer = setInterval(() => void tick(), options.intervalMs ?? ownerRotationCheckMs);
-  timer.unref?.();
-  void tick();
-
-  return {
-    stop() {
-      stopped = true;
-      clearInterval(timer);
-    },
   };
 }

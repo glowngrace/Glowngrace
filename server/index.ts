@@ -10,7 +10,6 @@ const { createHandlers } = await import('../src/server/handlers.js');
 const { database, storeKind, closeDatabase, resolvedDatabase } = await import('../src/server/database.js');
 const { checkHealth } = await import('../src/server/health.js');
 const { createApiRouter } = await import('../src/server/router.js');
-const { startOwnerPasswordRotation } = await import('../src/server/admin/owner-password.js');
 const { mailConfigFromEnv, startMailDelivery } = await import('../src/server/mailer.js');
 const { describeResolvedDatabase } = await import('../src/server/config.js');
 
@@ -113,30 +112,23 @@ app.listen(port, '0.0.0.0', () => {
 });
 
 /**
- * The owner account's password is generated on a schedule rather than chosen,
- * because nobody sits down to set it. Started after the listener so a database
- * that is still coming up cannot delay the port from opening; the rotation logs
- * its own failures and tries again the next day.
- */
-startOwnerPasswordRotation(database);
-
-/**
- * Carries any owner credential that is still waiting in the outbox into the
- * mailbox it was addressed to.
+ * Carries any owner mail that is still waiting in the outbox into the mailbox it
+ * was addressed to.
  *
- * A rotation writes the message and then tries to send it, so this normally has
- * nothing to do. It is here for the case that matters: a transport that was down
- * when the password was generated. That row is the only copy of a working
- * password, so it stays queued until a send actually succeeds. Without SMTP
- * settings the pass does nothing and the outbox keeps being the record, which is
- * what a local checkout and a preview deployment rely on.
+ * Two things write there: the seed, which mails the first owner password, and the
+ * save on `/superadmin/ggpass`, which queues a confirmation. Both normally find
+ * the queue empty, because both attempt a send immediately. It is here for the
+ * case that matters: a transport that was down at the time. That row is the only
+ * record of what was sent to the owner, so it stays queued until a send actually
+ * succeeds. Without SMTP settings the pass does nothing and the outbox keeps being
+ * the record, which is what a local checkout and a preview deployment rely on.
  */
 startMailDelivery(database);
 
-// Said once at boot, because a deployment that believes it is sending owner
-// credentials and is not is the kind of mistake that is only discovered a week
-// later, when a password nobody received stops working.
+// Said once at boot, because a deployment that believes it is sending owner mail
+// and is not is the kind of mistake that is otherwise only discovered when
+// somebody goes looking for a password that was never posted.
 const mail = mailConfigFromEnv();
 console.log(mail
-  ? `Owner credentials will be emailed through ${mail.host}:${mail.port} as ${mail.from}.`
-  : 'No SMTP settings found, so owner credentials stay in the outbox instead of being emailed. Set SMTP_HOST (or MAIL_HOST), SMTP_USER and SMTP_PASSWORD to send them.');
+  ? `Owner mail will be sent through ${mail.host}:${mail.port} as ${mail.from}.`
+  : 'No SMTP settings found, so owner mail stays in the outbox instead of being sent. Set SMTP_HOST (or MAIL_HOST), SMTP_USER and SMTP_PASSWORD to send it.');
