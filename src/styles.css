@@ -804,6 +804,17 @@ h3 { font-size: 1.25rem; }
 .ggpass-field input:disabled { opacity: 1; cursor: not-allowed; -webkit-text-fill-color: var(--g-soft); }
 .ggpass-hint { margin: .45rem 0 0; color: var(--g-soft); font-size: .76rem; }
 
+/* The password field and the button that keeps it, under the generate button.
+   The icon sits in the same place as the envelope above it, and the padding drops
+   the right-hand reservation the locked-email field needs for its badge. */
+.ggpass-save { margin-top: 1.6rem; }
+.ggpass-field input.ggpass-code { padding-right: 1rem; font-family: ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, monospace; font-size: 1.05rem; letter-spacing: .12em; color: var(--g-ink); }
+.ggpass-field input.ggpass-code[readonly] { color: var(--g-soft); }
+.ggpass-field input.ggpass-code:focus { border-color: var(--g-rose-deep); }
+/* The two buttons are the same shape stacked, so the second one reads as the next
+   step rather than as a different kind of control. */
+.ggpass-save .ggpass-btn { margin-top: 1.1rem; }
+
 .ggpass-btn { display: flex; width: 100%; align-items: center; justify-content: center; gap: .7rem; padding: 1rem 2rem; border: 0; border-radius: 2px; background: var(--g-ink); color: #fff; cursor: pointer; font-family: var(--sans); font-size: .7rem; font-weight: 500; letter-spacing: .22em; line-height: 1.5; text-align: center; text-transform: uppercase; transition: background-color .35s ease; }
 .ggpass-btn:hover:not(:disabled) { background: var(--g-rose-deep); }
 .ggpass-btn:disabled { opacity: .75; cursor: wait; }
@@ -817,6 +828,12 @@ h3 { font-size: 1.25rem; }
 .ggpass-note.is-error { border-color: #e7ceca; background: #fbeeec; color: #7b4348; }
 .ggpass-note.is-error > i { background: var(--g-rose-deep); }
 .ggpass-note.is-error b, .ggpass-note.is-error code { color: #6b3439; }
+/* A warning says the feature still works and something else does not. It borrows
+   the error's weight but not its colour, because a missing confirmation mail must
+   not read as a missing password. */
+.ggpass-note.is-warning { border-color: #e6dcc2; background: #fdf8ec; color: #6d5c33; }
+.ggpass-note.is-warning > i { background: var(--g-gold); }
+.ggpass-note.is-warning b, .ggpass-note.is-warning code { color: #5c4d2a; }
 
 .ggpass-back { display: block; margin-top: 1.6rem; color: var(--g-rose-deep); font-size: .66rem; letter-spacing: .2em; line-height: 2.2; text-align: center; text-transform: uppercase; }
 .ggpass-back:hover { text-decoration: underline; text-underline-offset: 3px; }
@@ -837,6 +854,15 @@ h3 { font-size: 1.25rem; }
 .ggpass-toast-icon svg { width: 15px; height: 15px; fill: none; stroke: var(--g-ok); stroke-width: 2.2; }
 .ggpass-toast b { display: block; color: var(--g-ink); font-family: var(--serif); font-size: 1.1rem; font-weight: 500; }
 .ggpass-toast > div span { color: var(--g-soft); font-size: .82rem; }
+/* The generated value itself, in the toast, above the sentence about it. Monospace
+   with wide tracking so eight characters cannot be misread as one, and selectable so
+   it still works when the clipboard API is refused and the copy button says so. */
+.ggpass-toast-code { display: block; margin: .45rem 0; color: var(--g-ink) !important; font-family: ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, monospace; font-size: 1.15rem !important; font-weight: 500; letter-spacing: .22em; user-select: all; }
+/* Sits under the message rather than beside it: the toast is a fixed-width panel in
+   a corner and a second control on the title line would push the value down and out
+   of the shape the design uses. */
+.ggpass-toast-copy { display: inline-block; margin-top: .7rem; padding: .4rem .85rem; border: 1px solid var(--g-line); border-radius: 2px; background: #fff; color: var(--g-ink); cursor: pointer; font-family: var(--sans); font-size: .58rem; font-weight: 500; letter-spacing: .18em; text-transform: uppercase; }
+.ggpass-toast-copy:hover { border-color: var(--g-rose-deep); color: var(--g-rose-deep); }
 .ggpass-toast-close { display: grid; width: 24px; height: 24px; flex: none; margin-left: auto; place-items: center; padding: 0; border: 0; background: none; color: var(--g-soft); cursor: pointer; font-size: 1rem; line-height: 1; }
 .ggpass-toast-close:hover { color: var(--g-ink); }
 .ggpass-toast-bar { position: absolute; bottom: 0; left: 0; height: 2px; width: 0; background: var(--g-ok); animation: ggpass-toast-bar 4.5s linear forwards; }

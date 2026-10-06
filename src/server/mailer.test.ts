@@ -35,7 +35,12 @@ function outboxDatabase(rows: Array<Partial<OutboxMessage> & { id: string }>) {
   const marked: string[] = [];
   const query = vi.fn(async (text: string, values: unknown[] = []) => {
     if (text.includes('FROM email_outbox')) {
-      return { rows: rows.filter((row) => row.kind === values[0]), rowCount: rows.length };
+      // The kinds are asked for as a list, because the pass now carries two: the
+      // seed credential and the save confirmation. Older statements named one
+      // kind directly, so both shapes are understood here.
+      const wanted = Array.isArray(values[0]) ? (values[0] as string[]) : [String(values[0])];
+      const matching = rows.filter((row) => wanted.includes(String(row.kind)));
+      return { rows: matching, rowCount: matching.length };
     }
     if (text.includes('UPDATE email_outbox SET sent_at')) {
       marked.push(String(values[1]));
@@ -178,6 +183,13 @@ describe('what may be emailed', () => {
     expect(isDeliverable({ ...ownerMessage, recipient: superAdminEmail.toUpperCase() })).toBe(true);
   });
 
+  it('sends the save confirmation to the owner address too', () => {
+    // It carries no password, so it is allowed out on the same terms as the one
+    // that does - and it still only goes to the one address.
+    expect(isDeliverable({ kind: 'owner-password-saved', recipient: superAdminEmail })).toBe(true);
+    expect(isDeliverable({ ...ownerMessage, kind: 'owner-password-saved', recipient: 'someone.else@example.com' })).toBe(false);
+  });
+
   it('refuses the address the owner account used to be spelled with', () => {
     // The owner address was misspelled until this branch and the row was renamed
     // to match. A credential addressed to the old spelling would reach a mailbox
@@ -215,7 +227,7 @@ describe('delivering a message', () => {
   });
 
   it('does nothing when no transport is configured, and says so', async () => {
-    // A local checkout has no SMTP settings, and the rotation must not fail over it.
+    // A local checkout has no SMTP settings, and a save must not fail over it.
     const sendMail = vi.fn(async () => ({ messageId: '1' }));
     const outcome = await deliverOutboxMessage(ownerMessage, null, { sendMail });
 
@@ -233,7 +245,7 @@ describe('delivering a message', () => {
     expect(sendMail).not.toHaveBeenCalled();
   });
 
-  it('reports a transport failure instead of throwing, so the rotation survives it', async () => {
+  it('reports a transport failure instead of throwing, so the row survives it', async () => {
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     try {
       const sendMail = vi.fn(async () => { throw new Error('ECONNREFUSED'); });
@@ -248,9 +260,10 @@ describe('delivering a message', () => {
 });
 
 describe('the delivery pass', () => {
-  it('only ever picks up the owner credential', async () => {
+  it('picks up the seed credential and the save confirmation, and nothing else', async () => {
     const { database, query } = outboxDatabase([
       { id: 'm1', kind: 'owner-credentials', recipient: superAdminEmail, subject: 's', body: 'b' },
+      { id: 'm4', kind: 'owner-password-saved', recipient: superAdminEmail, subject: 's', body: 'b' },
       { id: 'm2', kind: 'signup', recipient: 'reha@example.com', subject: 's', body: 'b' },
       { id: 'm3', kind: 'password-reset', recipient: 'deepak@glowngrace.in', subject: 's', body: 'b' },
     ]);
@@ -258,18 +271,21 @@ describe('the delivery pass', () => {
 
     const result = await deliverPendingMail(database, { config, transport: { sendMail } });
 
-    expect(result.attempted).toBe(1);
-    expect(result.delivered).toBe(1);
-    expect(sendMail).toHaveBeenCalledTimes(1);
-    expect(sendMail.mock.calls[0][0].to).toBe(superAdminEmail);
-    // The kind is a parameter rather than an interpolation, so the query cannot
+    // Both kinds the owner is meant to hear about, and nothing addressed anywhere
+    // else. A save confirmation that never went out would leave the owner with no
+    // record that their credential changed.
+    expect(result.attempted).toBe(2);
+    expect(result.delivered).toBe(2);
+    expect(sendMail).toHaveBeenCalledTimes(2);
+    expect(sendMail.mock.calls.map((call) => call[0].to)).toEqual([superAdminEmail, superAdminEmail]);
+    // The kinds are a parameter rather than an interpolation, so the query cannot
     // carry one in.
     expect(String(query.mock.calls[0][0])).toContain('$1');
   });
 
   it('never considers a superseded credential, because its password no longer works', async () => {
     // The queue is asked for only the newest message of the kind. If the transport
-    // was down across two rotations, both rows would otherwise be pending, and the
+    // was down across two seeds, both rows would otherwise be pending, and the
     // older one holds a password that has already been replaced.
     const { database, query } = outboxDatabase([
       { id: 'older', kind: 'owner-credentials', recipient: superAdminEmail, subject: 's', body: 'stale' },
@@ -397,10 +413,10 @@ describe('the retry that rides along on requests', () => {
    *
    * The delivery *schedule* is started by the Express server. On Vercel there is no
    * Express server: every request is a function that is frozen the moment it
-   * answers, so an interval never fires. A rotation whose first send attempt failed
-   * wrote the row, logged the failure, left `sent_at` null, and then nothing ever
-   * retried it - which quietly contradicts the promise the `sent_at` marker and the
-   * pending index are there to keep.
+   * answers, so an interval never fires. An owner message whose first send attempt
+   * failed wrote the row, logged the failure, left `sent_at` null, and then nothing
+   * ever retried it - which quietly contradicts the promise the `sent_at` marker
+   * and the pending index are there to keep.
    */
 
   it('does nothing at all when the outbox is empty', async () => {

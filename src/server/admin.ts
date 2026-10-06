@@ -10,9 +10,9 @@ import {
   type Collection,
   type Row,
 } from './admin/collections.js';
-import { hashPassword, generateStrongPassword, newSessionToken, newResetToken, passwordHoldError, passwordPolicy, removedDemoPassword, resetTokenExpiry, resetTokenLookup, sessionExpiry, verifyPassword, hashResetToken, superAdminRotationDays } from './admin/passwords.js';
+import { hashPassword, generateStrongPassword, generateOwnerPassword, newSessionToken, newResetToken, passwordPolicy, passwordPolicyError, removedDemoPassword, resetTokenExpiry, resetTokenLookup, sessionExpiry, verifyPassword, hashResetToken } from './admin/passwords.js';
 import { consoleRoles, signupRoles, superAdminEmail, superAdminRole } from '../auth/roles.js';
-import { ownerCredentialsMessage, rotateOwnerPassword } from './admin/owner-password.js';
+import { ownerCredentialsMessage, saveOwnerPassword } from './admin/owner-password.js';
 import { tryDeliverPendingMail } from './mailer.js';
 import { datasetCountSql, mapDatasetRowCounts } from './admin/datasets.js';
 import { normalizeStoreSettings, validateStoreSettings, type StoreSettings } from './admin/settings.js';
@@ -150,6 +150,18 @@ const passwordResetConfirmSchema = z.object({
   token: z.string().trim().min(32).max(200),
   newPassword: password,
 });
+
+/**
+ * The owner's password, as it arrives from the screen.
+ *
+ * The generated value goes out as a response and comes back in a body, because
+ * the point of the flow is that the operator can edit what was generated before
+ * keeping it. It is held to exactly the policy every other password in the
+ * project is held to - the same `password` schema as a change and a reset - so a
+ * hand-typed value cannot buy a shorter or longer credential than the sign-in
+ * form would accept.
+ */
+const ownerPasswordSchema = z.object({ password });
 
 /**
  * The public registration form.
@@ -567,7 +579,7 @@ async function retirePublishedDemoAccounts(database: Database) {
  * "reset demo data" replay.
  */
 /**
- * The owner's first password, and how long it is held for.
+ * The owner's first password.
  *
  * Normally this is generated and mailed, because an account whose password was
  * typed by a human is an account whose password is in a shell history and a
@@ -575,25 +587,19 @@ async function retirePublishedDemoAccounts(database: Database) {
  * password that could not be mailed leaves nobody able to open the console at
  * all - the outbox row dies with the process.
  *
- * `OWNER_PINNED_PASSWORD` is the way out, and the only reason it is read here.
- * It is a hand-chosen password, so it is refused unless `OWNER_PINNED_HOLD_UNTIL`
- * names the moment the rotation takes it back, which keeps a pinned password
- * from quietly becoming permanent.
+ * `OWNER_PINNED_PASSWORD` is the way out, and the only reason it is read here. It
+ * used to need `OWNER_PINNED_HOLD_UNTIL` naming the moment the weekly rotation
+ * took it back. There is no rotation now - the owner chooses the password, on
+ * `/superadmin/ggpass`, and it lasts until they choose another - so a pinned seed
+ * password is a bootstrap rather than a time bomb and needs no date.
  */
-function seededOwnerCredentials(now: Date) {
+function seededOwnerCredentials() {
   const pinned = process.env.OWNER_PINNED_PASSWORD?.trim();
-  if (!pinned) return { password: generateStrongPassword(), holdUntil: null as Date | null, pinned: false };
+  if (!pinned) return { password: generateOwnerPassword(), pinned: false };
 
-  const holdRaw = process.env.OWNER_PINNED_HOLD_UNTIL?.trim();
-  if (!holdRaw) {
-    throw new Error(
-      'OWNER_PINNED_PASSWORD is set without OWNER_PINNED_HOLD_UNTIL. A hand-chosen password has to expire, so the hold date is not optional.',
-    );
-  }
-  const holdUntil = new Date(holdRaw);
-  const refused = passwordHoldError(holdUntil, now);
-  if (refused) throw new Error(`OWNER_PINNED_HOLD_UNTIL ${holdRaw} was refused: ${refused}`);
-  return { password: pinned, holdUntil, pinned: true };
+  const refused = passwordPolicyError(pinned);
+  if (refused) throw new Error(`OWNER_PINNED_PASSWORD was refused: ${refused}`);
+  return { password: pinned, pinned: true };
 }
 
 /**
@@ -667,24 +673,22 @@ export async function seedAdminData(database: Database) {
   );
   await retirePublishedAdminPassword(database);
   await retirePublishedDemoAccounts(database);
-  // The owner account, which is rotated on a schedule rather than ever being
-  // chosen by hand. `password_rotated_at` is stamped here so the first rotation
-  // is a week after the account appears, not a second after the server boots.
+  // The owner account. Nobody chooses this password: it is generated here, stored
+  // hashed, and written to the outbox, because seeding happens with nobody at the
+  // keyboard and an account whose password reached nobody is the same as no
+  // account at all. `/superadmin/ggpass` is the on-demand version, and it shows
+  // the password on screen instead of mailing it, because there is a person there.
   //
-  // The first password is delivered the moment the account is created, because an
-  // account nobody has the password for is not a way in: a hash that was never
-  // written down anywhere is the same as no account at all. The outbox row is
-  // only written when the insert actually created the row, so a boot that finds
-  // the account already there does not mail a password that was never stored.
-  // A pinned password is the one exception: the operator already has it, so
-  // mailing it back would be noise.
-  const now = new Date();
-  const { password: ownerPassword, holdUntil, pinned } = seededOwnerCredentials(now);
+  // The outbox row is only written when the insert actually created the row, so a
+  // boot that finds the account already there does not mail a password that was
+  // never stored. A pinned password is the one exception: the operator already has
+  // it, so mailing it back would be noise.
+  const { password: ownerPassword, pinned } = seededOwnerCredentials();
   const created = await database.query(
-    `INSERT INTO admin_users (id, name, email, role, password_hash, avatar, status, password_rotated_at, password_hold_until)
-     VALUES ('00000000-0000-4000-8000-0000000000f1', $1, $2, $3, $4, '/images/partner1.jpg', 'Active', NOW(), $5)
+    `INSERT INTO admin_users (id, name, email, role, password_hash, avatar, status)
+     VALUES ('00000000-0000-4000-8000-0000000000f1', $1, $2, $3, $4, '/images/partner1.jpg', 'Active')
      ON CONFLICT (email) DO NOTHING`,
-    [ownerAccount.name, ownerAccount.email, ownerAccount.role, await hashPassword(ownerPassword), holdUntil],
+    [ownerAccount.name, ownerAccount.email, ownerAccount.role, await hashPassword(ownerPassword)],
   );
   if (created.rowCount && !pinned) {
     const message = ownerCredentialsMessage({ password: ownerPassword, role: ownerAccount.role, now: new Date() });
@@ -1488,42 +1492,68 @@ async function listPages() {
     }
 
     /**
-     * Generating a fresh owner password on demand.
+     * Generating a password to look at, and saving it.
      *
-     * The schedule in `owner-password.ts` already rotates this account every
-     * week; this is the button for the times a person needs it to happen now -
-     * a suspected compromise, a lost mailbox, a contractor leaving.
+     * Two requests rather than one, and the split is the whole design:
      *
-     * Gated on the role rather than on the address, and always checked again
-     * here even though the caller has a session: a session proves who somebody
-     * is, not what they are allowed to do, and this endpoint hands over the
-     * account that cannot be locked out of the deployment. `rotateOwnerPassword`
-     * revokes every session as it goes, which includes the caller's, so the
-     * response is the last thing this session sees.
+     *   POST /owner-password/generate  makes a password and hands it back. Nothing
+     *                                 is written, no session is touched, and the
+     *                                 previous password still works - so a tab that
+     *                                 closes or a walk away from the keyboard loses
+     *                                 nothing. The alternative, which this replaced,
+     *                                 replaced the credential immediately and mailed
+     *                                 the new one to a mailbox nobody was watching.
+     *   POST /owner-password/save      stores the password, from the body. This is
+     *                                 the moment the old one stops working, every
+     *                                 session is revoked, and a confirmation that
+     *                                 carries no password is queued for the owner.
      *
-     * Nothing in the response is a secret. The password is written to the outbox
-     * and emailed; it is never returned, logged, or held in the browser.
+     * Gated on the role rather than on the address, and always checked here even
+     * though the caller has a session: a session proves who somebody is, not what
+     * they are allowed to do, and this endpoint owns the account that cannot be
+     * locked out of the deployment. The save revokes every session as it goes,
+     * which includes the caller's, so that response is the last thing this session
+     * sees.
+     *
+     * The generated value is the one secret this project now returns over HTTP,
+     * and it is returned to the one account allowed to have it. It is never
+     * logged, never written to the outbox, and never emailed.
      */
     if (resource === 'owner-password') {
       if (user.role !== superAdminRole) {
         return fail(403, 'forbidden', `Only the ${superAdminRole} account can generate a new owner password.`);
       }
-      if (method !== 'POST') return fail(405, 'method_not_allowed', 'Use POST to generate a new owner password.');
-      if (id && id !== 'generate') return fail(404, 'not_found', 'That endpoint does not exist.');
+      if (method !== 'POST') return fail(405, 'method_not_allowed', 'Use POST to generate or save an owner password.');
 
-      const result = await rotateOwnerPassword(database);
-      if (!result.rotated) {
-        return fail(409, 'owner_missing', 'There is no owner account to give a password to. Seed the console first.');
+      if (id === 'save') {
+        const parsed = ownerPasswordSchema.safeParse(request.body);
+        if (!parsed.success) {
+          return fail(400, 'invalid_password', 'Enter a password of at least 8 characters.', { errors: fieldErrors(parsed.error) });
+        }
+        const result = await saveOwnerPassword(database, parsed.data.password);
+        if (!result.saved) {
+          return fail(409, 'owner_missing', 'There is no owner account to save a password for. Seed the console first.');
+        }
+        return {
+          status: 200,
+          body: {
+            saved: true,
+            email: result.email,
+            sessionsRevoked: result.sessionsRevoked,
+            message: `Your ${superAdminRole} password was saved and a confirmation was sent to ${result.email}.`,
+          },
+        };
       }
+
+      if (id !== 'generate') return fail(404, 'not_found', 'That endpoint does not exist.');
       return {
         status: 200,
         body: {
-          rotated: true,
-          email: result.email,
-          sessionsRevoked: result.sessionsRevoked,
-          // Deliberately absent: the password. It exists in the outbox row and in
-          // the owner's inbox and nowhere else.
-          nextRotationDays: superAdminRotationDays,
+          generated: true,
+          // The only response in this project that carries a credential, and it goes
+          // to the account that is allowed to have it and nowhere else.
+          password: generateOwnerPassword(),
+          email: user.email,
         },
       };
     }
@@ -1764,7 +1794,8 @@ async function listPages() {
           return fail(400, 'self_status', `You cannot set your own status to ${update.status}. Ask another administrator.`);
         }
         // Moving the owner account to another role would take the deployment's way
-        // back in with it, so the rotation job is the only thing that changes it.
+        // back in with it, so nothing else may change the role of the one account
+        // that can change every password.
         if (update.role !== undefined && update.role !== superAdminRole && await isOwnerAccount(id)) {
           return fail(400, 'owner_protected', `The owner account keeps the ${superAdminRole} role.`);
         }
@@ -1791,10 +1822,10 @@ async function listPages() {
       }
       if (id && method === 'DELETE') {
         if (id === user.id) return fail(400, 'self_delete', 'You cannot delete the account you are signed in with.');
-        // The owner account is the way back into a deployment whose passwords have
-        // all been rotated away, so it is not something a console session can
-        // remove. Recovery goes through the rotation schedule, not through here.
-        if (await isOwnerAccount(id)) return fail(400, 'owner_protected', 'The owner account cannot be deleted. Rotate its password instead.');
+        // The owner account is the only way back into a deployment, so it
+        // is not something a console session can remove. Recovery is a new password
+        // from the owner screen, not a resurrected row.
+        if (await isOwnerAccount(id)) return fail(400, 'owner_protected', 'The owner account cannot be deleted. Replace its password from /superadmin/ggpass instead.');
         const result = await database.query('DELETE FROM admin_users WHERE id = $1 RETURNING id', [id]);
         if (result.rows.length === 0) return fail(404, 'not_found', 'That team member no longer exists.');
         return { status: 200, body: { deleted: id, message: 'Team member removed.' } };

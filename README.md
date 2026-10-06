@@ -96,52 +96,76 @@ success.
 
 ## The owner password
 
-Nobody chooses the Super Admin password. It is generated on the server, stored
-hashed, written to `email_outbox`, and emailed to the owner address. It rotates
-weekly, and every rotation ends every open session.
+The Super Admin password is set by hand, on `/superadmin/ggpass`, by the person
+signed in as the owner. It does not change on a schedule and nothing replaces it
+behind anybody's back. Generating one writes nothing; saving one stores the hash,
+ends every session, and emails a confirmation that carries no password.
 
 | | |
 | --- | --- |
-| Where it lands | The owner address, plus the `email_outbox` table (kept as the record, and how you read it when SMTP is not configured) |
-| Where it never lands | The browser, the API response, the console, the logs |
-| Who can ask for a new one | The `Super Admin` account, on `POST /api/admin/owner-password/generate` |
+| Where it lands | The browser, on the owner's own screen, and nowhere else. `email_outbox` holds the seed credential and the confirmations, never the password you save. |
+| Where it never lands | The API response after the save, the outbox, the console, the logs |
+| Who can change it | The `Super Admin` account, on `POST /api/admin/owner-password/save` |
 
 ### `/superadmin/ggpass`
 
-The screen that does it on demand — sign in as the owner and open
-`/superadmin/ggpass`. Use it after a suspected compromise, a lost mailbox, or
-whenever somebody leaves.
+Sign in as the owner and open `/superadmin/ggpass`. Use it after a suspected
+compromise, when somebody leaves, or the first time you want a password you chose.
 
 It asks the server who is signed in rather than trusting what is in
-`localStorage`, so an edited role string cannot reveal the button. It confirms
-before acting, because the call ends the caller's own session. And it **never
-shows the password**: there is no field to copy out of and no value in the
-response, so a screen recording, a shared screen or the network tab has nothing
-to pick up. If the mail does not arrive, generate another one — that is cheap and
-safe to repeat, which is a better failure mode than a password on a page.
+`localStorage`, so an edited role string cannot reveal the controls.
+
+Three steps, in this order and no other:
+
+1. **Generate.** The server makes an eight character password and hands it back.
+   This writes nothing and signs nobody out, so a closed tab or a refresh costs
+   nobody their access. Eight characters from an alphabet with no `0`/`O` or
+   `1`/`I`/`l` in it, at least one letter and one digit — short enough to read off
+   a screen and type back, which is the only reason it is short at all.
+2. **Edit.** The value lands in a field. Keep it, or type something you will
+   remember. The field is the value that gets saved; the toast's copy button and
+   the toast's display both follow the field, so the two can never disagree about
+   what you are about to keep.
+3. **Save.** The field's value is hashed and stored, every session ends
+   including the caller's, a confirmation goes to the owner address, and the page
+   walks back to sign-in to use it. Refused values are the ones the sign-in form
+   would refuse, so this screen cannot be used to lock yourself out of the one
+   account that cannot be recovered.
+
+**Once it is saved, nothing on the server holds it.** There is no server-side
+record of the value — no row to read it back out of, and the `email_outbox`
+carries a confirmation with no password in it. Keep it somewhere you can read
+again. If it is lost, the way back in is the forgot-password flow, which writes
+a reset link to `email_outbox` like every other message this deployment has no
+mail server for; the console reads it back.
+
+Because of that, `npm run test:e2e` reports `superadmin-password-live.spec.ts`
+as skipped unless it is told the current value with `E2E_OWNER_PASSWORD=...`, or
+the seed credential still happens to work.
 
 The destination is shown in a fixed field — the owner address, prefilled, readonly and
-disabled. Nobody can send the owner password somewhere else by typing over it, and the
-address is on screen *before* anything is pressed, so nobody discovers at the last
-moment that they cannot reach the mailbox.
+disabled. Nobody can send the owner confirmation somewhere else by typing over it.
 
-The page also reads `/api/health` on arrival. If the deployment has no database, or no
-mail settings, it says which and disables the button rather than reporting a rotation
-that cannot survive the next request — see
+The page also reads `/api/health` on arrival. If the deployment has no database it
+says which variable is missing and disables both buttons, rather than reporting a
+save that cannot survive the next request — see
 [`/api/health` on a deployment with no database](#api-health-on-a-deployment-with-no-database).
-An unreachable health route is treated as unknown, not as a fault, so a network hiccup
-does not take a working feature away.
+Missing mail is a warning and **not** a block: the password is on this screen, so a
+relay that is down costs the owner a confirmation and nothing else, and a deployment
+with no SMTP is exactly when somebody may need to change it. An unreachable health
+route is treated as unknown, not as a fault, so a network hiccup does not take a
+working feature away.
 
-The page hiding the button is a courtesy. The guard that counts is on the server:
-the endpoint re-reads the session and answers `403` to anything but the owner
-role, so it is safe to reach by typing the URL and safe to call directly. Both
-gates are covered by tests.
+The page hiding the controls is a courtesy. The guard that counts is on the server:
+both routes re-read the session and answer `403` to anything but the owner role, so
+it is safe to reach by typing the URL and safe to call directly. Both gates are
+covered by tests.
 
 ### How the retry reaches a serverless deployment
 
-A rotation whose first send attempt failed leaves the row in `email_outbox` with
-`sent_at` null, and something later has to try again. Locally that is
-`startMailDelivery`, an interval started by the Express server.
+A save confirmation whose first send attempt failed leaves the row in
+`email_outbox` with `sent_at` null, and something later has to try again. Locally
+that is `startMailDelivery`, an interval started by the Express server.
 
 Vercel has no such server. Every request is its own function, frozen the moment it
 answers, so no interval ever fires and nothing was retrying a failed send. The design
@@ -151,25 +175,34 @@ So the retry also rides along on admin requests. An empty outbox costs one index
 lookup and no network, and a pass only runs if something is waiting, so the ordinary
 request path is unaffected. The pass is fired rather than awaited — a slow relay adds
 nothing to the response — and one pass runs at a time, so two concurrent requests
-cannot send the same credential twice.
+cannot send the same confirmation twice.
 
-### Getting the password into an inbox
+### Getting the confirmation into an inbox
 
-Delivery needs a mail server, and nothing here works without one being named. The
-password is generated and stored either way — a rotation cannot fail because mail
-is unavailable — but until the settings below are present the `email_outbox` row is
-the only copy, and it has to be read out of the table by hand:
+Delivery needs a mail server. Saving a password works without one — nothing about
+the save depends on mail — but until the settings below are present the
+`email_outbox` row is never sent, and the owner is never told their credential
+changed:
+
+```sql
+SELECT body, sent_at FROM email_outbox WHERE kind = 'owner-password-saved'
+ORDER BY created_at DESC LIMIT 1;
+```
+
+That row carries no password, so reading it tells you a change happened and when.
+With the settings in place the row is emailed and `sent_at` is stamped on it.
+That column is the delivery marker: `NULL` means the confirmation has not gone out
+yet and the next pass retries it.
+
+The seed password is a different kind of message and the only one that ever carried
+a credential. It is written when the owner account is first created — seeding
+happens with nobody at the keyboard, so there is no screen to show it on — and can
+be read out of the table when the relay is not reachable:
 
 ```sql
 SELECT body FROM email_outbox WHERE kind = 'owner-credentials'
 ORDER BY created_at DESC LIMIT 1;
 ```
-
-With them set, the same row is emailed and `sent_at` is stamped on it. That column
-is the delivery marker: `NULL` means the message is still the only copy of that
-password and the next pass retries it, and a timestamp means it went out and must
-never be repeated — a superseded message is never sent even after a rotation,
-because it holds a password that no longer opens anything.
 
 Gmail needs an **App Password**, not the account password. Create one at
 <https://myaccount.google.com/apppasswords> with 2-Step Verification on; it is 16
@@ -220,9 +253,13 @@ real passwords go. `.env.local.example` is the committed starting point.
 | `DATABASE_POOL_MAX` | Pool | Defaults to `1`. Every request is a single short query, and a second connection on a pooled endpoint buys a second compute slot, not throughput. |
 | `PORT` | Local API | Express API port (defaults to `3001`). |
 | `VITE_API_BASE_URL` | Vite | Browser-visible API prefix; keep this as `/api`. Never put secrets in a `VITE_` variable. |
-| `SMTP_*` / `MAIL_*`, `MAIL_FROM`, `MAIL_FROM_NAME` | Mailer | How the owner's password is delivered. Unset means the password lands in `email_outbox` and nowhere else. See [Getting the password into an inbox](#getting-the-password-into-an-inbox). |
-| `OWNER_PINNED_PASSWORD` | Seed | Not used by this project. A hand-chosen owner password, honoured only alongside `OWNER_PINNED_HOLD_UNTIL`, and both stop mattering at the next restart. See [The owner password](#the-owner-password). |
-| `OWNER_PINNED_HOLD_UNTIL` | Seed | Not used by this project. When the weekly rotation takes a pinned password back. ISO 8601, and at most 7 days out. |
+| `SMTP_*` / `MAIL_*`, `MAIL_FROM`, `MAIL_FROM_NAME` | Mailer | How the save confirmation is delivered. Unset means the confirmation sits in `email_outbox` unsent; the password itself is unaffected. See [Getting the confirmation into an inbox](#getting-the-confirmation-into-an-inbox). |
+| `OWNER_PINNED_PASSWORD` | Seed | Optional, and not set here. A hand-chosen owner password for a deployment with no mail relay at all, where the outbox row would die with the process. It lasts until the owner replaces it from `/superadmin/ggpass`, and a value the sign-in form would refuse is refused here too. Nothing takes it back. See [The owner password](#the-owner-password). |
+
+`OWNER_PINNED_HOLD_UNTIL` was removed. It only ever existed to date a hand-chosen
+password for the weekly rotation to take back, and there is no rotation. It is
+ignored if it is still set somewhere, so a stale value is harmless rather than
+fatal.
 
 ## Copying production data down
 
@@ -303,8 +340,8 @@ unintended will be preferred over the variable you meant to use. Check
 the ones you did not mean and rotate whatever they held.
 
 The mail settings belong in Vercel's environment too, or `/superadmin/ggpass` will
-rotate the owner password into `email_outbox` and nowhere else. The startup log
-says which it found:
+save the owner's password and leave the confirmation sitting in `email_outbox`. The
+startup log says which it found:
 
 ```
 Owner credentials will be emailed through smtp.gmail.com:587 as "GG Security" <…>.
@@ -364,9 +401,11 @@ to the question. Off Vercel the same store stays `ok`: in memory is a legitimate
 for an unconfigured checkout and for the unit tests, and only on a deployment does it
 mean a setting is missing.
 
-`/superadmin/ggpass` reads this and refuses to generate a password when the store is
-`memory` or mail is `absent`, rather than reporting a rotation that cannot survive the
-next request.
+`/superadmin/ggpass` reads this and refuses to generate or save a password when the
+store is `memory`, rather than reporting a save that cannot survive the next
+request. Mail is not a blocker there: the password is on the owner's own screen, so
+an absent relay costs a confirmation and nothing else, and the page says which
+settings are missing instead of taking the feature away.
 
 ## The store's schema
 

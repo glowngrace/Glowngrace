@@ -97,7 +97,6 @@ export const tables: TableDefinition[] = [
     columns: [
       'id', 'name', 'email', 'role', 'password_hash', 'avatar', 'status',
       'created_at', 'updated_at', 'phone', 'source', 'reviewed_at', 'reviewed_by',
-      'password_rotated_at', 'password_hold_until',
     ],
     unique: [['email'], ['id']],
     generated: { id: 'uuid' },

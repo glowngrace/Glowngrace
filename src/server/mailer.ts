@@ -3,15 +3,25 @@ import { superAdminEmail } from '../auth/roles.js';
 import type { Database } from './handlers.js';
 
 /**
- * The one kind of message this module will send.
+ * The two kinds of message this module will send.
  *
  * Every other row in the outbox is either a notification with no secret in it or a
- * reset link that a person asked for on an address they already control. The owner
- * credential is the only message whose body is a password that works right now, so
- * it is the only kind that is allowed to leave the machine. That is enforced here
- * rather than at the call sites, so a future caller cannot widen it by accident.
+ * reset link that a person asked for on an address they already control. These two
+ * are the exceptions, and they are exceptions for opposite reasons:
+ *
+ *   owner-credentials  the body is a password that works right now. Written only by
+ *                      the seed, which runs with nobody at the keyboard and has no
+ *                      other way to hand over a working credential.
+ *   owner-password-saved  a confirmation that a password was changed. Carries no
+ *                      password at all, so it is safe to keep, forward and read
+ *                      years later - which is the point of an audit record.
+ *
+ * A list rather than a single name, enforced here rather than at the call sites, so
+ * a future caller cannot widen it by accident. Note what is *not* in it: the
+ * password generated on `/superadmin/ggpass` never reaches the outbox at all,
+ * because that password is shown on a screen and saved by hand.
  */
-export const deliverableKind = 'owner-credentials';
+export const deliverableKinds = ['owner-credentials', 'owner-password-saved'] as const;
 
 export type MailConfig = {
   host: string;
@@ -141,7 +151,7 @@ function formatFrom(address: string, name: string): string {
  *
  * A missing configuration is not an error: a local checkout, a test run and a
  * preview deployment all legitimately have no mail server, and the outbox row is
- * the record in every one of them. What must never happen is the rotation failing
+ * the record in every one of them. What must never happen is a save failing
  * because mail is unavailable, so an unconfigured transport reports that it had
  * nothing to do rather than throwing.
  *
@@ -175,7 +185,7 @@ export function mailConfigFromEnv(env: NodeJS.ProcessEnv = process.env): MailCon
 }
 
 export function isDeliverable(message: Pick<OutboxMessage, 'kind' | 'recipient'>) {
-  return message.kind === deliverableKind
+  return (deliverableKinds as readonly string[]).includes(message.kind)
     && message.recipient.trim().toLowerCase() === superAdminEmail;
 }
 
@@ -183,9 +193,9 @@ export function isDeliverable(message: Pick<OutboxMessage, 'kind' | 'recipient'>
  * Sends one message, and reports what happened instead of throwing.
  *
  * The caller has already changed a password by the time this runs, so a transport
- * error cannot be allowed to propagate: it would either roll the rotation back or
- * take the server down with it. The row stays unsent and the next pass tries
- * again, which is the only thing that can actually recover a lost credential.
+ * error cannot be allowed to propagate: it would either undo that change or take
+ * the server down with it. The row stays unsent and the next pass tries again,
+ * which is how a credential that exists only in the outbox still reaches an inbox.
  */
 export async function deliverOutboxMessage(
   message: OutboxMessage,
@@ -193,7 +203,7 @@ export async function deliverOutboxMessage(
   transport: { sendMail: (options: { from: string; to: string; subject: string; text: string }) => Promise<unknown> } = defaultTransport(config),
 ): Promise<DeliveryOutcome> {
   if (!config) return { delivered: false, id: message.id, reason: 'not_configured' };
-  if (message.kind !== deliverableKind) return { delivered: false, id: message.id, reason: 'wrong_kind' };
+  if (!(deliverableKinds as readonly string[]).includes(message.kind)) return { delivered: false, id: message.id, reason: 'wrong_kind' };
   if (!isDeliverable(message)) return { delivered: false, id: message.id, reason: 'wrong_recipient' };
 
   try {
@@ -205,7 +215,7 @@ export async function deliverOutboxMessage(
     });
     return { delivered: true, id: message.id };
   } catch (error) {
-    console.error(`Unable to send the owner credential to ${message.recipient}. It stays in the outbox and will be retried.`, error);
+    console.error(`Unable to send ${message.kind} mail to ${message.recipient}. It stays in the outbox and will be retried.`, error);
     return { delivered: false, id: message.id, reason: 'send_failed' };
   }
 }
@@ -224,19 +234,21 @@ function defaultTransport(config: MailConfig | null) {
 /**
  * Sends everything in the outbox that is still owed a delivery attempt.
  *
- * Only the newest owner credential is ever a candidate, and that is deliberate.
- * A password supersedes the one before it the moment it is generated, so an older
- * pending message holds a password that no longer opens anything. If the transport
- * were down across two rotations, sending both would deliver a dead password first
- * and the working one second, and the person reading the mailbox would try the
- * first and conclude the account is broken. The `NOT EXISTS` keeps every superseded
- * message permanently out of the queue: a newer row exists whether or not it has
- * been sent, so an old password can never be picked up later.
+ * Only the newest message of each kind is ever a candidate, and that is
+ * deliberate. A credential supersedes the one before it the moment it is
+ * generated, so an older pending message holds a password that no longer opens
+ * anything; if the transport were down across two of them, sending both would
+ * deliver a dead password first and the working one second, and the person
+ * reading the mailbox would try the first and conclude the account is broken. The
+ * `NOT EXISTS` keeps every superseded message permanently out of the queue: a
+ * newer row exists whether or not it has been sent, so an old password can never
+ * be picked up later. Confirmations are grouped the same way, so a burst of
+ * password changes leaves one mail rather than all of them.
  *
  * The pending rows that are eligible are attempted and marked individually, so one
  * failure does not hold up the message behind it and a restart resumes where it
- * left off. Only the owner credential is ever a candidate, which is the same rule
- * `deliverOutboxMessage` applies again at the point of sending.
+ * left off. Only the deliverable kinds are ever a candidate, which is the same
+ * rule `deliverOutboxMessage` applies again at the point of sending.
  */
 export async function deliverPendingMail(
   database: Database,
@@ -245,14 +257,14 @@ export async function deliverPendingMail(
   const config = options.config === undefined ? mailConfigFromEnv() : options.config;
   const pending = await database.query(
     `SELECT id, kind, recipient, subject, body FROM email_outbox AS candidate
-     WHERE candidate.sent_at IS NULL AND candidate.kind = $1
+     WHERE candidate.sent_at IS NULL AND candidate.kind = ANY($1::text[])
        AND NOT EXISTS (
          SELECT 1 FROM email_outbox AS newer
          WHERE newer.kind = candidate.kind
            AND (newer.created_at, newer.id) > (candidate.created_at, candidate.id)
        )
      ORDER BY candidate.created_at`,
-    [deliverableKind],
+    [[...deliverableKinds]],
   );
   const messages = pending.rows as OutboxMessage[];
   const stamp = options.now?.() ?? new Date();
@@ -304,9 +316,9 @@ export async function tryDeliverPendingMail(database: Database) {
 export async function hasPendingMail(database: Database): Promise<boolean> {
   const pending = await database.query(
     `SELECT 1 FROM email_outbox
-     WHERE sent_at IS NULL AND kind = $1
+     WHERE sent_at IS NULL AND kind = ANY($1::text[])
      LIMIT 1`,
-    [deliverableKind],
+    [[...deliverableKinds]],
   );
   return pending.rows.length > 0;
 }
@@ -327,13 +339,13 @@ export async function hasPendingMail(database: Database): Promise<boolean> {
 let passInFlight = false;
 
 /**
- * Hands any queued owner credential to the relay, on whatever request happens to
+ * Hands any queued owner mail to the relay, on whatever request happens to
  * arrive next.
  *
  * The reason this exists: `startMailDelivery` owns the retry, and it is started by
  * the Express server only. On Vercel there is no Express server — every request is
  * a fresh function that freezes the moment it answers — so an interval never runs
- * there. A rotation whose first send attempt failed wrote the row, logged the
+ * there. A save whose first send attempt failed wrote the row, logged the
  * failure and left `sent_at` null, and then nothing ever picked it up. The design
  * assumes "the next pass tries again", and on serverless there is no next pass.
  *
@@ -400,7 +412,8 @@ export function tryDeliverOnRequest(
  *
  * The interval is unref'd so importing the server from a script or a test is never
  * held open by it, and a failure is logged rather than thrown: mail being down is
- * an outage of one feature, not a reason to stop rotating passwords.
+ * an outage of one feature, not a reason to stop sending the owner mail that is
+ * queued for them.
  */
 export function startMailDelivery(
   database: Database,

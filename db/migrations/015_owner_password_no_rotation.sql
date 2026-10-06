@@ -1,0 +1,26 @@
+-- The owner password is chosen by a person now, not replaced on a timer.
+--
+-- `/superadmin/ggpass` generates a password, shows it on screen, and stores the
+-- value the operator saved. Nothing replaces it afterwards, so the two columns that
+-- existed to model an automatic replacement describe a behaviour this project no
+-- longer has, and leaving them behind means every later reader has to work out
+-- which of the two is still authoritative. Neither is.
+--
+-- `password_rotated_at` was stamped when a password was generated so the weekly
+-- schedule could tell whether the account was due. There is no schedule.
+--
+-- `password_hold_until` was the escape hatch for that schedule: a window in which
+-- a hand-chosen password was left alone instead of being rotated away. With no
+-- rotation there is nothing for it to hold, and the pin it protected
+-- (`OWNER_PINNED_PASSWORD`) is now simply a seed-time value that lasts until the
+-- owner replaces it from the screen.
+--
+-- Dropped rather than left nullable and unread: `IF EXISTS` makes this safe to run
+-- twice, and a deployment that never migrates simply keeps two unused columns,
+-- which is a far smaller problem than code and queries that disagree about what
+-- they mean. Nothing reads or writes either column any more.
+--
+-- `email_outbox` needs no migration: the saved-password confirmation uses the
+-- existing table with the new `owner-password-saved` kind, and `kind` is free text.
+ALTER TABLE admin_users DROP COLUMN IF EXISTS password_rotated_at;
+ALTER TABLE admin_users DROP COLUMN IF EXISTS password_hold_until;
