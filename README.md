@@ -243,6 +243,49 @@ password in plain text.
 `MAIL_FROM_NAME` is quoted and bracketed for you, because an unquoted display name
 containing a space parses as two addresses.
 
+## Bulk import in the console
+
+Every console list that is filled from a spreadsheet - products, jobs, candidates,
+partners, customers, reviews and the team - has an **Upload** button beside a
+**Template** button. The template is a real `.xlsx` workbook whose header row is the
+dataset's exact columns, so the safest way to import is to download the template,
+fill in the example row, and upload it back.
+
+The columns are declared once, in `src/lib/bulk-templates.ts`, and name the same
+fields the console's own forms save. A heading the server does not recognise is
+**named** in the panel rather than dropped in silence: the import still runs, and
+the unknown names are listed so a mistyped column is visible.
+
+`POST /api/admin/bulk` imports a sheet row by row and answers with what it actually
+wrote:
+
+| Field | Meaning |
+| --- | --- |
+| `created` | The ids of the rows that were inserted |
+| `errors` | One entry per rejected row: its spreadsheet line number, a summary, and the fields that failed |
+| `message` | `"N rows imported."`, or `"N rows imported, M skipped."` when any row was turned away |
+
+A row is all-or-nothing. One failed cell rejects the whole row and leaves the rest of
+the sheet to be imported, so a good sheet with two bad lines writes the good lines and
+reports the two. The original-price rule is the one checked by hand rather than by the
+column schema: a row whose `mrp` is below its `price` is refused with "The original
+price must be at least the selling price."
+
+### What the screen says, and why that matters
+
+After an upload the panel reports the server's own count - how many rows were imported
+and how many were skipped - instead of assuming every row was accepted. When rows are
+skipped, the banner names the first few (their line number and what was wrong) and the
+full list goes to the browser console.
+
+This is the part that used to be broken. `importRows` set the error banner and *then*
+reloaded the console, and `reload()` clears the banner when it succeeds - so a sheet in
+which every row was rejected cleared its own complaint and reported "sent for import",
+with nothing in the console to say otherwise. The reload now happens first and the
+banner afterwards, and every skipped row is logged, so a rejected import cannot pass as
+a successful one. The behaviour is pinned by `src/pages/admin/BulkUpload.test.tsx` and
+`e2e/admin-bulk-upload.spec.ts`.
+
 ## Environment
 
 Nothing is hard-coded and no secret is committed. `.env` is ignored by Git and is
