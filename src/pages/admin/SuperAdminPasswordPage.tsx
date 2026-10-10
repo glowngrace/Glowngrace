@@ -114,6 +114,11 @@ export function SuperAdminPasswordPage() {
   const [sentTo, setSentTo] = useState<Toast>(null);
   const [error, setError] = useState<Toast>(null);
   const [copied, setCopied] = useState(false);
+  // What a signed-out press leaves behind: a soft line under the controls that
+  // names the sign-in as the step ahead, in the card's own voice - not the red
+  // failure notification (nothing was attempted) and not a route away from the
+  // page (the button keeps its shape).
+  const [recall, setRecall] = useState(false);
   const [deployment, setDeployment] = useState<Awaited<ReturnType<typeof adminApi.health>>>(null);
   const emailId = useId();
   const passwordId = useId();
@@ -264,16 +269,16 @@ export function SuperAdminPasswordPage() {
 
   const generate = useCallback(async () => {
     // The same cheap check as the visit itself: with no session to send, the
-    // press can only draw a 401 out of the server - a red line that reads as
-    // this screen being broken, for somebody already looking at the sign-in
-    // note. Refused here, in the screen's own words, rather than fired and
-    // then answered.
+    // press can only draw a 401 out of the server. The press is answered in
+    // place instead - a soft line under the controls names the sign-in as the
+    // step ahead, in the card's own voice - so nothing about this page turns the
+    // no-session press into a red line or a route away from the page.
     const token = getAdminToken();
     if (!token || getAdminSessionExpiresIn() === 0) {
       if (token) endAdminSession();
       setAccount(null);
       setUnreachable(false);
-      showError('Password not generated', 'Sign in to the console to continue.');
+      setRecall(true);
       return;
     }
     setRunning(true);
@@ -355,13 +360,15 @@ export function SuperAdminPasswordPage() {
     if (!generated) return;
     // Symmetric with the generate press: a token whose countdown ran out while
     // the field was open would otherwise reach the server for a foregone 401.
+    // The press is answered in place - the soft line that names the sign-in - so
+    // nothing is sent for the 401 the server would have to give back.
     const token = getAdminToken();
     if (!token || getAdminSessionExpiresIn() === 0) {
       if (token) endAdminSession();
       setAccount(null);
       setUnreachable(false);
       setFieldError('');
-      showError('Password not saved', 'Sign in to the console to continue.');
+      setRecall(true);
       return;
     }
     // Checked here first so the words under the field are the screen's own, and so
@@ -563,8 +570,8 @@ export function SuperAdminPasswordPage() {
               to "are you sure" is that nothing is written until the save, and a dialog
               in front of a step that changes nothing only trains people to press
               through dialogs. The button never points at the sign-in page - with no
-              session the server refuses the press and the failure notification says
-              why, on this screen. */}
+              session to send, the press is answered in place, on this screen, with a
+              soft line naming the sign-in as the step ahead. */}
           <button
             className="ggpass-btn"
             type="button"
@@ -634,6 +641,13 @@ export function SuperAdminPasswordPage() {
               >
                 {saving ? <><Spinner size="sm" /> Saving…</> : 'Save password'}
               </button>
+            </div>
+          )}
+
+          {!account && recall && (
+            <div className="ggpass-note">
+              <i />
+              <div>Sign in to the console to continue.</div>
             </div>
           )}
 

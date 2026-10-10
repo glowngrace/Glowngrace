@@ -140,6 +140,7 @@ async function stubConsole(page: Page, options: {
 
 /** Generates, and waits for the password to be sitting in the notification. */
 async function generateOne(page: Page) {
+  await expect(page.getByRole('button', { name: 'Generate password' })).toBeEnabled();
   await page.getByRole('button', { name: 'Generate password' }).click();
   await expect(page.locator('.ggpass-toast-code')).toHaveText(generated.password, { timeout: 15_000 });
 }
@@ -180,6 +181,13 @@ async function openScreen(page: Page, user: typeof owner = owner) {
   await page.locator('#login-email').fill(user.email);
   await page.locator('#login-password').fill('a-password-the-owner-chose');
   await page.getByRole('button', { name: 'Sign in to your account' }).click();
+  // The token is only in storage once the console has accepted the sign-in and
+  // moved on to the console itself. Checking for "no alert" can pass while the
+  // request is still in flight, and the visit below would then load before the
+  // session was ever stored - which is exactly how this screen could render the
+  // signed-out card for a role the server had accepted. The redirect is the
+  // console's own signal that the session exists.
+  await page.waitForURL('**/admin**');
   await expect(page.getByRole('alert')).toHaveCount(0);
 
   await page.goto('/superadmin/ggpass');
@@ -549,15 +557,17 @@ test.describe('/superadmin/ggpass', () => {
     await expect(page.getByRole('button', { name: 'Generate password' })).toBeEnabled();
     await expect(page.getByRole('link', { name: 'Generate Password' })).toHaveCount(0);
 
-    // Pressing it with no session stays on this screen and says why, so somebody
-    // who believed they were signed in is told rather than bounced.
+    // Pressing it with no session stays on this screen and answers in place with
+    // the card's own soft line rather than a red failure or a route away. The
+    // button is a button whatever it is sent with.
     await page.getByRole('button', { name: 'Generate password' }).click();
     await expect(page).toHaveURL(/\/superadmin\/ggpass$/);
-    await expect(failure(page)).toContainText('Sign in to the console to continue.');
+    await expect(failure(page)).toHaveCount(0);
+    await expect(page.locator('.ggpass-note').filter({ hasText: 'Sign in to the console to continue.' })).toBeVisible();
     // The way in is the design's own, at the bottom of the card.
     await expect(page.locator('a[href="/login"]').first()).toBeVisible();
-    // The refusal was the screen's own rather than a 401 torn out of the server:
-    // without a session the answer is already known, so nothing was asked.
+    // The answer is the screen's own rather than a 401 torn out of the server:
+    // without a session nothing was asked.
     expect(generateCalls).toHaveLength(0);
   });
 
@@ -649,10 +659,15 @@ test.describe('/superadmin/ggpass', () => {
 
     // The refusal is announced in the usual place, and then the card stops
     // pretending it has a session: it stays on this screen, now naming the sign-in
-    // as the step ahead, rather than throwing the owner at the sign-in page.
+    // as the step ahead rather than throwing the owner at the sign-in page. The
+    // control is left in place - a further press can only answer in place now,
+    // never draw a second 401 out of the server.
     await expect(failure(page)).toContainText('Sign in to the console to continue.');
     await expect(page).toHaveURL(/\/superadmin\/ggpass$/);
     await expect(page.getByRole('button', { name: 'Generate password' })).toBeEnabled();
+    await page.getByRole('button', { name: 'Generate password' }).click();
+    await expect(page.locator('.ggpass-note').filter({ hasText: 'Sign in to the console to continue.' })).toBeVisible();
+    await expect(page).toHaveURL(/\/superadmin\/ggpass$/);
     await expect(page.getByText('This screen is for the Super Admin account. Sign in to continue.')).toBeVisible();
     await expect(page.locator('a[href="/login"]').first()).toBeVisible();
     expect(generateCalls).toHaveLength(1);
@@ -769,6 +784,9 @@ test.describe('/superadmin/ggpass', () => {
     // The save section closes the way the design closes it: what was pasted has
     // been kept, and it belongs to the credential that has just been replaced.
     await expect(page.getByRole('button', { name: 'Save password' })).toHaveCount(0);
+    // The token that would have sent it is already gone, so the button that remains
+    // in place for the moment before the bounce can only answer in place with the
+    // sign-in line rather than draw a 401 out of the server.
     await expect(page.getByRole('button', { name: 'Generate password' })).toBeEnabled();
 
     // The stored token is gone, so a refresh does not leave a stale session that

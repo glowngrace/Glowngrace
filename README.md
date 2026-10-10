@@ -151,11 +151,11 @@ The destination is shown in a fixed field — the owner address, prefilled, read
 disabled. Nobody can send the owner confirmation somewhere else by typing over it.
 
 The card is the design's card in every state; the page does not swap its controls in
-and out for whoever is looking. A signed-out visitor sees the same form and is told,
-in the card's own words, to sign in rather than bounced to the login page: the
-generate press itself never navigates, and without a session to send it is refused on
-screen without ever reaching the server, so nothing about this page answers 401 to a
-keyboard.
+and out for whoever is looking. The generate button never points at the sign-in page
+and never answers 401 to a keyboard: with no session to send, a press stays on the
+screen and is answered in place with the card's own soft line naming the sign-in as
+the step ahead, so nothing about this page turns a signed-out visitor's press into a
+red failure or a route away from it.
 
 The page also reads `/api/health` on arrival. If the deployment has no database it
 says which variable is missing and blocks both buttons, rather than reporting a
