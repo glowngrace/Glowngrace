@@ -366,8 +366,8 @@ describe('the round trip the generate and save buttons start', () => {
     }).then((result) => (result.body as { token: string }).token);
     expect(token).toBeTruthy();
 
-    // The generate step. Nothing is written and the session still works, which is
-    // the whole reason it is a separate request.
+    // The generate step. No credential is written and the session still works,
+    // which is the whole reason it is a separate request.
     const generated = await admin.handle({
       method: 'POST',
       segments: ['owner-password', 'generate'],
@@ -375,13 +375,13 @@ describe('the round trip the generate and save buttons start', () => {
     });
     expect(generated.status).toBe(200);
     const fresh = (generated.body as { password: string }).password;
-    expect(fresh).toHaveLength(8);
+    expect(fresh).toMatch(/^[A-Za-z0-9]{8}$/);
     // A fresh password every time. Two generations handing back the same string
     // would make "generate again" useless to somebody who wants a different one.
     expect(fresh).not.toBe(before.password);
 
-    // Generating has changed nothing at all: the old password still opens the
-    // console, so a closed tab or a refresh costs nobody their access.
+    // Generating has changed nothing about the account: the old password still
+    // opens the console, so a closed tab or a refresh costs nobody their access.
     expect((await admin.handle({
       method: 'POST',
       segments: ['session'],
@@ -396,6 +396,17 @@ describe('the round trip the generate and save buttons start', () => {
       token,
     });
     expect(saved.status).toBe(200);
+
+    // The history the columns exist for: when the password was offered, and when
+    // it was kept, as two rows of the same table. Nothing in here is a password -
+    // it is the difference between an untouched account and one that has been
+    // through this screen.
+    const events = await database.query('SELECT * FROM owner_password_events');
+    expect(events.rows.map((row) => (row as { kind: string }).kind)).toEqual(['generated', 'saved']);
+    const owner = await database.query('SELECT * FROM admin_users WHERE email = $1', [superAdminEmail]);
+    const row = owner.rows[0] as { password_changed_at: unknown; password_generated_at: unknown };
+    expect(row.password_changed_at).toBeTruthy();
+    expect(row.password_generated_at).toBeTruthy();
 
     // One character different, so the password is checked rather than merely
     // present in the response.
@@ -481,7 +492,7 @@ describe('the round trip the generate and save buttons start', () => {
     expect(row.body).not.toMatch(/Password:\s*\S/);
   });
 
-  it('refuses to save anything the sign-in form would refuse, and keeps the account usable', async () => {
+  it('refuses to save anything outside the owner policy, and keeps the account usable', async () => {
     const { database } = createMemoryDatabase();
     const admin = createAdminHandlers(database);
     await admin.seed();
@@ -504,10 +515,11 @@ describe('the round trip the generate and save buttons start', () => {
     })).status).toBe(201);
   });
 
-  it('saves a password the operator typed themselves, under the same policy', async () => {
-    // The field is editable on purpose. This is the case that has to work, and it
-    // has to be held to exactly the policy a reset or a team-member change is held
-    // to, or the owner could set something the sign-in form would not accept.
+  it('saves an eight character password from the screen, and signs in with it', async () => {
+    // The value arrives from the paste rather than from the generator, as far as
+    // the server can tell, so this is the case that has to work: held to the
+    // owner's own eight letters and numbers rather than to the longer policy a
+    // reset or a team-member change is held to.
     const { database } = createMemoryDatabase();
     const admin = createAdminHandlers(database);
     await admin.seed();
@@ -516,14 +528,14 @@ describe('the round trip the generate and save buttons start', () => {
     expect((await admin.handle({
       method: 'POST',
       segments: ['owner-password', 'save'],
-      body: { password: 'Mango!Tree9' },
+      body: { password: 'Mango9Tr' },
       token,
     })).status).toBe(200);
 
     const login = await admin.handle({
       method: 'POST',
       segments: ['session'],
-      body: { email: superAdminEmail, password: 'Mango!Tree9' },
+      body: { email: superAdminEmail, password: 'Mango9Tr' },
     });
     expect(login.status).toBe(201);
     expect((login.body as { user: { role: string } }).user.role).toBe('Super Admin');
@@ -558,7 +570,7 @@ describe('the round trip the generate and save buttons start', () => {
       const result = await admin.handle({
         method: 'POST',
         segments,
-        body: { password: 'Mango!Tree9' },
+        body: { password: 'Mango9Tr' },
         token: otherToken,
       });
       expect(result.status).toBe(403);

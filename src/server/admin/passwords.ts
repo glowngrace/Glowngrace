@@ -124,6 +124,28 @@ const OWNER_PASSWORD_LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
 const OWNER_PASSWORD_DIGITS = '23456789';
 const OWNER_PASSWORD_ALPHABET = OWNER_PASSWORD_LETTERS + OWNER_PASSWORD_DIGITS;
 
+/**
+ * The policy the owner password is saved under, which is narrower than the one
+ * the rest of the project uses.
+ *
+ * Exactly eight letters and numbers, because that is what the screen promises in
+ * its own words and what the operator reads off it. The shared `passwordPolicy`
+ * stays as it is: a team member's password, a signup and a reset are chosen by
+ * people typing into forms with no generated value to match, and tightening them
+ * to eight characters would be this screen's design reaching into every other
+ * account in the console.
+ *
+ * Holding it here rather than in the zod schema keeps the two answers the same:
+ * the schema refuses the body and `saveOwnerPassword` re-checks it, so a route
+ * added later cannot save a value the schema would have let through.
+ */
+export function ownerPasswordPolicyError(password: string) {
+  if (password.length !== OWNER_PASSWORD_LENGTH || !/^[A-Za-z0-9]+$/.test(password)) {
+    return 'Password must be exactly 8 letters or numbers.';
+  }
+  return null;
+}
+
 export function generateOwnerPassword(length: number = OWNER_PASSWORD_LENGTH): string {
   const size = Math.max(length, passwordPolicy.minLength);
   const characters = [

@@ -30,3 +30,5 @@ yarn-error.log*
 /.next/
 /out/
 /build
+.vercel
+.env*

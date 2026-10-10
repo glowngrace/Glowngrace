@@ -2,23 +2,37 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Spinner } from '../../components/Loader';
 import { superAdminEmail, superAdminRole } from '../../auth/roles';
-import { AdminApiError, adminApi, endAdminSession, type AdminUser } from '../../lib/admin-api';
+import {
+  AdminApiError,
+  adminApi,
+  endAdminSession,
+  getAdminSessionExpiresIn,
+  getAdminToken,
+  sessionEndedEvent,
+  type AdminUser,
+} from '../../lib/admin-api';
 
 /**
- * `/superadmin/ggpass` - generates the owner password, shows it, and saves the one
- * that is actually kept.
+ * `/superadmin/ggpass` - generates the owner password, shows it once, and saves
+ * the one that is actually kept.
  *
- * Three steps, in this order and no other:
+ * Three steps, in this order and no other, which is the flow the design file
+ * (`Design/gg-generate-password.html`) already lays out on its right-hand side:
  *
- *   Generate  the server makes an eight character password and hands it back. This
- *             writes nothing. The previous password still works, so a tab that is
- *             closed, a refresh, or a walk away from the keyboard costs nobody a
- *             session.
- *   Edit      the value lands in a field, where it can be kept as generated or
- *             changed to something easier to remember.
- *   Save      the value in the field is hashed and stored, every session ends, a
- *             confirmation that carries no password is emailed to the owner, and
- *             the page walks back to sign-in to use it.
+ *   Generate  the server makes an eight character password and hands it back. The
+ *             credential itself is written nowhere. The previous password still
+ *             works, so a tab that is closed, a refresh, or a walk away from the
+ *             keyboard costs nobody a session.
+ *   Copy      the value goes to the clipboard from the notification, and the
+ *             notification says so. Copying is what opens the save field: the
+ *             screen asks for the generated value to be pasted back rather than
+ *             for a new one to be typed, so the thing that is saved is the thing
+ *             that was shown. Nothing else on the page can be mistaken for a
+ *             password the owner chose.
+ *   Save      the pasted value is checked against the one that was generated,
+ *             hashed and stored, every session ends, a confirmation that carries
+ *             no password is emailed to the owner, and the page walks back to
+ *             sign-in to use it.
  *
  * That last step replaces a weekly rotation which replaced the credential whether
  * or not anybody was watching, and mailed the new one to an unattended mailbox.
@@ -33,15 +47,17 @@ import { AdminApiError, adminApi, endAdminSession, type AdminUser } from '../../
  *
  * Two gates, and only the first one is in the UI:
  *
- *   The role check    the screen asks the server who is signed in and refuses to
- *                     render the button for anybody but the owner account. This is a
- *                     courtesy: it stops a curious colleague seeing a control
- *                     they cannot use.
+ *   The role check    the screen asks the server who is signed in and names the
+ *                     refused role on the card. This is a courtesy: it says who the
+ *                     screen is for without pretending the button changed anything.
+ *                     The single "Generate password" control is always the design's
+ *                     own button, and it is never a route away from this page - the
+ *                     server's answer is what the card reports.
  *   The server check  both `owner-password` routes re-read the session and answer
  *                     403 to anything but the owner. This is the one that counts.
- *                     Hiding a button is not access control, so the page is safe to
- *                     reach by typing the URL, and the endpoints are safe to call
- *                     directly.
+ *                     Showing a button is not the same as letting the press through,
+ *                     so the page is safe to reach by typing the URL, and the
+ *                     endpoints are safe to call directly.
  *
  * Saving also revokes every session, the caller's included, because the old
  * password has stopped working - so the token is dropped as soon as the save
@@ -50,6 +66,13 @@ import { AdminApiError, adminApi, endAdminSession, type AdminUser } from '../../
 
 /** How long the design's success toast stays up before it retires itself. */
 const TOAST_MS = 4500;
+/**
+ * How long the generated password stays in the notification after it has been
+ * copied. The design counts this one down from the copy rather than from the
+ * appearance: while it is up it is the only place the password exists in the
+ * clear, and the clipboard is where it went.
+ */
+const COPIED_TOAST_MS = 4000;
 /** Failures get longer: the message is the only account of what went wrong. */
 const ERROR_TOAST_MS = 7000;
 /**
@@ -61,39 +84,125 @@ const ERROR_TOAST_MS = 7000;
  */
 const SIGN_IN_REDIRECT_MS = 2500;
 
-type Toast = { title: string; detail: string } | null;
+/** The screen's own words for a password it will not save. */
+const EMPTY_PASTE_ERROR = 'Please paste the generated password.';
+const SHAPE_ERROR = 'Password must be exactly 8 letters or numbers.';
+const MISMATCH_ERROR = "This doesn't match the generated password.";
+/** Eight letters and numbers, the same rule the server holds the value to. */
+const SHAPED = /^[A-Za-z0-9]{8}$/;
+
+/** A success notification. `timed` is what puts the design's countdown bar under it. */
+type Toast = { title: string; detail: string; timed?: boolean } | null;
 
 export function SuperAdminPasswordPage() {
   const navigate = useNavigate();
   const [account, setAccount] = useState<AdminUser | null>(null);
   const [checking, setChecking] = useState(true);
-  const [confirming, setConfirming] = useState(false);
+  const [unreachable, setUnreachable] = useState(false);
   const [running, setRunning] = useState(false);
   const [saving, setSaving] = useState(false);
+  /** The value the server generated. The save field has to match it exactly. */
   const [generated, setGenerated] = useState<string | null>(null);
-  const [password, setPassword] = useState('');
+  /** What has been pasted into the save field. Kept apart from `generated` on purpose. */
+  const [pasted, setPasted] = useState('');
+  /** Whether the save field is on screen. Copying is what opens it. */
+  const [showSave, setShowSave] = useState(false);
+  /** Why the save field will not go. Cleared by typing. */
+  const [fieldError, setFieldError] = useState('');
+  /** Whether the save field is showing its value rather than dots. */
+  const [revealed, setRevealed] = useState(false);
   const [sentTo, setSentTo] = useState<Toast>(null);
   const [error, setError] = useState<Toast>(null);
   const [copied, setCopied] = useState(false);
   const [deployment, setDeployment] = useState<Awaited<ReturnType<typeof adminApi.health>>>(null);
   const emailId = useId();
   const passwordId = useId();
-  const titleId = useId();
-  const cancelRef = useRef<HTMLButtonElement>(null);
   const passwordRef = useRef<HTMLInputElement>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const redirectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const focusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // The server is the authority on who this is. The cached account in
   // localStorage would let somebody edit it into the owner role and be shown a
   // button they cannot press.
+  //
+  // The two ways this can fail are not the same answer. 401 says nobody is
+  // signed in, and the card below says so. Anything else - a database that timed
+  // out, a network that dropped - says nothing at all about the session, and
+  // showing "sign in to continue" to somebody who is already signed in sends
+  // them to type credentials that were never the problem.
+  const alive = useRef(false);
+  const recheck = useCallback(async () => {
+    setChecking(true);
+    setUnreachable(false);
+    // The console never asks the server anything without a stored token, and this
+    // screen follows the same rule. With no session at all - or with one whose own
+    // countdown has already run out - the answer is a foregone 401, and firing the
+    // request anyway puts a red line in the console that reads as this screen being
+    // broken rather than as nobody being signed in.
+    const token = getAdminToken();
+    if (!token || getAdminSessionExpiresIn() === 0) {
+      if (token) endAdminSession();
+      setAccount(null);
+      setChecking(false);
+      return;
+    }
+    try {
+      const user = await adminApi.me();
+      if (alive.current) setAccount(user);
+    } catch (cause) {
+      if (!alive.current) return;
+      if (cause instanceof AdminApiError && cause.status === 401) setAccount(null);
+      else setUnreachable(true);
+    } finally {
+      if (alive.current) setChecking(false);
+    }
+  }, []);
+
   useEffect(() => {
-    let active = true;
-    adminApi.me()
-      .then((user) => { if (active) setAccount(user); })
-      .catch(() => { if (active) setAccount(null); })
-      .finally(() => { if (active) setChecking(false); });
-    return () => { active = false; };
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
+
+  useEffect(() => { void recheck(); }, [recheck]);
+
+  // A session that runs out while this screen is open has to show it. Without
+  // this the form stays on screen looking ready, and the first sign that anything
+  // changed is a 401 in the console when the button is finally pressed.
+  //
+  // The save ends the session deliberately and says so in its own toast, so that
+  // one is allowed through: the confirmation is the only account of what happened,
+  // and it has to outlive the token it retired.
+  const endingOnPurpose = useRef(false);
+  useEffect(() => {
+    function handleSessionEnded() {
+      if (endingOnPurpose.current) return;
+      setAccount(null);
+      setUnreachable(false);
+    }
+    window.addEventListener(sessionEndedEvent, handleSessionEnded);
+    return () => window.removeEventListener(sessionEndedEvent, handleSessionEnded);
+  }, []);
+
+  useEffect(() => {
+    const remaining = getAdminSessionExpiresIn();
+    // No expiry recorded is a token from before sessions were short-lived, so the
+    // server stays the authority on whether it is still good.
+    if (remaining === null) return;
+    if (remaining <= 0) {
+      endAdminSession();
+      return;
+    }
+    const timer = window.setTimeout(() => endAdminSession(), remaining);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  // A 401 on any request other than the session check ends the stored session,
+  // so the form below has just become a form with nothing to send it with. Left
+  // on screen, the next press fails the same way and reads as the feature being
+  // broken rather than as a session that ran out.
+  const dropSessionIfEnded = useCallback((cause: unknown) => {
+    if (cause instanceof AdminApiError && cause.status === 401) setAccount(null);
   }, []);
 
   // Whether this deployment can actually keep the password. Asked for on arrival
@@ -123,124 +232,185 @@ export function SuperAdminPasswordPage() {
   useEffect(() => () => {
     if (toastTimer.current) clearTimeout(toastTimer.current);
     if (redirectTimer.current) clearTimeout(redirectTimer.current);
+    if (focusTimer.current) clearTimeout(focusTimer.current);
   }, []);
 
-  useEffect(() => {
-    if (!confirming) return;
-    // Captured on the way in, while it is still the focused node: on the way out
-    // it has to be handed back so a keyboard user lands where they left off.
-    const opener = document.activeElement;
-    cancelRef.current?.focus();
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === 'Escape' && !running) setConfirming(false);
-    }
-    document.addEventListener('keydown', onKeyDown);
-    return () => {
-      document.removeEventListener('keydown', onKeyDown);
-      if (opener instanceof HTMLElement) opener.focus();
-    };
-  }, [confirming, running]);
+  /** Clears every countdown the success toast owns, whichever one started it. */
+  const clearToastTimer = useCallback(() => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+  }, []);
+
+  /**
+   * Shows a success notification and decides when it goes.
+   *
+   * `auto` is the design's own distinction: the generated password stays until it
+   * is copied or dismissed, because it is the only copy anywhere - while a
+   * confirmation, which is about something that has already happened, retires
+   * itself so the screen does not keep announcing a finished event.
+   */
+  const showSuccess = useCallback((toast: { title: string; detail: string }, auto: number | null) => {
+    clearToastTimer();
+    setError(null);
+    setSentTo({ ...toast, timed: auto !== null });
+    if (auto !== null) toastTimer.current = setTimeout(() => setSentTo(null), auto);
+  }, [clearToastTimer]);
+
+  const showError = useCallback((title: string, detail: string) => {
+    clearToastTimer();
+    setSentTo(null);
+    setError({ title, detail });
+    toastTimer.current = setTimeout(() => setError(null), ERROR_TOAST_MS);
+  }, [clearToastTimer]);
 
   const generate = useCallback(async () => {
+    // The same cheap check as the visit itself: with no session to send, the
+    // press can only draw a 401 out of the server - a red line that reads as
+    // this screen being broken, for somebody already looking at the sign-in
+    // note. Refused here, in the screen's own words, rather than fired and
+    // then answered.
+    const token = getAdminToken();
+    if (!token || getAdminSessionExpiresIn() === 0) {
+      if (token) endAdminSession();
+      setAccount(null);
+      setUnreachable(false);
+      showError('Password not generated', 'Sign in to the console to continue.');
+      return;
+    }
     setRunning(true);
-    setConfirming(false);
-    setError(null);
+    // A regeneration starts the flow again: what was pasted belonged to the
+    // password that is about to stop existing, so keeping it would set the save
+    // up to be refused as a mismatch a moment later.
+    setShowSave(false);
+    setPasted('');
+    setFieldError('');
+    setRevealed(false);
     setCopied(false);
-    // One toast at a time. A stale failure left up next to a fresh success would
-    // be read as "it worked, and also it did not".
-    if (toastTimer.current) clearTimeout(toastTimer.current);
     try {
       const result = await adminApi.generateOwnerPassword();
-      // Into the field, not only into the toast: the field is what gets saved, so
-      // leaving the generated value somewhere else would mean the operator has to
-      // copy it out by hand before anything can be kept.
       setGenerated(result.password);
-      setPassword(result.password);
-      setSentTo({
-        title: 'Password generated',
-        detail: `Copy it now, or save it below. Nothing is kept until you save.`,
-      });
-      toastTimer.current = setTimeout(() => setSentTo(null), TOAST_MS);
+      showSuccess({ title: 'Password generated', detail: `New password for ${result.email}` }, null);
     } catch (cause) {
+      dropSessionIfEnded(cause);
       setGenerated(null);
-      setPassword('');
       const message = cause instanceof AdminApiError
         ? cause.message
         : 'The password could not be generated. Try again in a moment.';
-      setError({ title: 'Password not generated', detail: message });
-      toastTimer.current = setTimeout(() => setError(null), ERROR_TOAST_MS);
+      showError('Password not generated', message);
     } finally {
       setRunning(false);
     }
-  }, []);
+  }, [dropSessionIfEnded, showError, showSuccess]);
 
   /**
-   * Puts the password on the clipboard, and says whether it worked.
+   * Puts the generated password on the clipboard, and opens the save field.
    *
-   * What goes on the clipboard is the field's value, not the value that came back
-   * from the server. Those are the same thing until the owner edits the field, and
-   * when they differ it is the field that decides what gets saved - so copying the
-   * original would put a password on the clipboard that no longer works, and would
-   * read as a successful copy of something the owner never chose.
+   * The field is empty until this runs, and pasting is how it gets filled: the
+   * screen asks for the value it just showed rather than for a new one, so what
+   * gets saved is what was copied and nobody has to retype eight characters they
+   * only saw once.
    *
    * The async clipboard API is refused outside a secure context and by browsers
-   * that withhold permission, and a copy button that silently does nothing is worse
-   * than no button - so the result is reported either way, and the toast is not
-   * dismissed by a failed attempt.
+   * that withhold permission, and a button that silently does nothing is worse
+   * than no button - so the attempt is reported either way, and the save field
+   * opens on both. Refusing to open it would leave the only way forward behind a
+   * browser setting the owner cannot change from here.
    */
   const copy = useCallback(async () => {
-    const value = password || generated;
-    if (!value) return;
+    if (!generated) return;
+    let ok = false;
     try {
-      await navigator.clipboard.writeText(value);
-      setCopied(true);
-      setSentTo({ title: 'Copied', detail: 'The password is on your clipboard.' });
+      await navigator.clipboard.writeText(generated);
+      ok = true;
     } catch {
-      setCopied(false);
-      setSentTo({
-        title: 'Could not copy',
-        detail: 'Your browser would not copy it for you. Select the field and copy it by hand.',
-      });
+      // The design's own fallback: a hidden textarea and the older copy command,
+      // which still works where the async API is withheld.
+      const scratch = document.createElement('textarea');
+      scratch.value = generated;
+      scratch.style.cssText = 'position:fixed;opacity:0';
+      document.body.appendChild(scratch);
+      scratch.select();
+      try {
+        ok = document.execCommand('copy');
+      } catch {
+        ok = false;
+      }
+      scratch.remove();
     }
-    if (toastTimer.current) clearTimeout(toastTimer.current);
-    toastTimer.current = setTimeout(() => setSentTo(null), TOAST_MS);
-  }, [generated, password]);
+    setCopied(ok);
+    setShowSave(true);
+    showSuccess(
+      ok
+        ? { title: 'Password generated', detail: 'Copied to clipboard. Paste it below to save.' }
+        : { title: 'Password generated', detail: 'Copy failed — select the password and copy manually.' },
+      // The copied value is also in the field, so this one can retire. A failure
+      // has to stay: it is the only account of what happened, and the password in
+      // the notification is what still has to be copied by hand.
+      ok ? COPIED_TOAST_MS : null,
+    );
+    if (focusTimer.current) clearTimeout(focusTimer.current);
+    focusTimer.current = setTimeout(() => passwordRef.current?.focus(), 250);
+  }, [generated, showSuccess]);
 
   const save = useCallback(async () => {
+    if (!generated) return;
+    // Symmetric with the generate press: a token whose countdown ran out while
+    // the field was open would otherwise reach the server for a foregone 401.
+    const token = getAdminToken();
+    if (!token || getAdminSessionExpiresIn() === 0) {
+      if (token) endAdminSession();
+      setAccount(null);
+      setUnreachable(false);
+      setFieldError('');
+      showError('Password not saved', 'Sign in to the console to continue.');
+      return;
+    }
+    // Checked here first so the words under the field are the screen's own, and so
+    // a password nobody pasted can never reach the server as a save attempt. The
+    // server holds the value to the same eight letters and numbers regardless: this
+    // is the screen explaining its own refusal, not the screen deciding it.
+    const value = pasted.trim();
+    if (!value) { setFieldError(EMPTY_PASTE_ERROR); return; }
+    if (!SHAPED.test(value)) { setFieldError(SHAPE_ERROR); return; }
+    if (value !== generated) { setFieldError(MISMATCH_ERROR); return; }
+
     setSaving(true);
-    setError(null);
-    if (toastTimer.current) clearTimeout(toastTimer.current);
     try {
-      const result = await adminApi.saveOwnerPassword(password);
+      const result = await adminApi.saveOwnerPassword(value);
       // Every session went with the password, including this one. Leaving a token
-      // behind would only produce a confusing 401 on the next click.
-      endAdminSession();
-      setSentTo({ title: 'Password saved', detail: result.message });
-      // This toast gets no timer of its own. The redirect is the thing that takes
-      // it away, and it is shorter than the others, so a timer here would only ever
-      // be racing it - and if the bounce ever failed to happen, the toast would still
-      // be on screen saying the wrong thing next to a form it does not belong to.
+      // behind would only produce a confusing 401 on the next click. The listener
+      // above is told to keep out of it, because this end is announced by the
+      // confirmation rather than by the sign-in card.
+      endingOnPurpose.current = true;
+      try {
+        endAdminSession();
+      } finally {
+        endingOnPurpose.current = false;
+      }
+      // The save section closes the way the design closes it: the value has been
+      // kept, so what was pasted belongs to the credential that has just been
+      // replaced rather than to the one that follows it.
+      setGenerated(null);
+      setPasted('');
+      setShowSave(false);
+      setFieldError('');
+      setRevealed(false);
+      setCopied(false);
+      showSuccess({ title: 'Password saved', detail: `The password for ${result.email} has been updated.` }, TOAST_MS);
+      // This toast also gets the redirect, which is shorter than its own timer: the
+      // bounce is the thing that takes it away in practice, and if it ever failed to
+      // happen the toast would still be on screen saying the right thing.
       if (redirectTimer.current) clearTimeout(redirectTimer.current);
       redirectTimer.current = setTimeout(() => navigate('/login'), SIGN_IN_REDIRECT_MS);
     } catch (cause) {
+      dropSessionIfEnded(cause);
       const message = cause instanceof AdminApiError
         ? cause.message
         : 'The password could not be saved. Nothing has changed - try again in a moment.';
-      setError({ title: 'Password not saved', detail: message });
-      toastTimer.current = setTimeout(() => setError(null), ERROR_TOAST_MS);
+      showError('Password not saved', message);
     } finally {
       setSaving(false);
     }
-  }, [navigate, password]);
-
-  /**
-   * Whether the form can be saved from.
-   *
-   * The same policy the server holds the value to, checked here so a password that
-   * could only be refused is not offered as saveable. The generated value always
-   * satisfies it; a hand-edited one is where it matters.
-   */
-  const tooShort = password.trim().length > 0 && password.trim().length < 8;
+  }, [dropSessionIfEnded, generated, navigate, pasted, showError, showSuccess]);
 
   // Whether pressing the button could do anything useful. Only a positive report of
   // a broken deployment blocks it - an unreachable health route is unknown, and
@@ -279,212 +449,207 @@ export function SuperAdminPasswordPage() {
         </div>
       </div>
 
-      <div className="ggpass-panel">
+      {/* The design's right-hand side (`Design/gg-generate-password.html`) is one
+          card in every state it can be in. Signing out, being refused the role or
+          hitting a broken deployment changes what the card says, never the card
+          - so the single "Generate password" control is always a button that
+          reaches for the server and reports back, never a route away from here. */}
+      <div className="ggpass-form">
         <div className="ggpass-card">
           <img className="ggpass-mark" src="/images/logo_mark.png" alt="" />
 
-          {checking ? (
-            <>
-              <span className="eyebrow">Password assistance</span>
-              <h1>Generate password</h1>
-              <p className="ggpass-sub ggpass-waiting"><Spinner size="sm" /> Checking who is signed in…</p>
-            </>
-          ) : brokenStore && !account ? (
-            // Only when there is nobody signed in. A missing database blocks a
-            // signed-in owner just as hard - the button is disabled for them below -
-            // but it must not cost them the form, or the page would claim that
-            // signing in is impossible while somebody is in fact already signed in.
-            <>
-              <span className="eyebrow">Password assistance</span>
-              <h1>Generate password</h1>
-              <p className="ggpass-sub">This deployment has no database, so signing in is impossible.</p>
-              <div className="ggpass-note is-error" role="alert">
-                <i />
-                <div>
-                  {storeReason ?? (
-                    <>The server is running on an in-memory store that is emptied on every
-                    restart, so there is no owner account to sign in as. Set{' '}
-                    <code>NEON_DATABASE_URL</code> in the Vercel project environment
-                    variables and redeploy. Your account and passwords are in the database
-                    and are not affected — they are simply not reachable until it is
-                    connected.</>
-                  )}
-                </div>
-              </div>
-              <Link className="ggpass-btn" to="/admin">Back to the console</Link>
-            </>
-          ) : !account ? (
-            <>
-              <span className="eyebrow">Password assistance</span>
-              <h1>Generate password</h1>
-              <p className="ggpass-sub">This screen is for the {superAdminRole} account. Sign in to continue.</p>
-              <div className="ggpass-field">
-                <label htmlFor={emailId}>Registered email</label>
-                <div className="ggpass-input-wrap">
-                  <EnvelopeIcon />
-                  <input id={emailId} type="email" value={superAdminEmail} readOnly disabled />
-                  <span className="ggpass-lock">Locked</span>
-                </div>
-                <p className="ggpass-hint">This email is linked to the business account and cannot be changed.</p>
-              </div>
-              {/* One button, one label, whatever the state: the design has a single
-                  control on this screen and swapping its wording to describe the
-                  next step makes the card look like a different page. It still
-                  leads to sign-in, because that is the only way anybody gets from
-                  here to a session that can generate anything. */}
-              <Link className="ggpass-btn" to="/login">Generate Password</Link>
-              <p className="ggpass-foot">Nobody can be signed in here without the {superAdminRole} credentials.</p>
-            </>
-          ) : !isOwner ? (
-            <>
-              <span className="eyebrow">Password assistance</span>
-              <h1>Generate password</h1>
-              <p className="ggpass-sub">This screen is for the {superAdminRole} account only.</p>
-              <div className="ggpass-note is-error" role="alert">
-                <i />
-                <div>
-                  You are signed in as {account.name} with the {account.role} role. The
-                  server refuses this request from anybody else, so the button is not
-                  shown rather than shown and rejected.
-                </div>
-              </div>
-              <Link className="ggpass-btn" to="/admin">Back to the console</Link>
-            </>
-          ) : (
-            <>
-              <span className="eyebrow">Password assistance</span>
-              <h1>Generate password</h1>
-              <p className="ggpass-sub">Generate a password, then save the one you keep. It only becomes yours when you save it.</p>
+          <span className="eyebrow">Password assistance</span>
+          <h1>Generate password</h1>
+          <p className={`ggpass-sub muted${checking ? ' ggpass-waiting' : ''}`}>
+            {checking
+              ? <><Spinner size="sm" /> Checking who is signed in…</>
+              : 'A new password will be generated for the registered email address below.'}
+          </p>
 
-              {brokenStore && (
-                <div className="ggpass-note is-error" role="alert">
-                  <i />
-                  <div>
+          {unreachable && !account && (
+            // The session check itself failed. This is not "nobody is signed in" -
+            // that answer only arrives as a 401 - so the card says what actually
+            // happened and offers the one thing that can settle it.
+            <>
+              <div className="ggpass-note is-error" role="alert">
+                <i />
+                <div>
+                  The console could not be reached to check who is signed in. The server did
+                  not answer the session check, so nothing here can tell whether anybody is
+                  signed in. Nothing has been changed. Try again in a moment; if it keeps
+                  happening, the deployment itself needs looking at.
+                </div>
+              </div>
+              <button className="ggpass-btn ggpass-retry" type="button" onClick={() => void recheck()}>Try again</button>
+            </>
+          )}
+
+          {brokenStore && (
+            // Only the wording changes with the session: a missing database blocks a
+            // signed-in owner just as hard, but it must not accuse them of being signed
+            // out while somebody is in fact already signed in.
+            <div className="ggpass-note is-error" role="alert">
+              <i />
+              <div>
+                {!account ? (
+                  <>{'This deployment has no database, so signing in is impossible. '}
                     {storeReason ?? (
-                      <>This deployment has no database, so nothing saved here can be
-                      kept. Set <code>NEON_DATABASE_URL</code> in the Vercel project
-                      environment variables and redeploy.</>
+                      <>The server is running on an in-memory store that is emptied on every
+                      restart, so there is no owner account to sign in as. Set{' '}
+                      <code>NEON_DATABASE_URL</code> in the Vercel project environment
+                      variables and redeploy. Your account and passwords are in the database
+                      and are not affected — they are simply not reachable until it is
+                      connected.</>
                     )}
-                  </div>
-                </div>
-              )}
+                  </>
+                ) : (
+                  <>{storeReason ?? (
+                    <>This deployment has no database, so nothing saved here can be kept.
+                    Set <code>NEON_DATABASE_URL</code> in the Vercel project environment
+                    variables and redeploy.</>
+                  )}</>
+                )}
+              </div>
+            </div>
+          )}
 
-              {brokenMail && (
-                <div className="ggpass-note is-warning" role="status">
-                  <i />
-                  <div>
-                    Mail is not configured here, so the confirmation that a password was
-                    saved will be written to the outbox and go nowhere. Your password
-                    still works - set <code>MAIL_HOST</code>, <code>MAIL_PORT</code>,{' '}
-                    <code>MAIL_USERNAME</code>, <code>MAIL_PASSWORD</code>,{' '}
-                    <code>MAIL_FROM_ADDRESS</code> and <code>MAIL_FROM_NAME</code> to get it.
-                  </div>
-                </div>
-              )}
+          {brokenMail && (
+            <div className="ggpass-note is-warning" role="status">
+              <i />
+              <div>
+                Mail is not configured here, so the confirmation that a password was
+                saved will be written to the outbox and go nowhere. Your password
+                still works - set <code>MAIL_HOST</code>, <code>MAIL_PORT</code>,{' '}
+                <code>MAIL_USERNAME</code>, <code>MAIL_PASSWORD</code>,{' '}
+                <code>MAIL_FROM_ADDRESS</code> and <code>MAIL_FROM_NAME</code> to get it.
+              </div>
+            </div>
+          )}
 
-              {/* A real form so Enter in either field submits, as the design's own
-                  markup does. Nothing generates or saves on a plain submit: the
-                  generate button opens the confirmation, and only that dialog
-                  generates. Saving goes straight through, because by then the
-                  operator has already been asked to confirm generating it. */}
-              <form onSubmit={(event) => { event.preventDefault(); setConfirming(true); }}>
-                <div className="ggpass-field">
-                  <label htmlFor={emailId}>Registered email</label>
-                  <div className="ggpass-input-wrap">
-                    <EnvelopeIcon />
-                    <input id={emailId} type="email" value={superAdminEmail} readOnly disabled />
-                    <span className="ggpass-lock">Locked</span>
-                  </div>
-                  <p className="ggpass-hint">This email is linked to the business account and cannot be changed.</p>
-                </div>
+          {account && !isOwner && (
+            // A courtesy, not the guard: the endpoint answers 403 regardless, which is
+            // asserted in src/server/admin.test.ts. The card is not swapped for a
+            // different one, because the design has a single card and the server's
+            // refusal is the thing that names the real reason.
+            <div className="ggpass-note is-error" role="alert">
+              <i />
+              <div>
+                This screen is for the {superAdminRole} account only. You are signed in as{' '}
+                {account.name} with the {account.role} role. The server refuses requests from
+                any other account.
+              </div>
+            </div>
+          )}
 
-                {/* The trigger stays mounted underneath the overlay rather than being
-                    swapped out for it. Unmounting it would detach the node that had
-                    focus, and there would be nothing to hand focus back to when the
-                    dialog closes. */}
-                <button className="ggpass-btn" type="submit" disabled={running || blocked || confirming} aria-busy={running} aria-haspopup="dialog" onClick={() => setConfirming(true)}>
-                  {running ? <><Spinner size="sm" /> Generating…</> : 'Generate password'}
-                </button>
-              </form>
+          {!account && !checking && !unreachable && (
+            <div className="ggpass-note">
+              <i />
+              <div>This screen is for the {superAdminRole} account. Sign in to continue.</div>
+            </div>
+          )}
 
-              {/* The password and the button that keeps it, together below the
-                  generate button. The field is editable on purpose: an operator who
-                  would rather have something memorable than something random can
-                  type one, and the server holds it to the same policy either way.
-                  It stays visible after saving rather than being cleared, so the
-                  toast's value and the field cannot disagree on screen. */}
-              <div className="ggpass-field ggpass-save">
-                <label htmlFor={passwordId}>New password</label>
+          <div className="ggpass-field">
+            <label htmlFor={emailId}>Registered email</label>
+            <div className="ggpass-input-wrap">
+              <EnvelopeIcon />
+              <input id={emailId} type="email" value={superAdminEmail} readOnly disabled />
+              <span className="ggpass-lock">Locked</span>
+            </div>
+            <p className="ggpass-hint">This email is linked to the business account and cannot be changed.</p>
+          </div>
+
+          {/* The design's single control, in the design's only place on the card.
+              No confirmation stands in front of it any more: the design's own answer
+              to "are you sure" is that nothing is written until the save, and a dialog
+              in front of a step that changes nothing only trains people to press
+              through dialogs. The button never points at the sign-in page - with no
+              session the server refuses the press and the failure notification says
+              why, on this screen. */}
+          <button
+            className="ggpass-btn"
+            type="button"
+            disabled={checking || running || blocked}
+            aria-busy={running}
+            onClick={() => void generate()}
+          >
+            {running
+              ? <><Spinner size="sm" /> Generating…</>
+              // The label the design swaps to once there is a password to replace: the
+              // same control, doing the same thing again, and it is not a second step.
+              : generated ? 'Regenerate password' : 'Generate password'}
+          </button>
+
+          {/* The save half of the design, which does not exist until a copy has been
+              attempted. Paste is the only way in: the screen is asking for the value it
+              just showed, so what gets saved is what was shown rather than something
+              somebody had time to think about while it sat on screen. */}
+          {showSave && (
+            <div className="ggpass-save">
+              <div className="ggpass-field">
+                <label htmlFor={passwordId}>Save new password</label>
                 <div className="ggpass-input-wrap">
-                  <KeyIcon />
+                  <PadlockIcon />
                   <input
                     id={passwordId}
                     ref={passwordRef}
-                    type="text"
-                    inputMode="text"
-                    autoComplete="off"
+                    type={revealed ? 'text' : 'password'}
+                    maxLength={8}
+                    autoComplete="new-password"
                     spellCheck={false}
                     className="ggpass-code"
-                    value={password}
-                    placeholder="Generate a password to fill this in"
-                    readOnly={!generated}
+                    value={pasted}
+                    placeholder="Paste the copied password"
                     disabled={blocked || saving}
-                    aria-describedby={`${passwordId}-hint`}
-                    onChange={(event) => { setPassword(event.target.value); setCopied(false); }}
+                    aria-invalid={fieldError ? true : undefined}
+                    aria-describedby={fieldError ? `${passwordId}-err` : undefined}
+                    onChange={(event) => { setPasted(event.target.value); setFieldError(''); }}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' && !saving) { event.preventDefault(); void save(); }
+                    }}
                   />
+                  {/* The value is deliberately not shown by default: this is a
+                      password the owner is about to make the only credential for
+                      the account, and the design gives them the eye rather than
+                      putting it on screen for whoever is standing behind them. */}
+                  <button
+                    className="ggpass-eye"
+                    type="button"
+                    aria-label={revealed ? 'Hide password' : 'Show password'}
+                    onClick={() => setRevealed((on) => !on)}
+                  >
+                    <EyeIcon />
+                  </button>
                 </div>
-                <p className="ggpass-hint" id={`${passwordId}-hint`}>
-                  {tooShort
-                    ? 'A password needs at least 8 characters.'
-                    : generated
-                      ? 'Keep it as generated, or change it to something you will remember.'
-                      : 'Nothing is kept until this is saved.'}
-                </p>
-                <button
-                  className="ggpass-btn"
-                  type="button"
-                  disabled={!generated || blocked || saving || password.trim().length < 8}
-                  aria-busy={saving}
-                  onClick={() => void save()}
-                >
-                  {saving ? <><Spinner size="sm" /> Saving…</> : 'Save password'}
-                </button>
+                {/* Not a live region: it is empty until the owner presses save, and
+                    an always-mounted alert would be waiting there to swallow the
+                    assertion made about every other alert on the page. */}
+                <p className="ggpass-err" id={`${passwordId}-err`}>{fieldError}</p>
               </div>
-
-              {confirming && (
-                <div className="ggpass-confirm-layer">
-                  <div className="ggpass-confirm" role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={`${titleId}-detail`}>
-                    <h2 id={titleId}>Generate a new owner password?</h2>
-                    <p id={`${titleId}-detail`}>
-                      An eight character password will be made and shown here for you to
-                      copy or change. Your current password keeps working until you press
-                      <b> Save password</b>, and saving ends every session, including this
-                      one.
-                    </p>
-                    <div className="ggpass-confirm-actions">
-                      <button className="ggpass-btn is-quiet" type="button" ref={cancelRef} disabled={running} onClick={() => setConfirming(false)}>
-                        Cancel
-                      </button>
-                      <button className="ggpass-btn" type="button" disabled={running} onClick={() => void generate()}>
-                        {running ? <><Spinner size="sm" /> Generating…</> : 'Yes, generate it'}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {blocked && <p className="ggpass-foot">Fix the deployment above, then this becomes available.</p>}
-
-              {/* Always under the form, exactly as the design puts it. It is the
-                  answer to "what happens now" for the state the owner is about to be
-                  in, so hiding it behind a success or a failure would leave the one
-                  question nobody else on the page answers. */}
-              <div className="ggpass-note">
-                <i />
-                <div>The password is shown once, here. Copy it before you leave — nothing else will be able to show it to you.</div>
-              </div>
-            </>
+              <button
+                className="ggpass-btn"
+                type="button"
+                disabled={blocked || saving}
+                aria-busy={saving}
+                onClick={() => void save()}
+              >
+                {saving ? <><Spinner size="sm" /> Saving…</> : 'Save password'}
+              </button>
+            </div>
           )}
+
+          {blocked && <p className="ggpass-foot">Fix the deployment above, then this becomes available.</p>}
+
+          {/* Always under the button, exactly as the design puts it. It is the only
+              line on the page that says what the password is made of and what to do
+              with it, so it has to be there before anything is pressed as well as
+              after. */}
+          <div className="ggpass-note">
+            <i />
+            <div>
+              The password is <b>8 characters, letters and numbers</b>. Copy it from the
+              notification, then paste it above to save.
+            </div>
+          </div>
 
           {/* Away from the sign-in page, and not towards it either when there is
               nothing to sign in with: with no database the account is unreachable,
@@ -502,27 +667,34 @@ export function SuperAdminPasswordPage() {
           button light up and start working; this is the same shape, the same
           corner and the same timer in both directions.
 
-          The success toast is the only place outside the field that carries the
-          password, and it carries it with a copy button beside it - because
+          The success toast is the only place that carries the password in the
+          clear, and it carries it with the copy button beside it - because
           "generated" followed by a value you have to select by hand is the thing
           the copy button exists to remove. It is announced politely rather than
           assertively: it appears on a deliberate action, not as an interruption. */}
       {sentTo && (
-        <div className="ggpass-toast" role="status" aria-live="polite">
+        <div className={`ggpass-toast${sentTo.timed ? ' is-timed' : ''}`} role="status" aria-live="polite">
           <span className="ggpass-toast-icon"><CheckIcon /></span>
-          <div>
+          <div className="ggpass-toast-body">
             <b>{sentTo.title}</b>
-            {/* The field's value, for the same reason the copy button uses it: two
-                places on one screen showing two different passwords would be worse
-                than showing it in only one. */}
-            {generated && !copied && sentTo.title === 'Password generated' && (
-              <span className="ggpass-toast-code">{password}</span>
-            )}
             <span>{sentTo.detail}</span>
-            {generated && (
-              <button className="ggpass-toast-copy" type="button" onClick={() => void copy()}>
-                {copied ? 'Copied' : 'Copy password'}
-              </button>
+            {/* The generated value, for the same reason the copy button uses it:
+                two places on one screen showing two different passwords would be
+                worse than showing it in one. It stays up after the copy, because
+                the clipboard is the thing that may not have taken it. */}
+            {generated && sentTo.title === 'Password generated' && (
+              <div className="ggpass-toast-pw">
+                <code className="ggpass-toast-code">{generated}</code>
+                <button
+                  className={`ggpass-toast-copy${copied ? ' is-done' : ''}`}
+                  type="button"
+                  title={copied ? 'Copied' : 'Copy to clipboard'}
+                  aria-label={copied ? 'Copied' : 'Copy password'}
+                  onClick={() => void copy()}
+                >
+                  {copied ? <CheckIcon /> : <CopyIcon />}
+                </button>
+              </div>
             )}
           </div>
           <button className="ggpass-toast-close" type="button" aria-label="Close" onClick={() => setSentTo(null)}>✕</button>
@@ -531,9 +703,9 @@ export function SuperAdminPasswordPage() {
       )}
 
       {error && (
-        <div className="ggpass-toast is-error" role="alert">
+        <div className="ggpass-toast is-error is-timed" role="alert">
           <span className="ggpass-toast-icon"><AlertIcon /></span>
-          <div>
+          <div className="ggpass-toast-body">
             <b>{error.title}</b>
             <span>{error.detail}</span>
           </div>
@@ -554,11 +726,29 @@ function EnvelopeIcon() {
   );
 }
 
-function KeyIcon() {
+function PadlockIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <circle cx="8" cy="12" r="4" />
-      <path d="M12 12h9M18 12v3M21 12v2" />
+      <rect x="5" y="11" width="14" height="10" rx="1" />
+      <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+    </svg>
+  );
+}
+
+function EyeIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" strokeWidth="1.5">
+      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
+function CopyIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <rect x="9" y="9" width="12" height="12" rx="1" />
+      <path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1" />
     </svg>
   );
 }

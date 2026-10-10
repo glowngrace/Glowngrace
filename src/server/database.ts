@@ -97,10 +97,20 @@ export const tables: TableDefinition[] = [
     columns: [
       'id', 'name', 'email', 'role', 'password_hash', 'avatar', 'status',
       'created_at', 'updated_at', 'phone', 'source', 'reviewed_at', 'reviewed_by',
+      'password_generated_at', 'password_changed_at',
     ],
     unique: [['email'], ['id']],
     generated: { id: 'uuid' },
     timestamps: ['created_at', 'updated_at'],
+  },
+  {
+    // The owner password's audit trail: what happened and when, never the
+    // password. Written by the two `/owner-password` routes.
+    name: 'owner_password_events',
+    columns: ['id', 'user_id', 'kind', 'created_at'],
+    unique: [['id']],
+    generated: { id: 'uuid' },
+    timestamps: ['created_at'],
   },
   {
     name: 'admin_sessions',

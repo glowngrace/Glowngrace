@@ -18,10 +18,12 @@ import { auditPage } from './support/audit';
  *
  *   1. the owner can sign in with the credential the last run left behind
  *   2. the screen offers the control, and reaches it by typing the URL
- *   3. pressing it confirms first, and nothing at all is written until it does
- *   4. the password is on the screen, in the field and in the toast, and the two
- *      agree with each other
- *   5. the field's value is what the save sends
+ *   3. pressing it generates on the press, with no dialog in front of it, and
+ *      nothing at all is written - only the record that somebody generated one
+ *   4. the password is in the notification with a copy button beside it
+ *   5. a copy opens the save field, and the value the field holds is what the
+ *      save request carries - read off the request itself, against the real
+ *      server, because that is the one thing a stub cannot prove
  *   6. the stored hash verifies against exactly that value
  *   7. the confirmation was relayed, which is `sent_at` on the outbox row, and it
  *      carries no password
@@ -29,11 +31,12 @@ import { auditPage } from './support/audit';
  *   9. every session went, the caller's included, and the screen walks to sign-in
  *
  * One thing this file can no longer do, and it is worth being explicit about: the
- * previous version read each new password back out of the outbox, because the
- * password used to be mailed and never rendered. Now it is the other way round. The
- * password exists on the screen and in the mailbox only as a confirmation that a
- * password changed, so the value is read from the field and kept in memory for the
- * length of the run.
+ * previous version read each new password back off the request by typing a
+ * different one into an editable field, and before that it read the password back
+ * out of the outbox, because the password used to be mailed and never rendered. Now
+ * it is the other way round. The password exists on the screen and in the mailbox
+ * only as a confirmation that a password changed, so the value is read from the
+ * notification and kept in memory for the length of the run.
  *
  * That has a consequence an operator should know about, not just a test: once a
  * password is saved from this screen, there is no server-side record of it
@@ -160,13 +163,26 @@ async function signInAsOwner(page: Page, password: string) {
   await expect(page.getByRole('alert')).toHaveCount(0);
 }
 
-/** Generates through the real screen and returns what the field now holds. */
+/** Generates through the real screen and returns what the notification now holds. */
 async function generateOnScreen(page: Page): Promise<string> {
   await page.goto('/superadmin/ggpass');
   await page.getByRole('button', { name: 'Generate password' }).click();
-  await page.getByRole('dialog').getByRole('button', { name: 'Yes, generate it' }).click();
-  await expect(page.getByLabel('New password')).not.toHaveValue('', { timeout: 15_000 });
-  return page.getByLabel('New password').inputValue();
+  const code = page.locator('.ggpass-toast-code');
+  await expect(code).toHaveText(/.{8}/, { timeout: 15_000 });
+  return (await code.textContent() ?? '').trim();
+}
+
+/**
+ * Copies from the notification, which is what opens the save field.
+ *
+ * No clipboard permission is asked for: the field opens on the attempt whether or
+ * not the browser let the value through, which is the screen's own answer to a
+ * withheld clipboard. The value that goes into the field below comes from the
+ * notification, so what this costs is only the copy report, not the run.
+ */
+async function copyOnScreen(page: Page) {
+  await page.getByRole('button', { name: 'Copy password' }).click();
+  await expect(page.getByLabel('Save new password')).toBeVisible();
 }
 
 test.describe('the real owner password round trip', () => {
@@ -229,77 +245,143 @@ test.describe('the real owner password round trip', () => {
     // that cannot do anything.
     await expect(page.getByRole('button', { name: 'Generate password' })).toBeEnabled();
     await expect(page.getByLabel('Registered email')).toHaveValue(ownerEmail);
-    // Nothing has been generated yet, so there is nothing to save and the button
-    // says so rather than offering a save that could only be refused.
-    await expect(page.getByRole('button', { name: 'Save password' })).toBeDisabled();
+    // Nothing has been generated, so nothing has been copied, so there is no save
+    // field: before a copy there is no value to paste back and a save button could
+    // only refuse.
+    await expect(page.getByRole('button', { name: 'Save password' })).toHaveCount(0);
+    await expect(page.getByText('Copy it from the notification, then paste it above to save.')).toBeVisible();
     await auditPage(page, '/superadmin/ggpass (real)');
   });
 
-  test('confirms before it generates, and generating writes nothing', async ({ page }) => {
+  test('generates on the press, and generating writes nothing', async ({ page }) => {
     test.skip(!usable, 'the owner could not sign in');
     await signInAsOwner(page, currentPassword);
-    const before = await pool.query('SELECT password_hash, updated_at FROM admin_users WHERE email = $1', [ownerEmail]);
-    const hashBefore = (before.rows[0] as { password_hash: string }).password_hash;
+    const before = await pool.query(
+      'SELECT password_hash, updated_at, password_generated_at, password_changed_at FROM admin_users WHERE email = $1',
+      [ownerEmail],
+    );
+    const row = before.rows[0] as {
+      password_hash: string;
+      updated_at: Date;
+      password_generated_at: Date | null;
+      password_changed_at: Date | null;
+    };
+    const generatedAt = row.password_generated_at ? new Date(row.password_generated_at).getTime() : null;
 
     await page.goto('/superadmin/ggpass');
     await page.getByRole('button', { name: 'Generate password' }).click();
 
-    const dialog = page.getByRole('dialog', { name: 'Generate a new owner password?' });
-    await expect(dialog).toBeVisible();
-    await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeFocused();
-    await auditPage(page, '/superadmin/ggpass (real, confirming)');
+    // No dialog in front of it. The design's own answer to "are you sure" is that
+    // nothing is written until the save, and the value below is the proof of that
+    // rather than the absence of a confirmation.
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(page.locator('.ggpass-toast-code')).toHaveText(/.{8}/, { timeout: 15_000 });
+    await expect(page.getByRole('button', { name: 'Regenerate password' })).toBeEnabled();
 
-    await dialog.getByRole('button', { name: 'Cancel' }).click();
-    await expect(dialog).toHaveCount(0);
+    const after = await pool.query(
+      'SELECT password_hash, updated_at, password_generated_at, password_changed_at FROM admin_users WHERE email = $1',
+      [ownerEmail],
+    );
+    const kept = after.rows[0] as {
+      password_hash: string;
+      updated_at: Date;
+      password_generated_at: Date | null;
+      password_changed_at: Date | null;
+    };
+    // The credential itself is untouched, and so is the column that moves when one
+    // is stored: a refresh on this screen still costs nobody their access.
+    expect(kept.password_hash).toBe(row.password_hash);
+    expect(new Date(kept.updated_at).getTime()).toBe(new Date(row.updated_at).getTime());
 
-    // Cancelling wrote nothing, and so does confirming: this is the property the
-    // old rotation did not have, and it is why a refresh on this screen costs nobody
-    // their access.
-    const after = await pool.query('SELECT password_hash FROM admin_users WHERE email = $1', [ownerEmail]);
-    expect((after.rows[0] as { password_hash: string }).password_hash).toBe(hashBefore);
+    // What did move is the record that somebody was handed a password, which is the
+    // difference this migration exists to make: "nobody has looked at this" and
+    // "somebody generated one and never saved it" are no longer the same answer.
+    expect(kept.password_generated_at, 'the generation was recorded').not.toBeNull();
+    expect(new Date(kept.password_generated_at!).getTime()).toBeGreaterThanOrEqual(generatedAt ?? 0);
+    // And the save timestamp did not move with it: a generation is a different
+    // event from a save, which is the whole reason they are two columns.
+    expect(kept.password_changed_at ? new Date(kept.password_changed_at).getTime() : null)
+      .toBe(row.password_changed_at ? new Date(row.password_changed_at).getTime() : null);
+
+    // And the event, not just the column: the column holds the last one, the table
+    // holds every one of them.
+    const events = await pool.query(
+      `SELECT kind FROM owner_password_events WHERE user_id = (SELECT id FROM admin_users WHERE email = $1)
+       ORDER BY created_at DESC LIMIT 1`,
+      [ownerEmail],
+    );
+    expect((events.rows[0] as { kind: string }).kind).toBe('generated');
   });
 
-  test('puts the generated password on the screen, in the field and the toast', async ({ page }) => {
+  test('puts the generated password in the notification, with a way to copy it', async ({ page }) => {
     test.skip(!usable, 'the owner could not sign in');
     await signInAsOwner(page, currentPassword);
 
     const shown = await generateOnScreen(page);
 
-    expect(shown, 'the field holds the generated password').toHaveLength(8);
+    expect(shown, 'the notification holds the generated password').toHaveLength(8);
     expect(shown).toMatch(/[A-Z]/);
     expect(shown).toMatch(/[0-9]/);
     // Nothing hard to tell apart at a glance, because a short password that cannot
     // be read back correctly is a locked-out owner.
     expect(shown).not.toMatch(/[Il1O0]/);
 
-    // The toast carries the same value, and offers to copy it. Two places on one
-    // screen showing two passwords would be worse than showing it in only one.
-    const toast = page.getByRole('status');
+    // The notification carries the value and offers to copy it. There is no field
+    // to read it from: the copy is what opens the save, so this is the only place
+    // on the page the password exists in the clear.
+    const toast = page.locator('.ggpass-toast');
     await expect(toast).toContainText('Password generated');
+    await expect(toast).toContainText(`New password for ${ownerEmail}`);
     await expect(page.locator('.ggpass-toast-code')).toHaveText(shown);
     await expect(toast.getByRole('button', { name: 'Copy password' })).toBeVisible();
+    await expect(page.getByLabel('Save new password')).toHaveCount(0);
     await auditPage(page, '/superadmin/ggpass (real, generated)');
   });
 
-  test('saves the field, stores that hash, and mails a confirmation with no password in it', async ({ page }) => {
+  test('saves the value in the field, stores that hash, and mails a confirmation with no password in it', async ({ page }) => {
     test.skip(!usable, 'the owner could not sign in');
     await signInAsOwner(page, currentPassword);
 
     const shown = await generateOnScreen(page);
     const before = await latestOutboxRow('owner-password-saved').catch(() => null);
 
-    // The field is editable, so this takes the path a busy owner takes and proves
-    // the save uses the field rather than the value the server handed out. If the
-    // two were the same, the rest of this test would pass for the wrong reason.
-    expect(shown).not.toBe('Mango!Tree9');
-    await page.getByLabel('New password').fill('Mango!Tree9');
-    await page.getByRole('button', { name: 'Save password' }).click();
-    await expect(page.getByRole('status')).toContainText('Password saved', { timeout: 30_000 });
+    // Read off the request itself as it goes through to the real server. The field
+    // takes the value back by paste, so what it holds and what the server receives
+    // can only differ if the screen sends something other than what it showed -
+    // and that is the one thing a UI-only test would wave past.
+    let sent: Record<string, unknown> | null = null;
+    await page.route('**/api/admin/owner-password/save', async (route) => {
+      sent = route.request().postDataJSON() as Record<string, unknown> | null;
+      await route.continue();
+    });
 
-    const stored = await pool.query('SELECT password_hash FROM admin_users WHERE email = $1', [ownerEmail]);
-    const hash = String((stored.rows[0] as { password_hash: string }).password_hash);
-    expect(hash.startsWith('scrypt$'), 'the stored value is a hash, not the password').toBe(true);
-    expect(hash).not.toContain('Mango');
+    await copyOnScreen(page);
+    // Empty until a copy has put it there, so nothing typed before the copy can
+    // survive into the save.
+    await expect(page.getByLabel('Save new password')).toHaveValue('');
+    await page.getByLabel('Save new password').fill(shown);
+    await page.getByRole('button', { name: 'Save password' }).click();
+
+    await expect(page.locator('.ggpass-toast')).toContainText('Password saved', { timeout: 30_000 });
+    await expect(page.locator('.ggpass-toast')).toContainText(`The password for ${ownerEmail} has been updated.`);
+    expect(sent, 'the request carried what the field held').toEqual({ password: shown });
+
+    const stored = await pool.query(
+      'SELECT password_hash, password_changed_at FROM admin_users WHERE email = $1',
+      [ownerEmail],
+    );
+    const kept = stored.rows[0] as { password_hash: string; password_changed_at: Date | null };
+    expect(kept.password_hash.startsWith('scrypt$'), 'the stored value is a hash, not the password').toBe(true);
+    expect(kept.password_hash, 'the hash is not the value on screen').not.toContain(shown);
+    expect(kept.password_changed_at, 'the save was recorded').not.toBeNull();
+
+    // The event, which is what an operator reads the history from.
+    const events = await pool.query(
+      `SELECT kind FROM owner_password_events WHERE user_id = (SELECT id FROM admin_users WHERE email = $1)
+       ORDER BY created_at DESC LIMIT 1`,
+      [ownerEmail],
+    );
+    expect((events.rows[0] as { kind: string }).kind).toBe('saved');
 
     // The relay took the confirmation. A null `sent_at` here is the silent failure
     // this whole file exists to catch: the save succeeded, the row was written, and
@@ -312,7 +394,7 @@ test.describe('the real owner password round trip', () => {
     // And it carries no credential. This is the one mail in the project that can be
     // forwarded without handing over the account.
     expect(after.body).not.toMatch(/Password:\s*\S/);
-    expect(after.body).not.toContain('Mango');
+    expect(after.body).not.toContain(shown);
 
     // The session went with the password, and the page is on its way to sign-in.
     expect(await page.evaluate(() => localStorage.getItem('glow-grace-admin-token'))).toBeNull();
@@ -320,7 +402,7 @@ test.describe('the real owner password round trip', () => {
     await expect(page.getByRole('heading', { level: 1, name: 'Sign in' })).toBeVisible();
 
     // From here on the account is only reachable with what was on the screen.
-    currentPassword = 'Mango!Tree9';
+    currentPassword = shown;
   });
 
   test('the stored hash is the password that was on the screen', async ({ page }) => {

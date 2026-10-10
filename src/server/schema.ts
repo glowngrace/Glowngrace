@@ -26,7 +26,8 @@ export function isMissingSchema(error: unknown): boolean {
 export const migrateConsoleHint =
   'The admin console needs db/migrations/005_admin_console.sql, 006_store_settings.sql, 007_admin_users.sql, '
   + '008_role_signup.sql, 009_password_reset_lookup.sql, 010_remove_demo_accounts.sql, 011_email_delivery.sql, '
-  + '012_owner_password_hold.sql and 013_product_details.sql. '
+  + '012_owner_password_hold.sql, 013_product_details.sql, 014_order_item_products.sql, '
+  + '015_owner_password_no_rotation.sql and 016_owner_password_history.sql. '
   + 'Run "npm run db:migrate:production" against this database.';
 
 export type SchemaDrift = { status: number; body: Record<string, unknown> };

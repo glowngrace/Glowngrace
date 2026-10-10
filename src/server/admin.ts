@@ -10,9 +10,10 @@ import {
   type Collection,
   type Row,
 } from './admin/collections.js';
-import { hashPassword, generateStrongPassword, generateOwnerPassword, newSessionToken, newResetToken, passwordPolicy, passwordPolicyError, removedDemoPassword, resetTokenExpiry, resetTokenLookup, sessionExpiry, verifyPassword, hashResetToken } from './admin/passwords.js';
+import { hashPassword, generateStrongPassword, generateOwnerPassword, newSessionToken, newResetToken, ownerPasswordPolicyError, passwordPolicy, passwordPolicyError, removedDemoPassword, resetTokenExpiry, resetTokenLookup, sessionExpiry, verifyPassword, hashResetToken } from './admin/passwords.js';
 import { consoleRoles, signupRoles, superAdminEmail, superAdminRole } from '../auth/roles.js';
-import { ownerCredentialsMessage, saveOwnerPassword } from './admin/owner-password.js';
+import { ownerCredentialsMessage, recordOwnerPasswordGenerated, saveOwnerPassword } from './admin/owner-password.js';
+import { isMissingSchema, schemaNotMigrated } from './schema.js';
 import { tryDeliverPendingMail } from './mailer.js';
 import { datasetCountSql, mapDatasetRowCounts } from './admin/datasets.js';
 import { normalizeStoreSettings, validateStoreSettings, type StoreSettings } from './admin/settings.js';
@@ -154,14 +155,19 @@ const passwordResetConfirmSchema = z.object({
 /**
  * The owner's password, as it arrives from the screen.
  *
- * The generated value goes out as a response and comes back in a body, because
- * the point of the flow is that the operator can edit what was generated before
- * keeping it. It is held to exactly the policy every other password in the
- * project is held to - the same `password` schema as a change and a reset - so a
- * hand-typed value cannot buy a shorter or longer credential than the sign-in
- * form would accept.
+ * The generated value goes out as a response and comes back in a body: the screen
+ * shows it once, the operator pastes it back, and this is the server checking
+ * that what came back is a password it would have generated. It is held to
+ * `ownerPasswordPolicyError` - eight letters and numbers - rather than to the
+ * shared `password` schema, because the screen's own words promise exactly that
+ * and a save the server would refuse after the screen accepted it is the worst
+ * moment to discover the two disagree.
  */
-const ownerPasswordSchema = z.object({ password });
+const ownerPasswordSchema = z.object({
+  password: z.string().refine((value) => ownerPasswordPolicyError(value) === null, {
+    message: 'Password must be exactly 8 letters or numbers.',
+  }),
+});
 
 /**
  * The public registration form.
@@ -1496,13 +1502,19 @@ async function listPages() {
      *
      * Two requests rather than one, and the split is the whole design:
      *
-     *   POST /owner-password/generate  makes a password and hands it back. Nothing
-     *                                 is written, no session is touched, and the
-     *                                 previous password still works - so a tab that
-     *                                 closes or a walk away from the keyboard loses
-     *                                 nothing. The alternative, which this replaced,
-     *                                 replaced the credential immediately and mailed
-     *                                 the new one to a mailbox nobody was watching.
+     *   POST /owner-password/generate  makes a password and hands it back. The
+     *                                 credential is written nowhere, no session is
+     *                                 touched, and the previous password still
+     *                                 works - so a tab that closes or a walk away
+     *                                 from the keyboard loses nothing. The
+     *                                 alternative, which this replaced, replaced
+     *                                 the credential immediately and mailed the new
+     *                                 one to a mailbox nobody was watching. What it
+     *                                 does record is the moment, in
+     *                                 `password_generated_at` and one row of
+     *                                 `owner_password_events`, so a deployment can
+     *                                 tell an untouched account from one where a
+     *                                 password was generated and never kept.
      *   POST /owner-password/save      stores the password, from the body. This is
      *                                 the moment the old one stops working, every
      *                                 session is revoked, and a confirmation that
@@ -1528,7 +1540,7 @@ async function listPages() {
       if (id === 'save') {
         const parsed = ownerPasswordSchema.safeParse(request.body);
         if (!parsed.success) {
-          return fail(400, 'invalid_password', 'Enter a password of at least 8 characters.', { errors: fieldErrors(parsed.error) });
+          return fail(400, 'invalid_password', 'Password must be exactly 8 letters or numbers.', { errors: fieldErrors(parsed.error) });
         }
         const result = await saveOwnerPassword(database, parsed.data.password);
         if (!result.saved) {
@@ -1546,13 +1558,24 @@ async function listPages() {
       }
 
       if (id !== 'generate') return fail(404, 'not_found', 'That endpoint does not exist.');
+      const password = generateOwnerPassword();
+      // The record of the moment, not of the password: no hash moves and no
+      // session ends here. A deployment that has not run 016 yet is told which
+      // file fixes it rather than being handed a 500 with a stack trace - and
+      // nothing has happened that cannot be redone by pressing the button again.
+      try {
+        await recordOwnerPasswordGenerated(database, user.id);
+      } catch (cause) {
+        if (isMissingSchema(cause)) return schemaNotMigrated(cause);
+        throw cause;
+      }
       return {
         status: 200,
         body: {
           generated: true,
           // The only response in this project that carries a credential, and it goes
           // to the account that is allowed to have it and nowhere else.
-          password: generateOwnerPassword(),
+          password,
           email: user.email,
         },
       };

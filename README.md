@@ -117,20 +117,24 @@ It asks the server who is signed in rather than trusting what is in
 
 Three steps, in this order and no other:
 
-1. **Generate.** The server makes an eight character password and hands it back.
-   This writes nothing and signs nobody out, so a closed tab or a refresh costs
-   nobody their access. Eight characters from an alphabet with no `0`/`O` or
-   `1`/`I`/`l` in it, at least one letter and one digit — short enough to read off
-   a screen and type back, which is the only reason it is short at all.
-2. **Edit.** The value lands in a field. Keep it, or type something you will
-   remember. The field is the value that gets saved; the toast's copy button and
-   the toast's display both follow the field, so the two can never disagree about
-   what you are about to keep.
-3. **Save.** The field's value is hashed and stored, every session ends
-   including the caller's, a confirmation goes to the owner address, and the page
-   walks back to sign-in to use it. Refused values are the ones the sign-in form
-   would refuse, so this screen cannot be used to lock yourself out of the one
-   account that cannot be recovered.
+1. **Generate.** The server makes an eight character password and hands it back in
+   the notification. This writes nothing and signs nobody out, so a closed tab or a
+   refresh costs nobody their access. Eight characters from an alphabet with no
+   `0`/`O` or `1`/`I`/`l` in it, at least one letter and one digit — short enough
+   to read off a screen and type back, which is the only reason it is short at all.
+2. **Copy.** The notification is the only place the value ever appears in the
+   clear, and its copy button exists to answer the one question the password makes
+   somebody ask, which is how to keep it. The save field opens for the copy and
+   starts empty, so the one value that can be saved is the one that was shown. A
+   regeneration starts the flow over rather than leaving the old value in the
+   field.
+3. **Save.** The pasted value is checked against the generated one — it has to
+   match exactly, and a value that does not is refused beside the field — then
+   hashed and stored, every session ends including the caller's, a confirmation
+   goes to the owner address, and the page walks back to sign-in to use it. The
+   field sits behind an eye toggle that starts with the value covered, so a
+   password on this screen is not something that reads itself out to whoever
+   walks past.
 
 **Once it is saved, nothing on the server holds it.** There is no server-side
 record of the value — no row to read it back out of, and the `email_outbox`
@@ -146,8 +150,15 @@ the seed credential still happens to work.
 The destination is shown in a fixed field — the owner address, prefilled, readonly and
 disabled. Nobody can send the owner confirmation somewhere else by typing over it.
 
+The card is the design's card in every state; the page does not swap its controls in
+and out for whoever is looking. A signed-out visitor sees the same form and is told,
+in the card's own words, to sign in rather than bounced to the login page: the
+generate press itself never navigates, and without a session to send it is refused on
+screen without ever reaching the server, so nothing about this page answers 401 to a
+keyboard.
+
 The page also reads `/api/health` on arrival. If the deployment has no database it
-says which variable is missing and disables both buttons, rather than reporting a
+says which variable is missing and blocks both buttons, rather than reporting a
 save that cannot survive the next request — see
 [`/api/health` on a deployment with no database](#api-health-on-a-deployment-with-no-database).
 Missing mail is a warning and **not** a block: the password is on this screen, so a
@@ -156,10 +167,9 @@ with no SMTP is exactly when somebody may need to change it. An unreachable heal
 route is treated as unknown, not as a fault, so a network hiccup does not take a
 working feature away.
 
-The page hiding the controls is a courtesy. The guard that counts is on the server:
-both routes re-read the session and answer `403` to anything but the owner role, so
-it is safe to reach by typing the URL and safe to call directly. Both gates are
-covered by tests.
+The guard that counts is on the server: both routes re-read the session and answer
+`403` to anything but the owner role, so it is safe to reach by typing the URL and
+safe to call directly. Both gates are covered by tests.
 
 ### How the retry reaches a serverless deployment
 
