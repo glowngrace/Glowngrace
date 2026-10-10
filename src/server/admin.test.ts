@@ -2033,20 +2033,38 @@ describe('the two owner password endpoints', () => {
   }
 
   describe('generating', () => {
-    it('hands a password back to the owner and changes nothing', async () => {
+    it('hands a password back to the owner without touching the credential', async () => {
       const { admin, query } = consoleFor(ownerRow);
       const password = generated(await admin.handle({ method: 'POST', segments: ['owner-password', 'generate'], token }));
 
-      expect(password).toHaveLength(8);
+      expect(password).toMatch(/^[A-Za-z0-9]{8}$/);
       expect(password).toMatch(/[A-Z]/);
       expect(password).toMatch(/[0-9]/);
 
-      // The whole reason this is a separate request. Nothing is written and
+      // The whole reason this is a separate request. No credential is written and
       // nobody is signed out until the owner presses save, so a closed tab or a
       // second look costs nobody their access.
       expect(query.mock.calls.some(([text]) => String(text).includes('SET password_hash'))).toBe(false);
       expect(query.mock.calls.some(([text]) => String(text).includes('DELETE FROM admin_sessions'))).toBe(false);
       expect(query.mock.calls.some(([text]) => String(text).includes('INSERT INTO email_outbox'))).toBe(false);
+    });
+
+    it('records the moment, so an untouched account can be told from an abandoned one', async () => {
+      // What a generate is allowed to write: not a password, never a password, but
+      // the fact that one was offered. Without it a deployment cannot tell the
+      // difference between an owner who never opened this screen and one who
+      // generated a password, closed the tab, and left the old one in place.
+      const { admin, query } = consoleFor(ownerRow);
+      await admin.handle({ method: 'POST', segments: ['owner-password', 'generate'], token });
+
+      const stamped = query.mock.calls.find(([text]) => String(text).includes('password_generated_at = $1'));
+      expect(stamped).toBeDefined();
+      expect((stamped![1] as unknown[])[1]).toBe(ownerRow.id);
+
+      const event = query.mock.calls.find(([text]) => String(text).includes('INSERT INTO owner_password_events'));
+      expect(event).toBeDefined();
+      expect(String(event![0])).toContain("'generated'");
+      expect((event![1] as unknown[])[0]).toBe(ownerRow.id);
     });
 
     it('gives a different one every time, because a repeat is useless to a locked-out owner', async () => {
@@ -2108,7 +2126,7 @@ describe('the two owner password endpoints', () => {
       const result = await admin.handle({
         method: 'POST',
         segments: ['owner-password', 'save'],
-        body: { password: 'Mango!Tree9' },
+        body: { password: 'Mango9Tr' },
         token,
       });
 
@@ -2129,6 +2147,17 @@ describe('the two owner password endpoints', () => {
       expect(revoke).toBeDefined();
       expect((revoke![1] as unknown[])[0]).toBe(ownerRow.id);
 
+      // The change is stamped on the row as well as hashed into it, so "when did
+      // this password start working" is answerable without reading a log.
+      const changed = query.mock.calls.find(([text]) => String(text).includes('password_changed_at = $2'));
+      expect(changed).toBeDefined();
+      expect((changed![1] as unknown[])[2]).toBe(ownerRow.id);
+
+      const event = query.mock.calls.find(([text]) => String(text).includes('INSERT INTO owner_password_events'));
+      expect(event).toBeDefined();
+      expect(String(event![0])).toContain("'saved'");
+      expect((event![1] as unknown[])[0]).toBe(ownerRow.id);
+
       const mail = query.mock.calls.find(([text]) => String(text).includes('INSERT INTO email_outbox'));
       expect(mail).toBeDefined();
       expect((mail![1] as unknown[])[0]).toBe(superAdminEmail);
@@ -2139,7 +2168,7 @@ describe('the two owner password endpoints', () => {
       // makes it safe to say out loud that the password was changed, and it is why
       // the page can drop the value once the save is through.
       const { admin, query } = consoleFor(ownerRow);
-      await admin.handle({ method: 'POST', segments: ['owner-password', 'save'], body: { password: 'Mango!Tree9' }, token });
+      await admin.handle({ method: 'POST', segments: ['owner-password', 'save'], body: { password: 'Mango9Tr' }, token });
 
       const mail = query.mock.calls.find(([text]) => String(text).includes('INSERT INTO email_outbox'));
       const [recipient, subject, body] = mail![1] as unknown[];
@@ -2151,13 +2180,15 @@ describe('the two owner password endpoints', () => {
       expect(String(body)).not.toMatch(/Password:\s*\S/);
     });
 
-    it('accepts a password the owner typed instead of one it generated', async () => {
-      // The field is editable on purpose, so this is the path a busy owner takes.
+    it('accepts any value on the owner policy, because the screen is what checks it', async () => {
+      // The screen will only save what it generated, pasted back - but the server
+      // never sees the generated value, so all it can hold the body to is the
+      // policy. This is the path the owner takes with the value they copied.
       const { admin, query } = consoleFor(ownerRow);
       const result = await admin.handle({
         method: 'POST',
         segments: ['owner-password', 'save'],
-        body: { password: 'Mango!Tree9' },
+        body: { password: 'Mango9Tr' },
         token,
       });
 
@@ -2166,11 +2197,13 @@ describe('the two owner password endpoints', () => {
       expect(hash).toBeDefined();
     });
 
-    it('refuses anything outside the password policy, and writes nothing', async () => {
-      // Otherwise the owner could set a password the console would not accept, and
-      // lock themselves out on the screen that was supposed to help. The policy is
-      // length only - the same one every other password in the project is held to.
-      for (const password of ['short', 'M'.repeat(129)]) {
+    it('refuses anything outside the owner policy, and writes nothing', async () => {
+      // Otherwise the owner could save a password the screen would not have offered
+      // them, and lock themselves out on the account with no way to recover it. The
+      // owner holds to eight letters and numbers - the words under the field - rather
+      // than to the shared length-only policy every other password uses, because
+      // this is the one value the screen shows once and never again.
+      for (const password of ['short', 'Mango!T9', 'M'.repeat(129)]) {
         const { admin, query } = consoleFor(ownerRow);
         const result = await admin.handle({
           method: 'POST',
@@ -2181,6 +2214,7 @@ describe('the two owner password endpoints', () => {
 
         expect(result.status).toBe(400);
         expect((result.body as { error?: string }).error).toBe('invalid_password');
+        expect((result.body as { message?: string }).message).toBe('Password must be exactly 8 letters or numbers.');
         expect(query.mock.calls.some(([text]) => String(text).includes('SET password_hash'))).toBe(false);
         // And nobody was signed out for a refused change.
         expect(query.mock.calls.some(([text]) => String(text).includes('DELETE FROM admin_sessions'))).toBe(false);
@@ -2196,7 +2230,7 @@ describe('the two owner password endpoints', () => {
         const result = await admin.handle({
           method: 'POST',
           segments: ['owner-password', 'save'],
-          body: { password: 'Mango!Tree9' },
+          body: { password: 'Mango9Tr' },
           token,
         });
 
@@ -2210,7 +2244,7 @@ describe('the two owner password endpoints', () => {
       const result = await admin.handle({
         method: 'POST',
         segments: ['owner-password', 'save'],
-        body: { password: 'Mango!Tree9' },
+        body: { password: 'Mango9Tr' },
         token: undefined,
       });
       expect(result.status).toBe(401);
@@ -2232,7 +2266,7 @@ describe('the two owner password endpoints', () => {
       const result = await admin.handle({
         method: 'POST',
         segments: ['owner-password', 'save'],
-        body: { password: 'Mango!Tree9' },
+        body: { password: 'Mango9Tr' },
         token,
       });
 

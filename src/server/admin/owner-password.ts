@@ -1,4 +1,4 @@
-import { hashPassword, passwordPolicyError } from './passwords.js';
+import { hashPassword, ownerPasswordPolicyError } from './passwords.js';
 import { superAdminEmail } from '../../auth/roles.js';
 import { tryDeliverPendingMail } from '../mailer.js';
 import type { Database } from '../handlers.js';
@@ -80,14 +80,52 @@ export function ownerCredentialsMessage(input: { password: string; role: string;
 }
 
 /**
+ * One line in the owner password's audit trail.
+ *
+ * The kind is interpolated rather than bound, because Postgres will not accept a
+ * value where a column name or a keyword belongs - and it is safe to do so only
+ * because the caller passes one of two literals defined here. Nothing from a
+ * request body reaches this statement.
+ */
+async function recordOwnerPasswordEvent(database: Database, userId: string, kind: 'generated' | 'saved', now: Date) {
+  await database.query(
+    `INSERT INTO owner_password_events (user_id, kind, created_at) VALUES ($1, '${kind}', $2)`,
+    [userId, now],
+  );
+}
+
+/**
+ * Remembers that a password was generated, without remembering the password.
+ *
+ * Generating still writes no credential, ends no session and leaves the previous
+ * password working - a closed tab costs nobody their access, exactly as the
+ * screen promises. What it does now record is the moment, so a deployment can
+ * tell an untouched account from one where somebody generated a password and
+ * never saved it.
+ *
+ * Called for the signed-in caller, who is the owner: the route has already
+ * refused anybody else, and hanging the event off the caller's own row means the
+ * record exists even on a deployment whose owner row is somehow missing.
+ *
+ * The caller maps a missing column or table to the migration hint rather than
+ * letting this turn into a 500: a deployment that has not run 016 yet is a
+ * deployment that is behind, and it should be told which file fixes it.
+ */
+export async function recordOwnerPasswordGenerated(database: Database, userId: string, now: Date = new Date()) {
+  await database.query('UPDATE admin_users SET password_generated_at = $1 WHERE id = $2', [now, userId]);
+  await recordOwnerPasswordEvent(database, userId, 'generated', now);
+}
+
+/**
  * Stores the password and tells the owner it was stored.
  *
- * The value arrives from the screen rather than from here, because the point of
- * the flow is that the operator can edit what was generated before keeping it.
- * That makes this the one place in the project where a password is chosen by a
- * request body, so it is held to the same policy as every other password, and it
- * is hashed with the same scrypt parameters - the input is never stored, logged
- * or echoed.
+ * The value arrives from the screen rather than from here. The screen will only
+ * save the password it generated, pasted back, but the server cannot know that -
+ * it never sees the generated value - so this is the one place in the project
+ * where a password arrives in a request body, and it is held to the owner policy
+ * rather than to whatever the screen was prepared to send. It is hashed with the
+ * same scrypt parameters as every other password: the input is never stored,
+ * logged or echoed.
  *
  * Every session is revoked at the same moment: the previous password has stopped
  * working, so a session opened with it should stop working too. The caller's is
@@ -97,7 +135,7 @@ export function ownerCredentialsMessage(input: { password: string; role: string;
  * rotation left, so there is nothing to clear and the columns are gone.
  */
 export async function saveOwnerPassword(database: Database, password: string, now: Date = new Date()): Promise<SavedOwnerPassword | { saved: false; reason: 'missing' }> {
-  const refused = passwordPolicyError(password);
+  const refused = ownerPasswordPolicyError(password);
   if (refused) throw new Error(refused);
 
   const found = await database.query(
@@ -109,11 +147,16 @@ export async function saveOwnerPassword(database: Database, password: string, no
   // purpose, has nothing to give a password to. The caller re-seeds; not an error.
   if (!account) return { saved: false, reason: 'missing' };
 
+  // `password_changed_at` is stamped with the same instant as `updated_at`, and
+  // both are separate from `password_generated_at`: one is when a password was
+  // offered, this one is when one was kept. Only the kept one is a credential
+  // change, which is why only it is recorded as such.
   await database.query(
-    'UPDATE admin_users SET password_hash = $1, updated_at = $2 WHERE id = $3',
+    'UPDATE admin_users SET password_hash = $1, updated_at = $2, password_changed_at = $2 WHERE id = $3',
     [await hashPassword(password), now, account.id],
   );
   const revoked = await database.query('DELETE FROM admin_sessions WHERE user_id = $1', [account.id]);
+  await recordOwnerPasswordEvent(database, account.id, 'saved', now);
 
   const message = ownerPasswordSavedMessage({ role: account.role, now });
   await database.query(

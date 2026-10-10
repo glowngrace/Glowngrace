@@ -47,6 +47,7 @@ export const adminTables = [
   'customers',
   'reviews',
   'demo_datasets',
+  'owner_password_events',
 ] as const;
 
 const localHosts = new Set(['localhost', '127.0.0.1', '::1', '0.0.0.0', 'host.docker.internal']);

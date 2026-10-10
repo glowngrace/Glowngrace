@@ -7,13 +7,15 @@ import { auditPage } from './support/audit';
  * Both endpoints are stubbed throughout, so no test here generates a real password
  * or sends a real mail. What is under test is the part jsdom does not settle: that
  * the screen asks the server who is signed in rather than trusting storage, that
- * generating writes nothing until the save, that the password is readable and
- * copyable, that the save ends the session and walks back to sign-in, and that the
- * role decides whether any of it is rendered at all.
+ * generating writes nothing until the save, that the password is offered once and
+ * can be copied, that the save field only opens for the value that was copied, and
+ * that the card is the design's own in every state, with the generate control never
+ * a route away from the page.
  *
- * The load-bearing assertions are the middle ones: the value shown in the field and
- * the value the toast offers to copy must be the same one the save sends, because
- * the operator types the field back in later and never sees this screen again.
+ * The load-bearing assertions are the middle ones: the value in the notification,
+ * the value on the clipboard and the value the save sends must be the same one,
+ * because the screen asks for it to be pasted back and the owner never sees it
+ * again.
  */
 
 const owner = {
@@ -57,11 +59,28 @@ const saved = {
 const SIGN_IN_REDIRECT_MS = 2500;
 
 /**
+ * The success notification, by its own class rather than by role.
+ *
+ * Two things make a role query wrong here. The mail warning is also a `status`
+ * region, so a role query would match both on the one test that has both on
+ * screen; and the failure notification is a toast too, so a bare `.ggpass-toast`
+ * would match it on the tests that assert no success is showing.
+ */
+function toast(page: Page) {
+  return page.locator('.ggpass-toast:not(.is-error)');
+}
+
+/** The failure notification, likewise. */
+function failure(page: Page) {
+  return page.locator('.ggpass-toast.is-error');
+}
+
+/**
  * A console whose `me`, `owner-password/generate` and `owner-password/save` routes
  * answer as instructed.
  *
  * Both calls are recorded, so a test can assert that generating wrote nothing, and
- * that saving sent the value in the field rather than the one that came back.
+ * that saving sent the value that was pasted back rather than something else.
  */
 async function stubConsole(page: Page, options: {
   user?: typeof owner;
@@ -119,11 +138,23 @@ async function stubConsole(page: Page, options: {
   return { generateCalls, saveCalls };
 }
 
-/** Opens the confirmation and goes through it, leaving the password on screen. */
+/** Generates, and waits for the password to be sitting in the notification. */
 async function generateOne(page: Page) {
+  await expect(page.getByRole('button', { name: 'Generate password' })).toBeEnabled();
   await page.getByRole('button', { name: 'Generate password' }).click();
-  await page.getByRole('dialog').getByRole('button', { name: 'Yes, generate it' }).click();
-  await expect(page.getByLabel('New password')).toHaveValue(generated.password);
+  await expect(page.locator('.ggpass-toast-code')).toHaveText(generated.password, { timeout: 15_000 });
+}
+
+/**
+ * Copies from the notification, which is what opens the save field.
+ *
+ * The field starts closed and empty: the screen is asking for the value it just
+ * showed, pasted, rather than for one somebody had time to think about while it
+ * sat on screen.
+ */
+async function copyOne(page: Page) {
+  await page.getByRole('button', { name: 'Copy password' }).click();
+  await expect(page.getByLabel('Save new password')).toBeVisible();
 }
 
 /**
@@ -150,40 +181,46 @@ async function openScreen(page: Page, user: typeof owner = owner) {
   await page.locator('#login-email').fill(user.email);
   await page.locator('#login-password').fill('a-password-the-owner-chose');
   await page.getByRole('button', { name: 'Sign in to your account' }).click();
+  // The token is only in storage once the console has accepted the sign-in and
+  // moved on to the console itself. Checking for "no alert" can pass while the
+  // request is still in flight, and the visit below would then load before the
+  // session was ever stored - which is exactly how this screen could render the
+  // signed-out card for a role the server had accepted. The redirect is the
+  // console's own signal that the session exists.
+  await page.waitForURL('**/admin**');
   await expect(page.getByRole('alert')).toHaveCount(0);
 
   await page.goto('/superadmin/ggpass');
 }
 
 test.describe('/superadmin/ggpass', () => {
-  test('offers the owner both halves of the flow', async ({ page }) => {
+  test('offers the owner the generate step, and the way to keep what it makes', async ({ page }) => {
     await stubConsole(page);
     await openScreen(page);
 
     await expect(page.getByRole('heading', { name: 'Generate password' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Generate password' })).toBeVisible();
-    // Save is there from the start, so the shape of the screen does not change once
-    // a password exists.
-    await expect(page.getByRole('button', { name: 'Save password' })).toBeVisible();
+    // The save half is not on the page yet. It opens for a copy, because before
+    // that there is nothing to paste and the field would be an invitation to invent
+    // a password rather than a record of the one that was made.
+    await expect(page.getByRole('button', { name: 'Save password' })).toHaveCount(0);
+    // What the password will be made of, and what to do with it, before anything
+    // is pressed rather than only after.
+    await expect(page.getByText('Copy it from the notification, then paste it above to save.')).toBeVisible();
     // The destination is on screen before anything is pressed, so nobody
     // discovers at the last moment that they cannot reach the mailbox.
     await expect(page.getByLabel('Registered email')).toHaveValue('glowngracebiz@gmail.com');
   });
 
-  test('cannot save anything before a password exists', async ({ page }) => {
-    // Otherwise the button would offer a save that can only be refused, and the
-    // field would look like somewhere to type a password before one was wanted.
+  test('has nowhere to save until a copy has put something worth saving on the page', async ({ page }) => {
     const { saveCalls } = await stubConsole(page);
     await openScreen(page);
+    await generateOne(page);
 
-    const field = page.getByLabel('New password');
-    await expect(field).toHaveValue('');
-    // Readonly until generated: the field is not an invitation to invent a
-    // password, it is a record of the one that was made.
-    await expect(field).toHaveAttribute('readonly', '');
-    await expect(field).toHaveAttribute('placeholder', 'Generate a password to fill this in');
-    await expect(page.getByRole('button', { name: 'Save password' })).toBeDisabled();
-    await expect(page.getByText('Nothing is kept until this is saved.')).toBeVisible();
+    // Generating is not enough: the value exists in the notification, and the save
+    // field is opened by taking it from there.
+    await expect(page.getByRole('button', { name: 'Save password' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Regenerate password' })).toBeEnabled();
     expect(saveCalls).toHaveLength(0);
   });
 
@@ -200,92 +237,146 @@ test.describe('/superadmin/ggpass', () => {
     await expect(page.getByText('This email is linked to the business account and cannot be changed.')).toBeVisible();
   });
 
-  test('puts the password where the owner can read it, edit it and keep it', async ({ page }) => {
+  test('saves the value that was copied and pasted back', async ({ page }) => {
     const { generateCalls, saveCalls } = await stubConsole(page);
     await openScreen(page);
     await generateOne(page);
+    await copyOne(page);
 
     expect(generateCalls).toHaveLength(1);
-    // The field is the value that gets saved, and it is editable so an operator who
-    // would rather choose something memorable can.
-    const field = page.getByLabel('New password');
-    await expect(field).not.toHaveAttribute('readonly', '');
-    await expect(page.getByText('Keep it as generated, or change it to something you will remember.')).toBeVisible();
+    const field = page.getByLabel('Save new password');
+    await expect(field).toHaveValue('');
+    await expect(field).toHaveAttribute('placeholder', 'Paste the copied password');
+    await expect(field).toHaveAttribute('maxlength', '8');
+    await expect(field).toHaveAttribute('type', 'password');
 
-    await field.fill('Mango!Tree9');
+    // Pasting is the only way in, and what arrives is what the server was handed.
+    await field.fill(generated.password);
     await page.getByRole('button', { name: 'Save password' }).click();
 
-    // What was saved is what is in the field, not what the server handed out.
     await expect.poll(() => saveCalls).toHaveLength(1);
-    expect(saveCalls[0]).toEqual({ password: 'Mango!Tree9' });
+    expect(saveCalls[0]).toEqual({ password: generated.password });
   });
 
-  test('offers the password in the toast with a way to copy it', async ({ page }) => {
+  test('offers the password in the notification with a way to copy it', async ({ page }) => {
     // "Generated" followed by a value nobody can select is the thing the copy
     // button exists to remove.
     await stubConsole(page);
     await openScreen(page);
     await generateOne(page);
 
-    const toast = page.getByRole('status');
-    await expect(toast).toContainText('Password generated');
-    await expect(toast).toContainText('Nothing is kept until you save.');
+    await expect(toast(page)).toContainText('Password generated');
+    await expect(toast(page)).toContainText('New password for glowngracebiz@gmail.com');
     await expect(page.locator('.ggpass-toast-code')).toHaveText(generated.password);
-    await expect(toast.getByRole('button', { name: 'Copy password' })).toBeVisible();
+    await expect(toast(page).getByRole('button', { name: 'Copy password' })).toBeVisible();
+    // No countdown yet: while it is up it is the only place the password exists in
+    // the clear, so it stays until it is copied or dismissed by hand.
+    await expect(toast(page)).not.toHaveClass(/is-timed/);
   });
 
-  test('copies the password that will be saved, not the one that was generated', async ({ page, context }) => {
-    // The whole point of the editable field. If the toast copied the original, an
-    // owner who changed it would put a dead password on their clipboard and only
-    // find out at the sign-in screen.
+  test('copies the password and opens the save field for it', async ({ page, context }) => {
     await context.grantPermissions(['clipboard-read', 'clipboard-write']);
     await stubConsole(page);
     await openScreen(page);
     await generateOne(page);
 
-    await page.getByLabel('New password').fill('Mango!Tree9');
-    await page.getByRole('status').getByRole('button', { name: 'Copy password' }).click();
+    await copyOne(page);
 
-    await expect(page.getByRole('status')).toContainText('Copied');
-    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('Mango!Tree9');
-    // And the toast agrees with the field afterwards, rather than showing a second
-    // value beside it.
-    await expect(page.getByRole('status').getByRole('button', { name: 'Copied' })).toBeVisible();
-    await expect(page.locator('.ggpass-toast-code')).toHaveCount(0);
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(generated.password);
+    await expect(toast(page)).toContainText('Copied to clipboard. Paste it below to save.');
+    // The button reports the state it is in rather than offering to do it again.
+    await expect(toast(page).getByRole('button', { name: 'Copied' })).toBeVisible();
+    // And the countdown starts from the copy, because the value is now in two
+    // places - the clipboard and the field - and neither needs holding open.
+    await expect(toast(page)).toHaveClass(/is-timed/);
+    // The value is still on the page in the notification, so a clipboard that did
+    // not take it leaves the owner somewhere to read it from.
+    await expect(page.locator('.ggpass-toast-code')).toHaveText(generated.password);
   });
 
-  test('reports a clipboard it was refused, rather than pretending it worked', async ({ page, context }) => {
+  test('reports a clipboard it was refused, rather than pretending it worked', async ({ page }) => {
     // A copy button that silently does nothing is worse than no button, because it
-    // looks like the password is safely somewhere.
-    await context.clearPermissions();
+    // looks like the password is safely somewhere. Both halves of the design's own
+    // fallback are closed off here so the failure path is the one under test: the
+    // async API refuses, and so does the older copy command behind it.
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText: () => Promise.reject(new Error('denied')) },
+      });
+      Object.defineProperty(document, 'execCommand', {
+        configurable: true,
+        value: () => false,
+      });
+    });
     await stubConsole(page);
     await openScreen(page);
     await generateOne(page);
 
-    await page.getByRole('status').getByRole('button', { name: 'Copy password' }).click();
+    await page.getByRole('button', { name: 'Copy password' }).click();
 
-    await expect(page.getByRole('status')).toContainText('Could not copy');
-    // The field is still there, and still holds the value, so the hand-copy it
-    // points at is possible.
-    await expect(page.getByLabel('New password')).toHaveValue(generated.password);
-    await expect(page.getByText('Select the field and copy it by hand.')).toBeVisible();
+    await expect(toast(page)).toContainText('Copy failed');
+    await expect(toast(page)).toContainText('select the password and copy manually.');
+    // The save field still opens: refusing to show the way forward would leave the
+    // only route to a saved password behind a browser setting the owner cannot
+    // change from here.
+    await expect(page.getByLabel('Save new password')).toBeVisible();
+    // And the value is still on the page to be selected and copied by hand.
+    await expect(page.locator('.ggpass-toast-code')).toHaveText(generated.password);
+    // A failure has no countdown: it is the only account of what happened.
+    await expect(toast(page)).not.toHaveClass(/is-timed/);
   });
 
-  test('will not save a password too short to be accepted', async ({ page }) => {
-    // Held to the same policy as every other password in the project, so an owner
-    // cannot lock themselves out of the one account that cannot be recovered.
+  test('will not save a value that was not the one that was generated', async ({ page }) => {
+    // Held to exactly what the screen showed, because the server never sees the
+    // generated value and the screen is the only thing that can compare the two.
     const { saveCalls } = await stubConsole(page);
     await openScreen(page);
     await generateOne(page);
+    await copyOne(page);
 
-    const field = page.getByLabel('New password');
-    await field.fill('short');
-    await expect(page.getByText('A password needs at least 8 characters.')).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Save password' })).toBeDisabled();
+    const field = page.getByLabel('Save new password');
+
+    // Nothing at all.
+    await page.getByRole('button', { name: 'Save password' }).click();
+    await expect(page.getByText('Please paste the generated password.')).toBeVisible();
     expect(saveCalls).toHaveLength(0);
 
-    await field.fill('Mango!Tree9');
-    await expect(page.getByRole('button', { name: 'Save password' })).toBeEnabled();
+    // The right length, but not letters and numbers: the words under the field.
+    await field.fill('Mango!T9');
+    await page.getByRole('button', { name: 'Save password' }).click();
+    await expect(page.getByText('Password must be exactly 8 letters or numbers.')).toBeVisible();
+    expect(saveCalls).toHaveLength(0);
+
+    // Eight letters and numbers, and still not the value that was made.
+    await field.fill('ZZZZ9999');
+    await page.getByRole('button', { name: 'Save password' }).click();
+    await expect(page.getByText("This doesn't match the generated password.")).toBeVisible();
+    expect(saveCalls).toHaveLength(0);
+
+    // Typing clears the refusal rather than leaving a stale one under a corrected
+    // field, which reads as the correction not having been noticed.
+    await field.fill(generated.password);
+    await expect(page.getByText("This doesn't match the generated password.")).toHaveCount(0);
+    await page.getByRole('button', { name: 'Save password' }).click();
+    await expect.poll(() => saveCalls).toHaveLength(1);
+  });
+
+  test('shows the value in the field when the eye is pressed', async ({ page }) => {
+    await stubConsole(page);
+    await openScreen(page);
+    await generateOne(page);
+    await copyOne(page);
+
+    const field = page.getByLabel('Save new password');
+    await expect(field).toHaveAttribute('type', 'password');
+
+    await page.getByRole('button', { name: 'Show password' }).click();
+    await expect(field).toHaveAttribute('type', 'text');
+    await expect(page.getByRole('button', { name: 'Hide password' })).toBeVisible();
+
+    await page.getByRole('button', { name: 'Hide password' }).click();
+    await expect(field).toHaveAttribute('type', 'password');
   });
 
   test('refuses to generate on a deployment with no database, and says why', async ({ page }) => {
@@ -304,7 +395,7 @@ test.describe('/superadmin/ggpass', () => {
     // password dies with the next cold start, with nothing on screen to say so.
     await expect(page.getByText('This deployment has no database configured.')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Generate password' })).toBeDisabled();
-    await expect(page.getByRole('button', { name: 'Save password' })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Save password' })).toHaveCount(0);
     expect(generateCalls).toHaveLength(0);
     expect(saveCalls).toHaveLength(0);
   });
@@ -343,6 +434,8 @@ test.describe('/superadmin/ggpass', () => {
     await expect(page.getByRole('button', { name: 'Generate password' })).toBeEnabled();
 
     await generateOne(page);
+    await copyOne(page);
+    await page.getByLabel('Save new password').fill(generated.password);
     await page.getByRole('button', { name: 'Save password' }).click();
     await expect.poll(() => saveCalls).toHaveLength(1);
   });
@@ -385,55 +478,71 @@ test.describe('/superadmin/ggpass', () => {
     expect(generateCalls).toHaveLength(1);
   });
 
-  test('will not generate anything without a confirmation', async ({ page }) => {
+  test('generates on the press, with no dialog in front of it', async ({ page }) => {
+    // The confirmation this replaced was the answer to a rotation that wrote as it
+    // went. Nothing is written until the save now, so a dialog in front of a step
+    // that changes nothing only trains people to press through dialogs.
     const { generateCalls } = await stubConsole(page);
     await openScreen(page);
 
     await page.getByRole('button', { name: 'Generate password' }).click();
 
-    const dialog = page.getByRole('dialog', { name: 'Generate a new owner password?' });
-    await expect(dialog).toBeVisible();
-    // The dialog is honest about both halves: nothing changes until the save, and
-    // the save ends every session, the caller's included.
-    await expect(dialog).toContainText('Your current password keeps working until you press');
-    await expect(dialog).toContainText('saving ends every session, including this one');
-    expect(generateCalls).toHaveLength(0);
-    // Focus lands on the safe action, so a keyboard user can leave immediately.
-    await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeFocused();
-
-    await page.keyboard.press('Escape');
-    await expect(dialog).toHaveCount(0);
-    expect(generateCalls).toHaveLength(0);
-    // And focus comes back to the button that opened it, not the top of the page.
-    await expect(page.getByRole('button', { name: 'Generate password' })).toBeFocused();
-  });
-
-  test('cancels without generating', async ({ page }) => {
-    const { generateCalls } = await stubConsole(page);
-    await openScreen(page);
-
-    await page.getByRole('button', { name: 'Generate password' }).click();
-    await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
-
+    await expect(page.locator('.ggpass-toast-code')).toHaveText(generated.password, { timeout: 15_000 });
     await expect(page.getByRole('dialog')).toHaveCount(0);
-    expect(generateCalls).toHaveLength(0);
+    expect(generateCalls).toHaveLength(1);
+    // And the label says what the same control does next time.
+    await expect(page.getByRole('button', { name: 'Regenerate password' })).toBeEnabled();
   });
 
-  test('shows no controls to anybody but the owner account', async ({ page }) => {
-    // The page's own role check. It is a courtesy, not the guard: the endpoint
-    // answers 403 regardless, which is asserted in src/server/admin.test.ts.
-    const { generateCalls } = await stubConsole(page, { user: administrator });
+  test('regenerating starts the save over rather than leaving the old value in the field', async ({ page }) => {
+    const { saveCalls } = await stubConsole(page);
+    await openScreen(page);
+    await generateOne(page);
+    await copyOne(page);
+    await page.getByLabel('Save new password').fill('ZZZZ9999');
+
+    await page.getByRole('button', { name: 'Regenerate password' }).click();
+    await expect(page.locator('.ggpass-toast-code')).toHaveText(generated.password, { timeout: 15_000 });
+
+    // What was pasted belonged to the password that has just been replaced, so it
+    // is cleared rather than left there to be refused as a mismatch.
+    await expect(page.getByRole('button', { name: 'Save password' })).toHaveCount(0);
+    await page.getByRole('button', { name: 'Regenerate password' }).click();
+    await copyOne(page);
+    await expect(page.getByLabel('Save new password')).toHaveValue('');
+    expect(saveCalls).toHaveLength(0);
+  });
+
+  test("refuses the other roles on the same card, in the server's own words", async ({ page }) => {
+    // The page's own role check is a courtesy that names the refused role; the
+    // endpoint answers 403 regardless, which is asserted in src/server/admin.test.ts.
+    // The card is the design's card for everybody - the button is never swapped for a
+    // route - so the refusal arrives as the server's message rather than by hiding.
+    const { generateCalls } = await stubConsole(page, {
+      user: administrator,
+      onGenerate: () => ({
+        status: 403,
+        json: { error: 'forbidden', message: 'Only the Super Admin account can generate a new owner password.' },
+      }),
+    });
     await openScreen(page, administrator);
 
     await expect(page.getByText('This screen is for the Super Admin account only.')).toBeVisible();
     await expect(page.getByText('Store Administrator')).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Generate password' })).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Save password' })).toHaveCount(0);
-    expect(generateCalls).toHaveLength(0);
+
+    await page.getByRole('button', { name: 'Generate password' }).click();
+    await expect(failure(page)).toContainText('Only the Super Admin account can generate a new owner password.');
+    expect(generateCalls).toHaveLength(1);
   });
 
-  test('sends somebody with no session to sign in', async ({ page }) => {
-    await stubConsole(page);
+  test('keeps the design card for somebody with no session, and never navigates', async ({ page }) => {
+    const { generateCalls } = await stubConsole(page, {
+      onGenerate: () => ({
+        status: 401,
+        json: { error: 'unauthenticated', message: 'Sign in to the console to continue.' },
+      }),
+    });
     // `me` answers 401 for a lapsed or absent session.
     await page.route('**/api/admin/me', (route) => route.fulfill({
       status: 401,
@@ -443,16 +552,128 @@ test.describe('/superadmin/ggpass', () => {
     await page.goto('/superadmin/ggpass');
 
     await expect(page.getByText('This screen is for the Super Admin account. Sign in to continue.')).toBeVisible();
-    // The one control the design puts on this screen keeps its label in every
-    // state. Rewording it to name the next step made the card read as a different
-    // page the moment somebody arrived from a different route.
-    await expect(page.getByRole('link', { name: 'Generate Password' })).toBeVisible();
-    // Nothing to press here: no session, so there is no owner to generate for.
-    await expect(page.getByRole('button', { name: 'Generate Password' })).toHaveCount(0);
+    // The one control the design puts on this screen keeps its label and its shape
+    // in every state: a button that reaches for the server, not a route to sign-in.
+    await expect(page.getByRole('button', { name: 'Generate password' })).toBeEnabled();
+    await expect(page.getByRole('link', { name: 'Generate Password' })).toHaveCount(0);
+
+    // Pressing it with no session stays on this screen and answers in place with
+    // the card's own soft line rather than a red failure or a route away. The
+    // button is a button whatever it is sent with.
+    await page.getByRole('button', { name: 'Generate password' }).click();
+    await expect(page).toHaveURL(/\/superadmin\/ggpass$/);
+    await expect(failure(page)).toHaveCount(0);
+    await expect(page.locator('.ggpass-note').filter({ hasText: 'Sign in to the console to continue.' })).toBeVisible();
+    // The way in is the design's own, at the bottom of the card.
     await expect(page.locator('a[href="/login"]').first()).toBeVisible();
+    // The answer is the screen's own rather than a 401 torn out of the server:
+    // without a session nothing was asked.
+    expect(generateCalls).toHaveLength(0);
   });
 
-  test('reports a refused generate as a toast and stays usable', async ({ page }) => {
+  test('says the console could not be reached rather than sending the owner to sign in', async ({ page }) => {
+    // The session check failing is not an answer about the session. A database
+    // that timed out for somebody who is already signed in must not be shown as
+    // "sign in to continue" - that sends them to type credentials that were never
+    // the problem, and the check still fails when they come back.
+    await stubConsole(page);
+    await openScreen(page);
+
+    // Signed in first, so the token is there to be checked. The failure is laid
+    // over the session check afterwards, for the visit that is under test.
+    await page.route('**/api/admin/me', (route) => route.fulfill({
+      status: 500,
+      json: { error: 'server_error', message: 'The console could not complete that request. Please try again shortly.' },
+    }));
+    await page.goto('/superadmin/ggpass');
+
+    // Announced as the card's own alert rather than as a notification: nothing has
+    // been attempted, so there is no request outcome to report - what is being said
+    // is that the check itself never happened.
+    await expect(page.getByRole('alert')).toContainText('did not answer the session check');
+    // Not the sign-in card: nothing here has established that anybody is signed out,
+    // so the card's own way in to the sign-in form must not be on screen. The way
+    // out at the bottom of the page still leads there, as it does in every state.
+    await expect(page.getByRole('link', { name: 'Generate Password' })).toHaveCount(0);
+
+    // The console answers again, which is the case the retry exists for.
+    await page.unroute('**/api/admin/me');
+    await page.getByRole('button', { name: 'Try again' }).click();
+
+    await expect(page.getByRole('button', { name: 'Generate password' })).toBeEnabled();
+    await expect(page.getByRole('alert')).toHaveCount(0);
+  });
+
+  test('asks nobody when there is no session to ask about', async ({ page }) => {
+    // A token that is not there cannot be revoked, so the request can only come
+    // back 401. Firing it anyway is what put a red line in the console on every
+    // visit to this screen and read as the screen being broken.
+    const { generateCalls } = await stubConsole(page);
+    let meCalls = 0;
+    await page.route('**/api/admin/me', (route) => {
+      meCalls += 1;
+      return route.fulfill({ status: 401, json: { error: 'unauthenticated', message: 'Sign in to continue.' } });
+    });
+
+    await page.goto('/superadmin/ggpass');
+
+    await expect(page.getByText('This screen is for the Super Admin account. Sign in to continue.')).toBeVisible();
+    expect(meCalls).toBe(0);
+    expect(generateCalls).toHaveLength(0);
+  });
+
+  test('treats a session whose own countdown has run out as no session', async ({ page }) => {
+    // The token is still in storage, but its expiry is behind us, so the server
+    // would answer 401 to anything sent with it. The console drops such a session
+    // on its countdown; this screen has to do the same rather than ask and be
+    // told what it already knows.
+    await stubConsole(page);
+    let meCalls = 0;
+    await page.route('**/api/admin/me', (route) => {
+      meCalls += 1;
+      return route.fulfill({ status: 401, json: { error: 'unauthenticated', message: 'Sign in to continue.' } });
+    });
+    await page.addInitScript(() => {
+      localStorage.setItem('glow-grace-admin-token', 'a-token-the-server-no-longer-has');
+      localStorage.setItem('glow-grace-admin-session-expires-at', new Date(Date.now() - 1000).toISOString());
+    });
+
+    await page.goto('/superadmin/ggpass');
+
+    await expect(page.getByText('This screen is for the Super Admin account. Sign in to continue.')).toBeVisible();
+    expect(meCalls).toBe(0);
+    // And the dead token is swept up on the way, so the next visit starts clean.
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('glow-grace-admin-token'))).toBeNull();
+  });
+
+  test('keeps the card and does not leave when the session dies mid-press', async ({ page }) => {
+    const { generateCalls } = await stubConsole(page, {
+      onGenerate: () => ({
+        status: 401,
+        json: { error: 'unauthenticated', message: 'Sign in to the console to continue.' },
+      }),
+    });
+    await openScreen(page);
+
+    await page.getByRole('button', { name: 'Generate password' }).click();
+
+    // The refusal is announced in the usual place, and then the card stops
+    // pretending it has a session: it stays on this screen, now naming the sign-in
+    // as the step ahead rather than throwing the owner at the sign-in page. The
+    // control is left in place - a further press can only answer in place now,
+    // never draw a second 401 out of the server.
+    await expect(failure(page)).toContainText('Sign in to the console to continue.');
+    await expect(page).toHaveURL(/\/superadmin\/ggpass$/);
+    await expect(page.getByRole('button', { name: 'Generate password' })).toBeEnabled();
+    await page.getByRole('button', { name: 'Generate password' }).click();
+    await expect(page.locator('.ggpass-note').filter({ hasText: 'Sign in to the console to continue.' })).toBeVisible();
+    await expect(page).toHaveURL(/\/superadmin\/ggpass$/);
+    await expect(page.getByText('This screen is for the Super Admin account. Sign in to continue.')).toBeVisible();
+    await expect(page.locator('a[href="/login"]').first()).toBeVisible();
+    expect(generateCalls).toHaveLength(1);
+  });
+
+  test('reports a refused generate as a notification and stays usable', async ({ page }) => {
     const { generateCalls } = await stubConsole(page, {
       onGenerate: () => ({
         status: 403,
@@ -462,29 +683,25 @@ test.describe('/superadmin/ggpass', () => {
     await openScreen(page);
 
     await page.getByRole('button', { name: 'Generate password' }).click();
-    await page.getByRole('dialog').getByRole('button', { name: 'Yes, generate it' }).click();
 
     // A failure is announced the same way a success is: same corner, same shape.
     // Text under the button is invisible to somebody watching the button light up
     // and start working, and this is the outcome they most need to notice.
-    const toast = page.getByRole('alert');
-    await expect(toast).toBeVisible();
-    await expect(toast).toContainText('Password not generated');
+    await expect(failure(page)).toBeVisible();
+    await expect(failure(page)).toContainText('Password not generated');
     // The server's own message, not a generic failure: the page does not get to
     // decide that this was a permissions problem.
-    await expect(toast).toContainText('Only the Super Admin account can generate a new owner password.');
-    // Not the success toast, at the same time.
-    await expect(page.getByRole('status')).toHaveCount(0);
-    // Nothing was put in the field, so a refused generate cannot be saved by
-    // mistake a second later.
-    await expect(page.getByLabel('New password')).toHaveValue('');
-    await expect(page.getByRole('button', { name: 'Save password' })).toBeDisabled();
+    await expect(failure(page)).toContainText('Only the Super Admin account can generate a new owner password.');
+    // Not the success notification, at the same time.
+    await expect(toast(page)).toHaveCount(0);
+    // Nothing was generated, so there is no save field to send a stale value from.
+    await expect(page.getByRole('button', { name: 'Save password' })).toHaveCount(0);
     // The button comes back rather than staying stuck on "Generating…".
     await expect(page.getByRole('button', { name: 'Generate password' })).toBeEnabled();
     expect(generateCalls).toHaveLength(1);
   });
 
-  test('reports a refused save as a toast and keeps the password on screen', async ({ page }) => {
+  test('reports a refused save and keeps the pasted value on the screen', async ({ page }) => {
     // Nothing has changed server-side, so the value the owner was about to use must
     // still be there to retry with. Clearing it would turn a transient failure into
     // a lost password.
@@ -496,32 +713,32 @@ test.describe('/superadmin/ggpass', () => {
     });
     await openScreen(page);
     await generateOne(page);
+    await copyOne(page);
+    await page.getByLabel('Save new password').fill(generated.password);
 
     await page.getByRole('button', { name: 'Save password' }).click();
 
-    const toast = page.getByRole('alert');
-    await expect(toast).toContainText('Password not saved');
-    await expect(toast).toContainText('There is no owner account to save a password for.');
-    await expect(page.getByLabel('New password')).toHaveValue(generated.password);
+    await expect(failure(page)).toContainText('Password not saved');
+    await expect(failure(page)).toContainText('There is no owner account to save a password for.');
+    await expect(page.getByLabel('Save new password')).toHaveValue(generated.password);
     // Still on this screen, and still signed in: the save never happened.
     await expect(page).toHaveURL(/\/superadmin\/ggpass$/);
     expect(saveCalls).toHaveLength(1);
   });
 
-  test('retires the failure toast on its own', async ({ page }) => {
+  test('retires the failure notification on its own', async ({ page }) => {
     await stubConsole(page, {
       onGenerate: () => ({ status: 500, json: { error: 'smtp_failed', message: 'The mail relay refused the message.' } }),
     });
     await openScreen(page);
 
     await page.getByRole('button', { name: 'Generate password' }).click();
-    await page.getByRole('dialog').getByRole('button', { name: 'Yes, generate it' }).click();
-    await expect(page.getByRole('alert')).toBeVisible();
+    await expect(failure(page)).toBeVisible();
 
     // And it can be dismissed by hand, for somebody who wants the screen back
     // now rather than in seven seconds.
-    await page.getByRole('button', { name: 'Close' }).click();
-    await expect(page.getByRole('alert')).toHaveCount(0);
+    await failure(page).getByRole('button', { name: 'Close' }).click();
+    await expect(failure(page)).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Generate password' })).toBeEnabled();
   });
 
@@ -534,12 +751,11 @@ test.describe('/superadmin/ggpass', () => {
     // The design puts this directly under the button. It is the only thing on the
     // page that says what happens next, and it has to survive a failure - somebody
     // whose generation just failed needs to know a retry is safe.
-    const shown = page.getByText('The password is shown once, here.');
+    const shown = page.getByText('Copy it from the notification, then paste it above to save.');
     await expect(shown).toBeVisible();
 
     await page.getByRole('button', { name: 'Generate password' }).click();
-    await page.getByRole('dialog').getByRole('button', { name: 'Yes, generate it' }).click();
-    await expect(page.getByRole('alert')).toBeVisible();
+    await expect(failure(page)).toBeVisible();
     await expect(shown).toBeVisible();
   });
 
@@ -548,16 +764,30 @@ test.describe('/superadmin/ggpass', () => {
     const { saveCalls } = await stubConsole(page);
     await openScreen(page);
     await generateOne(page);
+    await copyOne(page);
+    await page.getByLabel('Save new password').fill(generated.password);
 
+    // An installed clock keeps ticking with the wall clock, so the two and a half
+    // seconds of redirect can run out while the assertions below are still being
+    // checked - which is what made this test fail on a loaded machine with nothing
+    // at all wrong with the page. Pausing hands the countdown to the fast-forward
+    // at the bottom of the test and to nothing else. Pausing at the current moment
+    // would race the ticking clock it was read from, so the pause is parked a
+    // moment ahead of it, clear of the copy's focus timer on the way.
+    await page.clock.pauseAt(new Date(Date.now() + 5000));
     await page.getByRole('button', { name: 'Save password' }).click();
-    await expect(page.getByRole('status')).toContainText('Password saved');
-    // The server's own wording, which names the address the confirmation went to.
-    await expect(page.getByRole('status')).toContainText('a confirmation was sent to glowngracebiz@gmail.com');
+    await expect(toast(page)).toContainText('Password saved');
+    // The design's own words, which name the address whose password it was.
+    await expect(toast(page)).toContainText('The password for glowngracebiz@gmail.com has been updated.');
     await expect.poll(() => saveCalls).toHaveLength(1);
 
-    // The password stays readable right up to the bounce, because the confirmation
-    // is an audit line and the field is the only copy of the credential.
-    await expect(page.getByLabel('New password')).toHaveValue(generated.password);
+    // The save section closes the way the design closes it: what was pasted has
+    // been kept, and it belongs to the credential that has just been replaced.
+    await expect(page.getByRole('button', { name: 'Save password' })).toHaveCount(0);
+    // The token that would have sent it is already gone, so the button that remains
+    // in place for the moment before the bounce can only answer in place with the
+    // sign-in line rather than draw a 401 out of the server.
+    await expect(page.getByRole('button', { name: 'Generate password' })).toBeEnabled();
 
     // The stored token is gone, so a refresh does not leave a stale session that
     // the server will reject on the next click.
@@ -569,7 +799,7 @@ test.describe('/superadmin/ggpass', () => {
     // having revoked its own session, so what matters is that the owner had time to
     // read the one line that says what just happened.
     await page.clock.fastForward(SIGN_IN_REDIRECT_MS - 1000);
-    await expect(page.getByRole('status')).toContainText('Password saved');
+    await expect(toast(page)).toContainText('Password saved');
     await expect(page).toHaveURL(/\/superadmin\/ggpass$/);
 
     await page.clock.fastForward(1000);
@@ -595,14 +825,14 @@ test.describe('/superadmin/ggpass', () => {
     // With a password on screen: the value and its copy button are the whole point
     // of the added state, so the layout is checked with them present.
     await generateOne(page);
-    await expect(page.getByRole('status')).toBeVisible();
+    await expect(toast(page)).toBeVisible();
     await auditPage(page, '/superadmin/ggpass (generated)');
 
-    // With the confirmation open: the dialog is a second layer over the page, so
-    // it is audited on its own terms rather than trusted to inherit anything.
-    await page.getByRole('button', { name: 'Generate password' }).click();
-    await expect(page.getByRole('dialog')).toBeVisible();
-    await auditPage(page, '/superadmin/ggpass (confirming)');
+    // And with the save field open, which is a second block in the card rather
+    // than a layer over it.
+    await copyOne(page);
+    await expect(page.getByLabel('Save new password')).toBeVisible();
+    await auditPage(page, '/superadmin/ggpass (saving)');
   });
 
   test('holds together for somebody it refuses', async ({ page }) => {

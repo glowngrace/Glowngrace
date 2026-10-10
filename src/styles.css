@@ -787,7 +787,7 @@ h3 { font-size: 1.25rem; }
 .ggpass-art-inner h2 em { color: var(--g-gold-soft); font-style: italic; }
 .ggpass-art-inner p { margin: 0; color: rgb(255 255 255 / 85%); }
 
-.ggpass-panel { display: grid; place-items: center; padding: clamp(2rem, 5vw, 4rem); }
+.ggpass-form { display: grid; place-items: center; padding: clamp(2rem, 5vw, 4rem); }
 .ggpass-card { width: min(420px, 100%); }
 /* The card's own mark, shown only where the art panel is not. */
 .ggpass-mark { display: none; width: 64px; height: 64px; margin-bottom: 1.4rem; }
@@ -804,13 +804,23 @@ h3 { font-size: 1.25rem; }
 .ggpass-field input:disabled { opacity: 1; cursor: not-allowed; -webkit-text-fill-color: var(--g-soft); }
 .ggpass-hint { margin: .45rem 0 0; color: var(--g-soft); font-size: .76rem; }
 
-/* The password field and the button that keeps it, under the generate button.
-   The icon sits in the same place as the envelope above it, and the padding drops
-   the right-hand reservation the locked-email field needs for its badge. */
-.ggpass-save { margin-top: 1.6rem; }
-.ggpass-field input.ggpass-code { padding-right: 1rem; font-family: ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, monospace; font-size: 1.05rem; letter-spacing: .12em; color: var(--g-ink); }
-.ggpass-field input.ggpass-code[readonly] { color: var(--g-soft); }
-.ggpass-field input.ggpass-code:focus { border-color: var(--g-rose-deep); }
+/* The save half of the flow, under the generate button. It is not on the page
+   until a copy has been attempted, and it arrives with the design's own rise
+   behind a rule, so the two halves read as one column rather than as two forms.
+   The icon sits in the same place as the envelope above it. */
+.ggpass-save { margin-top: 1.6rem; padding-top: 1.6rem; border-top: 1px solid var(--g-line); animation: ggpass-save-in .45s ease; }
+.ggpass-field input.ggpass-code { padding-right: 3.2rem; background: #fff; color: var(--g-ink); -webkit-text-fill-color: var(--g-ink); font-family: ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, monospace; font-size: 1.05rem; letter-spacing: .12em; }
+.ggpass-field input.ggpass-code:focus { border-color: var(--g-gold); }
+/* The eye sits inside the field rather than beside it: the value it reveals is
+   the value in that field, and a control that belongs to nothing is a control
+   nobody can tell what it does. */
+.ggpass-eye { position: absolute; top: 50%; right: .6rem; display: grid; width: 34px; height: 34px; padding: 0; transform: translateY(-50%); place-items: center; border: 0; background: none; color: var(--g-soft); cursor: pointer; }
+.ggpass-eye:hover { color: var(--g-rose-deep); }
+.ggpass-eye svg { position: static; width: 17px; height: 17px; transform: none; stroke: currentColor; }
+/* Why the field will not go, in the design's own words and colour. It holds its
+   line whether or not there is anything in it, so pressing save does not shove
+   the button down the card. */
+.ggpass-err { min-height: 1.1em; margin: .45rem 0 0; color: #a8443f; font-size: .76rem; }
 /* The two buttons are the same shape stacked, so the second one reads as the next
    step rather than as a different kind of control. */
 .ggpass-save .ggpass-btn { margin-top: 1.1rem; }
@@ -818,8 +828,11 @@ h3 { font-size: 1.25rem; }
 .ggpass-btn { display: flex; width: 100%; align-items: center; justify-content: center; gap: .7rem; padding: 1rem 2rem; border: 0; border-radius: 2px; background: var(--g-ink); color: #fff; cursor: pointer; font-family: var(--sans); font-size: .7rem; font-weight: 500; letter-spacing: .22em; line-height: 1.5; text-align: center; text-transform: uppercase; transition: background-color .35s ease; }
 .ggpass-btn:hover:not(:disabled) { background: var(--g-rose-deep); }
 .ggpass-btn:disabled { opacity: .75; cursor: wait; }
-.ggpass-btn.is-quiet { border: 1px solid var(--g-line); background: transparent; color: var(--g-ink); }
-.ggpass-btn.is-quiet:hover:not(:disabled) { border-color: var(--g-rose-deep); background: transparent; color: var(--g-rose-deep); }
+/* A secondary press for the one state the design does not draw: an unreachable
+   session check gets a retry, slotted under the alert and lighter than the
+   primary button so the two do not read as two steps of the same thing. */
+.ggpass-retry { margin-top: 1rem; border: 1px solid var(--g-line); background: #fff; color: var(--g-ink); }
+.ggpass-retry:hover:not(:disabled) { border-color: var(--g-rose-deep); background: var(--g-cream-2); }
 
 .ggpass-note { display: flex; gap: .7rem; margin-top: 1.6rem; padding: 1rem 1.1rem; border: 1px solid var(--g-line); background: var(--g-cream-2); color: var(--g-soft); font-size: .8rem; }
 .ggpass-note > i { width: 6px; height: 6px; flex: none; margin-top: .5rem; border-radius: 50%; background: var(--g-gold); }
@@ -840,46 +853,49 @@ h3 { font-size: 1.25rem; }
 .ggpass-foot { margin: 1.4rem 0 0; color: var(--g-soft); font-size: .8rem; line-height: 1.6; text-align: center; }
 .ggpass-copyright { margin: 2rem 0 0; color: var(--g-soft); font-size: .72rem; letter-spacing: .1em; text-align: center; }
 
-/* The confirmation is an overlay rather than a strip in the card, because the
-   thing it asks about ends every session including this one - it should read as
-   a separate decision from filling in the form, not as another field. */
-.ggpass-confirm-layer { position: fixed; inset: 0; z-index: 200; display: grid; place-items: center; padding: 20px; background: rgb(36 28 31 / 55%); }
-.ggpass-confirm { width: min(420px, 100%); padding: 26px 24px 22px; border: 1px solid var(--g-line); background: #fffdfa; box-shadow: var(--g-shadow); }
-.ggpass-confirm h2 { margin: 0 0 .7rem; font-family: var(--serif); font-size: 1.5rem; font-weight: 500; line-height: 1.25; }
-.ggpass-confirm p { margin: 0; color: var(--g-soft); font-size: .84rem; }
-.ggpass-confirm-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 1.2rem; }
-
 .ggpass-toast { position: fixed; top: 1.6rem; right: 1.6rem; z-index: 300; display: flex; width: min(370px, calc(100vw - 2rem)); align-items: start; gap: .85rem; padding: 1rem 1.2rem; border: 1px solid #bcd9c8; border-left: 3px solid var(--g-ok); background: #fff; box-shadow: var(--g-shadow); animation: ggpass-toast-in .5s cubic-bezier(.22, 1, .36, 1); }
 .ggpass-toast-icon { display: grid; width: 30px; height: 30px; flex: none; place-items: center; border-radius: 50%; background: var(--g-ok-bg); }
 .ggpass-toast-icon svg { width: 15px; height: 15px; fill: none; stroke: var(--g-ok); stroke-width: 2.2; }
+.ggpass-toast-body { flex: 1; min-width: 0; }
 .ggpass-toast b { display: block; color: var(--g-ink); font-family: var(--serif); font-size: 1.1rem; font-weight: 500; }
-.ggpass-toast > div span { color: var(--g-soft); font-size: .82rem; }
-/* The generated value itself, in the toast, above the sentence about it. Monospace
-   with wide tracking so eight characters cannot be misread as one, and selectable so
-   it still works when the clipboard API is refused and the copy button says so. */
-.ggpass-toast-code { display: block; margin: .45rem 0; color: var(--g-ink) !important; font-family: ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, monospace; font-size: 1.15rem !important; font-weight: 500; letter-spacing: .22em; user-select: all; }
-/* Sits under the message rather than beside it: the toast is a fixed-width panel in
-   a corner and a second control on the title line would push the value down and out
-   of the shape the design uses. */
-.ggpass-toast-copy { display: inline-block; margin-top: .7rem; padding: .4rem .85rem; border: 1px solid var(--g-line); border-radius: 2px; background: #fff; color: var(--g-ink); cursor: pointer; font-family: var(--sans); font-size: .58rem; font-weight: 500; letter-spacing: .18em; text-transform: uppercase; }
-.ggpass-toast-copy:hover { border-color: var(--g-rose-deep); color: var(--g-rose-deep); }
+.ggpass-toast-body > span { color: var(--g-soft); font-size: .82rem; }
+/* The generated value and the button that copies it, in one strip beside the
+   sentence about them. The value is what the eye goes to, so the control that
+   copies it belongs next to it rather than under it - and it is a square, because
+   it is an icon rather than a second label on a line that already has one. */
+.ggpass-toast-pw { display: flex; align-items: center; gap: .5rem; margin-top: .7rem; padding: .45rem .45rem .45rem .85rem; border: 1px solid var(--g-line); background: var(--g-cream-2); }
+/* Monospace with wide tracking so eight characters cannot be misread as one, and
+   selectable so it still works when the clipboard API is refused and the button
+   says so. */
+.ggpass-toast-code { flex: 1; min-width: 0; color: var(--g-ink); font-family: ui-monospace, 'SFMono-Regular', 'Cascadia Mono', Consolas, monospace; font-size: 1.05rem; font-weight: 600; letter-spacing: .18em; user-select: all; }
+.ggpass-toast-copy { display: grid; width: 34px; height: 34px; flex: none; padding: 0; place-items: center; border: 1px solid var(--g-line); background: #fff; color: var(--g-gold); cursor: pointer; transition: .3s; }
+.ggpass-toast-copy svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.6; }
+.ggpass-toast-copy:hover { border-color: var(--g-ink); background: var(--g-ink); color: #fff; }
+.ggpass-toast-copy.is-done { border-color: var(--g-ok); background: var(--g-ok); color: #fff; }
 .ggpass-toast-close { display: grid; width: 24px; height: 24px; flex: none; margin-left: auto; place-items: center; padding: 0; border: 0; background: none; color: var(--g-soft); cursor: pointer; font-size: 1rem; line-height: 1; }
 .ggpass-toast-close:hover { color: var(--g-ink); }
-.ggpass-toast-bar { position: absolute; bottom: 0; left: 0; height: 2px; width: 0; background: var(--g-ok); animation: ggpass-toast-bar 4.5s linear forwards; }
+/* The countdown only belongs to a notification that has one. The generated
+   password has no timer until it is copied - it is the only copy anywhere - and a
+   bar crawling towards nothing under a toast that is staying put would say the
+   opposite of what is happening. */
+.ggpass-toast-bar { position: absolute; bottom: 0; left: 0; height: 2px; width: 0; background: var(--g-ok); }
+.ggpass-toast.is-timed .ggpass-toast-bar { animation: ggpass-toast-bar 4.5s linear forwards; }
+/* Failures stay up longer, so the bar runs longer with them. */
+.ggpass-toast.is-error.is-timed .ggpass-toast-bar { background: #b4505c; animation-duration: 7s; }
 /* Same toast, failed. Only the three accents move, so the two read as one
    component that is either telling you it worked or telling you it did not. */
 .ggpass-toast.is-error { border-color: #e7ceca; border-left-color: #b4505c; }
 .ggpass-toast.is-error .ggpass-toast-icon { background: #fbeeec; }
 .ggpass-toast.is-error .ggpass-toast-icon svg { stroke: #b4505c; }
-.ggpass-toast.is-error .ggpass-toast-bar { background: #b4505c; }
 @keyframes ggpass-toast-in { from { transform: translateX(calc(100% + 2.5rem)); } }
 @keyframes ggpass-toast-bar { from { width: 100%; } to { width: 0; } }
+@keyframes ggpass-save-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
 @media (max-width: 900px) {
   .ggpass { grid-template-columns: 1fr; min-height: auto; }
   .ggpass-art { display: none; }
   .ggpass-mark { display: block; }
-  .ggpass-panel { padding: 40px 20px 48px; }
+  .ggpass-form { padding: 40px 20px 48px; }
   .ggpass-toast { top: 1rem; right: 1rem; }
 }
 

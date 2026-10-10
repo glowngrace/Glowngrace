@@ -3,6 +3,7 @@ import { vi } from 'vitest';
 import {
   ownerCredentialsMessage,
   ownerPasswordSavedMessage,
+  recordOwnerPasswordGenerated,
   saveOwnerPassword,
 } from './owner-password';
 import { generateOwnerPassword, generateStrongPassword, passwordPolicy, verifyPassword } from './passwords';
@@ -90,8 +91,9 @@ describe('the generated owner password', () => {
 
   it('always carries at least one letter and one digit', () => {
     // Eight characters is short enough that an all-letter result is a much smaller
-    // space than the nominal one, and the field is editable, so somebody is likely
-    // to add a digit by hand rather than start again.
+    // space than the nominal one, and the value is read off a screen and pasted
+    // back rather than chosen, so the generator has to get that right rather than
+    // leaving it to whoever saves it.
     for (let attempt = 0; attempt < 60; attempt += 1) {
       const password = generateOwnerPassword();
       expect(password).toMatch(/[A-Z]/);
@@ -100,7 +102,8 @@ describe('the generated owner password', () => {
   });
 
   it('leaves out characters that are easy to misread', () => {
-    // This one is read off a screen and typed back in by hand.
+    // The copy button is the usual way it moves, but a browser can refuse to copy
+    // and the screen says so - so it still has to survive being typed by eye.
     for (let attempt = 0; attempt < 60; attempt += 1) {
       expect(generateOwnerPassword()).not.toMatch(/[Il1O0]/);
     }
@@ -154,10 +157,16 @@ describe('saving the owner password', () => {
     expect(rows[0].password_hash.startsWith('scrypt$')).toBe(true);
   });
 
-  it('refuses a password the sign-in form would refuse, before touching the row', async () => {
+  it('refuses anything outside the owner policy, before touching the row', async () => {
     const { database, rows, queries } = ownerDatabase();
 
-    await expect(saveOwnerPassword(database, 'short')).rejects.toThrow(/at least 8 characters/);
+    // Eight letters and numbers, which is the line the screen draws under the
+    // field. Held here as well because the server is the only place that can hold
+    // it: the screen checks the paste, and the screen is the thing a request can
+    // skip.
+    for (const refused of ['short', 'Mango!T9', 'K7mQ2xRt-']) {
+      await expect(saveOwnerPassword(database, refused)).rejects.toThrow(/exactly 8 letters or numbers/);
+    }
     // Nothing written, no session ended: a rejected save has to leave the account
     // exactly as it was, or the owner is locked out by a typo.
     expect(rows[0].password_hash).toBe('scrypt$old$hash');
@@ -208,9 +217,43 @@ describe('saving the owner password', () => {
   });
 
   it('is stamped with the moment it was saved', async () => {
-    const { database, rows } = ownerDatabase();
+    const { database, rows, queries } = ownerDatabase();
     await saveOwnerPassword(database, 'K7mQ2xRt', now);
     expect(rows[0].updated_at?.toISOString()).toBe(now.toISOString());
+    // The credential's own timestamp, kept apart from `updated_at`: a row can be
+    // touched for reasons that have nothing to do with the password, and "when did
+    // this password start working" must not drift with them.
+    const changed = queries.find((query) => query.includes('password_changed_at = $2'));
+    expect(changed).toBeDefined();
+  });
+
+  it('records the save as an event, so the history survives the session', async () => {
+    const { database, queries } = ownerDatabase();
+    await saveOwnerPassword(database, 'K7mQ2xRt', now);
+
+    const event = queries.find((query) => query.includes('INSERT INTO owner_password_events'));
+    expect(event).toBeDefined();
+    expect(event).toContain("'saved'");
+    // The event carries who and when, and never the password itself.
+    expect(event).not.toContain('K7mQ2xRt');
+  });
+});
+
+describe('recording a generated password', () => {
+  it('stamps the moment and writes an event, without writing a credential', async () => {
+    const { database, rows, queries } = ownerDatabase();
+
+    await recordOwnerPasswordGenerated(database, ownerId, now);
+
+    const stamped = queries.find((query) => query.includes('password_generated_at = $1'));
+    expect(stamped).toBeDefined();
+    const event = queries.find((query) => query.includes('INSERT INTO owner_password_events'));
+    expect(event).toBeDefined();
+    expect(event).toContain("'generated'");
+    // Generating is still the step that changes nothing about the account.
+    expect(rows[0].password_hash).toBe('scrypt$old$hash');
+    expect(queries.some((query) => query.includes('DELETE FROM admin_sessions'))).toBe(false);
+    expect(queries.some((query) => query.includes('INSERT INTO email_outbox'))).toBe(false);
   });
 });
 

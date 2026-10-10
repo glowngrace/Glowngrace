@@ -75,6 +75,9 @@ export const syncTables: SyncTable[] = [
   { name: 'orders', key: 'id', marker: 'created_at' },
   { name: 'order_items', key: 'id', marker: 'created_at', parent: true },
   { name: 'admin_users', key: 'id', marker: 'updated_at' },
+  // After `admin_users`: it is keyed by a foreign key into it, so it has to be
+  // emptied and refilled around it rather than the other way round.
+  { name: 'owner_password_events', key: 'id', marker: 'created_at' },
   { name: 'job_vacancies', key: 'id', marker: 'updated_at' },
   { name: 'candidates', key: 'id', marker: 'updated_at' },
   { name: 'partner_salons', key: 'id', marker: 'updated_at' },
