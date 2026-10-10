@@ -40,6 +40,7 @@ export function BulkUpload({ dataset, plural }: { dataset: BulkDatasetKey; plura
       setSummary(`${template.plural} template downloaded. Fill in the example row and upload it back.`);
     } catch (cause) {
       setSummary('');
+      console.error(`[glow-admin] could not build the ${dataset} template`, cause);
       setError(cause instanceof Error ? cause.message : 'The template could not be created.');
     } finally {
       setBusy(null);
@@ -60,14 +61,28 @@ export function BulkUpload({ dataset, plural }: { dataset: BulkDatasetKey; plura
       if (records.length === 0) throw new Error('No data rows were found below the column names.');
       if (unknown.length > 0) setError(`Ignored unknown columns: ${unknown.join(', ')}.`);
       setSummary(`Importing ${records.length} row${records.length === 1 ? '' : 's'} from ${sheet.name}…`);
-      await importRows(dataset, records.map((record) => {
+      const outcome = await importRows(dataset, records.map((record) => {
         const row: Record<string, unknown> = {};
         for (const column of template.columns) row[column] = record[column] ?? '';
         return row;
       }));
-      setSummary(`${records.length} row${records.length === 1 ? '' : 's'} from ${sheet.name} sent for import.`);
+      // The server answers with what it actually wrote, so the note reports the
+      // truth rather than assuming every row was accepted. `importRows` has
+      // already raised the banner and logged the detail for anything skipped.
+      const total = records.length;
+      const imported = outcome.created.length;
+      const skipped = outcome.errors.length;
+      const rows = (count: number) => `row${count === 1 ? '' : 's'}`;
+      if (skipped === 0) {
+        setSummary(`${imported} ${rows(imported)} from ${sheet.name} imported.`);
+      } else if (imported === 0) {
+        setSummary(`None of the ${total} ${rows(total)} in ${sheet.name} could be imported — ${skipped} skipped.`);
+      } else {
+        setSummary(`${imported} of ${total} ${rows(total)} from ${sheet.name} imported — ${skipped} skipped.`);
+      }
     } catch (cause) {
       setSummary('');
+      console.error(`[glow-admin] could not import ${file.name}`, cause);
       setError(cause instanceof Error ? cause.message : 'That spreadsheet could not be read.');
     } finally {
       setBusy(null);

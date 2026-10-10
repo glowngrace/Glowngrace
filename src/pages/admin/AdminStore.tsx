@@ -191,6 +191,11 @@ export function AdminStoreProvider({ children }: { children: ReactNode }) {
    * that opened the action that it must not report success.
    */
   const abort = useCallback((cause: unknown): never => {
+    // The banner is for the operator; this is for whoever has the developer
+    // tools open. Without it a rejected request leaves nothing behind in the
+    // browser console, which is exactly how a silent bulk-import failure used to
+    // go unnoticed.
+    console.error('[glow-admin] action failed', cause);
     fail(cause);
     throw cause;
   }, [fail]);
@@ -262,6 +267,7 @@ export function AdminStoreProvider({ children }: { children: ReactNode }) {
       hasLoaded.current = true;
       setError('');
     } catch (cause) {
+      console.error('[glow-admin] console data could not be loaded', cause);
       setError(cause instanceof AdminApiError ? cause.message : 'The console data could not be loaded. Please try again.');
     } finally {
       setLoading(false);
@@ -455,11 +461,22 @@ export function AdminStoreProvider({ children }: { children: ReactNode }) {
     async importRows(dataset, rows) {
       try {
         const result = dataset === 'users' ? await adminApi.bulkUsers(rows) : await adminApi.bulk(dataset, rows);
+        // Reload first. `reload()` clears the error banner when it succeeds, so
+        // an import error set before it would be wiped off the screen before
+        // anybody could read it - which is how a wholly rejected spreadsheet
+        // came to report success.
+        await reload();
         announce(result.message);
         if (result.errors.length > 0) {
-          setError(`${result.errors.length} row${result.errors.length === 1 ? '' : 's'} skipped: ${result.errors[0].message}`);
+          // The whole detail, in the console: the row number and the fields that
+          // failed, so a rejected import can be fixed from the developer tools.
+          console.error(`[glow-admin] bulk import: ${result.errors.length} ${dataset} row${result.errors.length === 1 ? '' : 's'} skipped`, result.errors);
+          const shown = result.errors.slice(0, 3)
+            .map((error) => `row ${error.row}: ${error.message}`)
+            .join('; ');
+          const more = result.errors.length > 3 ? ` (+${result.errors.length - 3} more, see the console)` : '';
+          setError(`${result.errors.length} row${result.errors.length === 1 ? '' : 's'} skipped — ${shown}${more}`);
         }
-        await reload();
         return result;
       } catch (cause) {
         return abort(cause);
