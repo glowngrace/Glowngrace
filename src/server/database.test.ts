@@ -333,12 +333,11 @@ describe('the owner account on a freshly started store', () => {
   /**
  * The whole journey, on the real store.
  *
- * Each of the three things the owner is promised is checked somewhere already -
- * the save writes a hash, the sign-in verifies, the confirmation carries no
- * password - but all three were checked against mocks that answer whatever they
- * were told. That combination can pass while the seam between them is broken: a
- * hash written under a parameter the verifier never reads is invisible to all of
- * them at once.
+ * Each of the things the owner is promised is checked somewhere already - the save
+ * writes a hash, the sign-in verifies, the password is mailed to the owner address -
+ * but all of them were checked against mocks that answer whatever they were told.
+ * That combination can pass while the seam between them is broken: a hash written
+ * under a parameter the verifier never reads is invisible to all of them at once.
  *
  * So this drives the actual round trip the screen starts - generate, then save
  * exactly what came back - and then signs in with it. Nothing here is stubbed,
@@ -471,7 +470,7 @@ describe('the round trip the generate and save buttons start', () => {
     }
   });
 
-  it('queues a confirmation that carries no password', async () => {
+  it('emails the generated password and the saved password to the owner address', async () => {
     const { database } = createMemoryDatabase();
     const admin = createAdminHandlers(database);
     await admin.seed();
@@ -479,17 +478,27 @@ describe('the round trip the generate and save buttons start', () => {
 
     const generated = await admin.handle({ method: 'POST', segments: ['owner-password', 'generate'], token });
     const fresh = (generated.body as { password: string }).password;
+
+    // Mailed on generate, before anything is saved.
+    const generatedMails = await database.query(
+      `SELECT recipient, subject, body FROM email_outbox WHERE kind = 'owner-password-generated'`,
+    );
+    expect(generatedMails.rows).toHaveLength(1);
+    const generatedRow = generatedMails.rows[0] as { recipient: string; body: string };
+    expect(generatedRow.recipient).toBe(superAdminEmail);
+    expect(generatedRow.body).toContain(fresh);
+
     await admin.handle({ method: 'POST', segments: ['owner-password', 'save'], body: { password: fresh }, token });
 
+    // Mailed again on save, carrying the value that now opens the account.
     const confirmations = await database.query(
       `SELECT recipient, subject, body FROM email_outbox WHERE kind = 'owner-password-saved'`,
     );
     expect(confirmations.rows).toHaveLength(1);
     const row = confirmations.rows[0] as { recipient: string; body: string };
     expect(row.recipient).toBe(superAdminEmail);
-    // The one mail in the project that carries no working credential.
-    expect(row.body).not.toContain(fresh);
-    expect(row.body).not.toMatch(/Password:\s*\S/);
+    expect(row.body).toContain(fresh);
+    expect(row.body).toMatch(/Password:\s*\S/);
   });
 
   it('refuses to save anything outside the owner policy, and keeps the account usable', async () => {

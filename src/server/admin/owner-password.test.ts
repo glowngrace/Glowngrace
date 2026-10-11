@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { vi } from 'vitest';
 import {
+  emailGeneratedOwnerPassword,
   ownerCredentialsMessage,
+  ownerPasswordGeneratedMessage,
   ownerPasswordSavedMessage,
   recordOwnerPasswordGenerated,
   saveOwnerPassword,
@@ -120,7 +122,7 @@ describe('the generated owner password', () => {
   });
 });
 
-describe('the seed password, which is the only one that still travels by mail', () => {
+describe('the seed password, which also travels by mail', () => {
   it('carries the password, the address and where to use it', () => {
     const message = ownerCredentialsMessage({ password: 'K7mQ2xRt', role: superAdminRole, now });
     expect(message.body).toContain('Password: K7mQ2xRt');
@@ -183,7 +185,7 @@ describe('saving the owner password', () => {
     expect(sessionsLeft()).toBe(0);
   });
 
-  it('queues a confirmation for the owner address and nowhere else', async () => {
+  it('queues the saved password for the owner address and nowhere else', async () => {
     const { database, outbox } = ownerDatabase();
 
     await saveOwnerPassword(database, 'K7mQ2xRt', now);
@@ -193,16 +195,13 @@ describe('saving the owner password', () => {
     expect(outbox[0].subject).toMatch(/saved/i);
   });
 
-  it('keeps the password out of the confirmation entirely', async () => {
-    // The whole reason this can be forwarded, kept and read years later. A
-    // confirmation that carried the credential would be a working login sitting in
-    // a mailbox, which is what the mail it replaced used to be.
+  it('carries the saved password, so the owner keeps a copy after the tab closes', async () => {
     const { database, outbox } = ownerDatabase();
 
     await saveOwnerPassword(database, 'K7mQ2xRt', now);
 
-    expect(outbox[0].body).not.toContain('K7mQ2xRt');
-    expect(outbox[0].body).not.toMatch(/Password:/);
+    expect(outbox[0].body).toContain('K7mQ2xRt');
+    expect(outbox[0].body).toMatch(/Password: K7mQ2xRt/);
     expect(outbox[0].body).toContain(now.toISOString());
     expect(outbox[0].body).toMatch(/Every session/);
   });
@@ -257,20 +256,53 @@ describe('recording a generated password', () => {
   });
 });
 
-describe('the saved-password confirmation', () => {
-  it('names the role, the date and the way in, and no password', () => {
-    const message = ownerPasswordSavedMessage({ role: superAdminRole, now });
+describe('the generated-password message', () => {
+  it('carries the generated password, the role, the date and the way in', () => {
+    const message = ownerPasswordGeneratedMessage({ role: superAdminRole, password: 'K7mQ2xRt', now });
+    expect(message.body).toContain('K7mQ2xRt');
+    expect(message.body).toContain('Password: K7mQ2xRt');
     expect(message.body).toContain(superAdminRole);
     expect(message.body).toContain(now.toISOString());
     expect(message.body).toContain(superAdminEmail);
     expect(message.body).toContain('/login');
-    expect(message.body).not.toMatch(/Password:\s*\S/);
+  });
+
+  it('says the previous password still works until the value is saved', () => {
+    const message = ownerPasswordGeneratedMessage({ role: superAdminRole, password: 'K7mQ2xRt', now });
+    expect(message.body).toMatch(/not active until it is saved/);
+  });
+});
+
+describe('mailing a generated password', () => {
+  it('queues it for the owner address, never anywhere a request named', async () => {
+    const { database, outbox } = ownerDatabase();
+
+    await emailGeneratedOwnerPassword(database, 'K7mQ2xRt', superAdminRole, now);
+
+    expect(outbox).toHaveLength(1);
+    // The queue row's kind is fixed by the statement, so it is asserted on the SQL.
+    const insert = (database.query as ReturnType<typeof vi.fn>).mock.calls
+      .find(([text]) => String(text).includes('INSERT INTO email_outbox'));
+    expect(String(insert?.[0])).toContain("'owner-password-generated'");
+    expect(outbox[0].recipient).toBe(superAdminEmail);
+    expect(outbox[0].body).toContain('K7mQ2xRt');
+  });
+});
+
+describe('the saved-password message', () => {
+  it('names the role, the date, the way in and the stored password', () => {
+    const message = ownerPasswordSavedMessage({ role: superAdminRole, password: 'K7mQ2xRt', now });
+    expect(message.body).toContain(superAdminRole);
+    expect(message.body).toContain(now.toISOString());
+    expect(message.body).toContain(superAdminEmail);
+    expect(message.body).toContain('/login');
+    expect(message.body).toMatch(/Password: K7mQ2xRt/);
   });
 
   it('tells the reader what to do if it was not them', () => {
     // The address is the way into the console, so an unexplained change to it is
     // the one thing in this mail worth acting on.
-    const message = ownerPasswordSavedMessage({ role: superAdminRole, now });
+    const message = ownerPasswordSavedMessage({ role: superAdminRole, password: 'K7mQ2xRt', now });
     expect(message.body).toMatch(/did not do this/i);
   });
 });

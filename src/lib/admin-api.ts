@@ -423,8 +423,8 @@ export const adminApi = {
     post<{ generated: true; password: string; email: string }>('owner-password/generate'),
   /**
    * Stores the owner password. From here on it is the only one that works, every
-   * session is ended including this caller's, and a confirmation that carries no
-   * password is emailed to the owner address.
+   * session is ended including this caller's, and the stored password is emailed to
+   * the owner address.
    */
   saveOwnerPassword: (password: string) =>
     post<{ saved: true; email: string; sessionsRevoked: number; message: string }>('owner-password/save', { password }),
