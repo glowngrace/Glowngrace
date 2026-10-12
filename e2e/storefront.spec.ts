@@ -65,6 +65,57 @@ test('product details expand long copy, zoom the gallery, and add the selected q
   await expect(page.getByRole('dialog', { name: 'Product image: Product detail reference' })).toHaveCount(0);
 });
 
+test('product information is split into tabs a keyboard can reach', async ({ page }) => {
+  // The first product-page load compiles the storefront route on demand, which
+  // on its own takes most of the default timeout.
+  test.slow();
+  await page.route('**/api/products', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ catalogueManaged: true, products: [{
+      id: 902,
+      name: 'Tabbed product reference',
+      category: 'Skincare',
+      price: 640,
+      mrp: 800,
+      stock: 6,
+      rating: 4.7,
+      reviews: 21,
+      image: '/images/p_serum.jpg',
+      images: ['/images/p_serum.jpg'],
+      description: 'A considered serum for the everyday ritual.',
+      featuresAndSpecification: '<ul><li>Vitamin C</li><li>Lightweight</li></ul>',
+      measurement: '30 ml bottle',
+      materialAndCare: 'Glass bottle. Store away from direct sunlight.',
+    }] }),
+  }));
+  await page.goto('/product/902');
+  await expect(page.getByRole('heading', { name: 'Tabbed product reference' })).toBeVisible();
+
+  const tablist = page.getByRole('tablist', { name: 'Product information' });
+  // One tab per filled-in section, Description first: the three the product
+  // carries, plus the two the page always adds, and Safety Information.
+  await expect(tablist.getByRole('tab')).toHaveCount(6);
+
+  // Description is the open panel to begin with.
+  await expect(page.getByRole('tab', { name: 'Description' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('tabpanel', { name: 'Description' })).toContainText('A considered serum');
+
+  // Choosing a tab swaps the open section.
+  await tablist.getByRole('tab', { name: 'Features & Specification' }).click();
+  await expect(page.getByRole('tab', { name: 'Features & Specification' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('tabpanel', { name: 'Features & Specification' })).toContainText('Vitamin C');
+  await expect(page.getByRole('tabpanel', { name: 'Description' })).toBeHidden();
+
+  // The keyboard moves between tabs without a mouse.
+  await page.keyboard.press('ArrowRight');
+  await expect(page.getByRole('tab', { name: 'Measurement' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('tabpanel', { name: 'Measurement' })).toContainText('30 ml bottle');
+
+  // The tabs must not push the page sideways on a narrow screen.
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
 test('checkout calculates delivery and GST, confirms the order, and clears the saved bag', async ({ page }) => {
   await stubBundledCatalogue(page);
   let savedOrder: Record<string, unknown> | undefined;

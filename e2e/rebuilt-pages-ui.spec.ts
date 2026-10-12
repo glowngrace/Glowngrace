@@ -63,9 +63,14 @@ test.describe('the rebuilt pages hold together', () => {
     await page.goto('/product/4');
     await page.getByRole('heading', { name: 'Product Information' }).waitFor();
     // The bundled sample products predate the optional sections, so this is the
-    // shape that used to leave the page with nothing to read: the parent section
-    // has to survive even when every optional card is omitted.
-    await expect(page.getByRole('heading', { name: 'Description' })).toBeVisible();
+    // shape that used to leave the page with nothing to read: the tablist has to
+    // survive even when every optional section is omitted. Description is one of
+    // the always-present tabs, and it is the one open panel.
+    const tablist = page.getByRole('tablist', { name: 'Product information' });
+    await expect(tablist.getByRole('tab', { name: 'Description' })).toHaveAttribute('aria-selected', 'true');
+    await expect(page.getByRole('tabpanel', { name: 'Description' })).toBeVisible();
+    // A section with no saved content is left out rather than offered as an empty tab.
+    await expect(tablist.getByRole('tab', { name: 'Features & Specification' })).toHaveCount(0);
   });
 
   test('the add product form passes the audit, rich text fields included', async ({ page }) => {
