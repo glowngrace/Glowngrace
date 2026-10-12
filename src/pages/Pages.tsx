@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { categories, jobs, partners, productImageUrl, type Product } from '../data/catalog';
 import { submitContactRequest } from '../lib/api';
@@ -186,7 +186,7 @@ function PageBanner({ eyebrow, title, copy }: { eyebrow: string; title: string; 
   return <section className="page-banner"><div className="page-container"><span className="eyebrow">{eyebrow}</span><h1>{title}</h1><span className="gold-rule" /><p>{copy}</p></div></section>;
 }
 
-/** The "Product Information" block on the product page, one card per section. */
+/** The "Product Information" block on the product page, one tab per section. */
 const productInformationSections = [
   { key: 'featuresAndSpecification', label: 'Features & Specification' },
   { key: 'measurement', label: 'Measurement' },
@@ -204,6 +204,87 @@ function stockNotice(stock: number | undefined): { text: string; tone: string } 
   if (stock <= 0) return { text: 'Out of stock', tone: 'is-out' };
   if (stock <= 5) return { text: `Only ${stock} left`, tone: 'is-low' };
   return { text: 'In stock', tone: 'is-in' };
+}
+
+type ProductInformationTab = { key: string; label: string; content: ReactNode };
+
+/**
+ * The Product Information block, one tab per section.
+ *
+ * Follows the WAI-ARIA tabs pattern: the tablist is a single tab stop and the
+ * arrow keys move between tabs, so a keyboard gets to every section without
+ * tabbing through them all. The active tab is the only one in the tab order,
+ * which is also why exactly one panel is rendered at a time.
+ */
+function ProductInformationTabs({ tabs }: { tabs: ProductInformationTab[] }) {
+  const [active, setActive] = useState(0);
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+
+  function selectTab(index: number) {
+    const next = (index + tabs.length) % tabs.length;
+    setActive(next);
+    tabRefs.current[next]?.focus();
+  }
+
+  function onTabKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>, index: number) {
+    switch (event.key) {
+      case 'ArrowRight':
+      case 'ArrowDown':
+        event.preventDefault();
+        selectTab(index + 1);
+        break;
+      case 'ArrowLeft':
+      case 'ArrowUp':
+        event.preventDefault();
+        selectTab(index - 1);
+        break;
+      case 'Home':
+        event.preventDefault();
+        selectTab(0);
+        break;
+      case 'End':
+        event.preventDefault();
+        selectTab(tabs.length - 1);
+        break;
+    }
+  }
+
+  return (
+    <div className="product-tabs">
+      <div className="product-tablist" role="tablist" aria-label="Product information">
+        {tabs.map((tab, index) => (
+          <button
+            key={tab.key}
+            ref={(node) => { tabRefs.current[index] = node; }}
+            id={`product-tab-${tab.key}`}
+            type="button"
+            role="tab"
+            aria-selected={active === index}
+            aria-controls={`product-tabpanel-${tab.key}`}
+            tabIndex={active === index ? 0 : -1}
+            className={active === index ? 'product-tab is-active' : 'product-tab'}
+            onClick={() => setActive(index)}
+            onKeyDown={(event) => onTabKeyDown(event, index)}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+      {tabs.map((tab, index) => (
+        <div
+          key={tab.key}
+          id={`product-tabpanel-${tab.key}`}
+          role="tabpanel"
+          aria-labelledby={`product-tab-${tab.key}`}
+          hidden={active !== index}
+          tabIndex={0}
+          className="product-tabpanel"
+        >
+          {tab.content}
+        </div>
+      ))}
+    </div>
+  );
 }
 
 export function ProductPage({ favorites, toggleFavorite }: PageProps) {
@@ -247,6 +328,19 @@ export function ProductPage({ favorites, toggleFavorite }: PageProps) {
   }
   const related = products.filter((item) => item.category === product.category && item.id !== product.id).slice(0, 4);
   const availability = stockNotice(product.stock);
+  const informationTabs: ProductInformationTab[] = [
+    { key: 'description', label: 'Description', content: <RichText html={product.description} /> },
+    ...productInformationSections.flatMap((section) => {
+      const html = product[section.key];
+      // A section the console has not filled in is left out rather than shown as
+      // an empty tab. Description, Safety Information and Ingredient are always
+      // there, so the tablist is never empty itself.
+      const hasContent = Boolean(html?.replace(/<[^>]*>/g, '').trim() || html?.includes('<br'));
+      return hasContent ? [{ key: section.key, label: section.label, content: <RichText html={html} /> }] : [];
+    }),
+    { key: 'safety', label: 'Safety Information', content: <p>Follow the directions on the product packaging. Keep out of reach of children. If you have questions about how this product fits your routine, <Link to="/contact">ask our team</Link>.</p> },
+    { key: 'ingredient', label: 'Ingredient', content: <p>Every Glow &amp; Grace formula is cruelty-free and made with care. The full ingredient list is printed on the pack, and our team will happily read it out to you.</p> },
+  ];
 
   return (
     <>
@@ -296,33 +390,7 @@ export function ProductPage({ favorites, toggleFavorite }: PageProps) {
       <section className="section section-soft product-information">
         <div className="page-container">
           <SectionHeading eyebrow="Everything you need to know" title="Product Information" />
-          <div className="product-information-grid">
-            <article className="product-information-block">
-              <h3>Description</h3>
-              <RichText html={product.description} />
-            </article>
-            {productInformationSections.map((section) => {
-              const html = product[section.key];
-              // A section the console has not filled in is left out rather than
-              // shown as an empty card. Description, Safety Information and
-              // Ingredient are always there, so the block is never empty itself.
-              if (!html?.replace(/<[^>]*>/g, '').trim() && !html?.includes('<br')) return null;
-              return (
-                <article className="product-information-block" key={section.key}>
-                  <h3>{section.label}</h3>
-                  <RichText html={html} />
-                </article>
-              );
-            })}
-            <article className="product-information-block">
-              <h3>Safety Information</h3>
-              <p>Follow the directions on the product packaging. Keep out of reach of children. If you have questions about how this product fits your routine, <Link to="/contact">ask our team</Link>.</p>
-            </article>
-            <article className="product-information-block">
-              <h3>Ingredient</h3>
-              <p>Every Glow &amp; Grace formula is cruelty-free and made with care. The full ingredient list is printed on the pack, and our team will happily read it out to you.</p>
-            </article>
-          </div>
+          <ProductInformationTabs key={product.id} tabs={informationTabs} />
         </div>
       </section>
       {isImageExpanded && <div className="product-lightbox" role="dialog" aria-modal="true" aria-label={`Product image: ${product.name}`} onMouseDown={(event) => { if (event.target === event.currentTarget) setIsImageExpanded(false); }}>

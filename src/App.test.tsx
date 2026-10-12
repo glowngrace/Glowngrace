@@ -558,6 +558,67 @@ describe('storefront interface', () => {
     expect(screen.queryByRole('dialog', { name: 'Product image: Product detail test' })).not.toBeInTheDocument();
   });
 
+  it('keeps each Product Information section behind its own tab', async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ catalogueManaged: true, products: [{
+        id: 902,
+        name: 'Tabbed detail test',
+        category: 'Skincare',
+        price: 400,
+        mrp: 500,
+        rating: 4.5,
+        reviews: 8,
+        image: 'p_serum.jpg',
+        images: ['/images/p_serum.jpg'],
+        description: 'A gentle daily serum.',
+        featuresAndSpecification: '<ul><li>Lightweight</li></ul>',
+        measurement: '30 ml',
+      }] }),
+    }) as Response));
+
+    render(
+      <MemoryRouter initialEntries={['/product/902']}>
+        <ProductCatalogProvider>
+          <CartProvider>
+            <Header />
+            <Routes><Route path="/product/:productId" element={<ProductPage favorites={[]} toggleFavorite={() => undefined} />} /></Routes>
+          </CartProvider>
+        </ProductCatalogProvider>
+      </MemoryRouter>,
+    );
+
+    const tablist = await screen.findByRole('tablist', { name: 'Product information' });
+    // One tab per section, in order, and a section the console has not filled in
+    // is left out rather than offered as an empty tab.
+    expect(within(tablist).getAllByRole('tab').map((tab) => tab.textContent)).toEqual([
+      'Description',
+      'Features & Specification',
+      'Measurement',
+      'Safety Information',
+      'Ingredient',
+    ]);
+    expect(screen.queryByRole('tab', { name: 'Material & Care' })).not.toBeInTheDocument();
+
+    // Description is the open panel to begin with.
+    expect(screen.getByRole('tab', { name: 'Description' })).toHaveAttribute('aria-selected', 'true');
+    const description = screen.getByRole('tabpanel', { name: 'Description' });
+    expect(description).toBeVisible();
+    expect(within(description).getByText('A gentle daily serum.')).toBeVisible();
+
+    // Choosing another tab swaps the visible panel.
+    await user.click(screen.getByRole('tab', { name: 'Measurement' }));
+    expect(description).not.toBeVisible();
+    expect(screen.getByRole('tabpanel', { name: 'Measurement' })).toHaveTextContent('30 ml');
+
+    // The keyboard moves the selection without a mouse, wrapping at the ends.
+    await user.keyboard('{ArrowRight}');
+    expect(screen.getByRole('tab', { name: 'Safety Information' })).toHaveAttribute('aria-selected', 'true');
+    await user.keyboard('{Home}');
+    expect(screen.getByRole('tab', { name: 'Description' })).toHaveAttribute('aria-selected', 'true');
+  });
+
   it('renders accessible site navigation and the full product catalogue', () => {
     render(
       <MemoryRouter>

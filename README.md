@@ -286,6 +286,29 @@ banner afterwards, and every skipped row is logged, so a rejected import cannot 
 a successful one. The behaviour is pinned by `src/pages/admin/BulkUpload.test.tsx` and
 `e2e/admin-bulk-upload.spec.ts`.
 
+## Product information on the storefront
+
+Below the gallery, the product page's **Product Information** block is a set of
+tabs, one per section, rather than a wall of stacked cards. The console fills
+those sections in on the product form under "Product information"; the storefront
+shows the ones that have something in them.
+
+| Section | Where it comes from |
+| --- | --- |
+| Description | The product's description, always present |
+| Features & Specification, Measurement, Material & Care, Additional Details, Item Details | The matching fields on the product, each shown only when the console has filled it in |
+| Safety Information, Ingredient | Written by the page itself, always present |
+
+The tabs follow the WAI-ARIA tabs pattern: the tablist is a single tab stop, the
+arrow keys (and Home/End) move between tabs, and only the open panel is rendered
+visible. Exactly one tab is open at a time and the page opens on Description. A
+section the console has left empty is dropped rather than offered as an empty tab,
+so the tablist never shows a heading with nothing under it.
+
+The behaviour is pinned by the `keeps each Product Information section behind its
+own tab` case in `src/App.test.tsx` and the `product information is split into
+tabs a keyboard can reach` case in `e2e/storefront.spec.ts`.
+
 ## Environment
 
 Nothing is hard-coded and no secret is committed. `.env` is ignored by Git and is
