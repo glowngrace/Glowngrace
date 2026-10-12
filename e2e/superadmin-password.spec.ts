@@ -7,7 +7,7 @@ import { auditPage } from './support/audit';
  * Both endpoints are stubbed throughout, so no test here generates a real password
  * or sends a real mail. What is under test is the part jsdom does not settle: that
  * the screen asks the server who is signed in rather than trusting storage, that
- * generating writes nothing until the save, that the password is offered once and
+ * generating changes no stored credential until the save, that the password is offered once and
  * can be copied, that the save field only opens for the value that was copied, and
  * that the card is the design's own in every state, with the generate control never
  * a route away from the page.
@@ -49,7 +49,7 @@ const saved = {
   saved: true,
   email: 'glowngracebiz@gmail.com',
   sessionsRevoked: 3,
-  message: 'Your Super Admin password was saved and a confirmation was sent to glowngracebiz@gmail.com.',
+  message: 'Your Super Admin password was saved and sent to glowngracebiz@gmail.com.',
 };
 
 /**
@@ -479,9 +479,10 @@ test.describe('/superadmin/ggpass', () => {
   });
 
   test('generates on the press, with no dialog in front of it', async ({ page }) => {
-    // The confirmation this replaced was the answer to a rotation that wrote as it
-    // went. Nothing is written until the save now, so a dialog in front of a step
-    // that changes nothing only trains people to press through dialogs.
+    // The confirmation this replaced was the answer to a rotation that replaced the
+    // stored credential as it went. Nothing is stored until the save now, so a
+    // dialog in front of a step that changes no credential only trains people to
+    // press through dialogs.
     const { generateCalls } = await stubConsole(page);
     await openScreen(page);
 

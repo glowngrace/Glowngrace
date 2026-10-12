@@ -12,7 +12,7 @@ import {
 } from './admin/collections.js';
 import { hashPassword, generateStrongPassword, generateOwnerPassword, newSessionToken, newResetToken, ownerPasswordPolicyError, passwordPolicy, passwordPolicyError, removedDemoPassword, resetTokenExpiry, resetTokenLookup, sessionExpiry, verifyPassword, hashResetToken } from './admin/passwords.js';
 import { consoleRoles, signupRoles, superAdminEmail, superAdminRole } from '../auth/roles.js';
-import { ownerCredentialsMessage, recordOwnerPasswordGenerated, saveOwnerPassword } from './admin/owner-password.js';
+import { emailGeneratedOwnerPassword, ownerCredentialsMessage, recordOwnerPasswordGenerated, saveOwnerPassword } from './admin/owner-password.js';
 import { isMissingSchema, schemaNotMigrated } from './schema.js';
 import { tryDeliverPendingMail } from './mailer.js';
 import { datasetCountSql, mapDatasetRowCounts } from './admin/datasets.js';
@@ -1502,23 +1502,20 @@ async function listPages() {
      *
      * Two requests rather than one, and the split is the whole design:
      *
-     *   POST /owner-password/generate  makes a password and hands it back. The
-     *                                 credential is written nowhere, no session is
-     *                                 touched, and the previous password still
-     *                                 works - so a tab that closes or a walk away
-     *                                 from the keyboard loses nothing. The
-     *                                 alternative, which this replaced, replaced
-     *                                 the credential immediately and mailed the new
-     *                                 one to a mailbox nobody was watching. What it
-     *                                 does record is the moment, in
+     *   POST /owner-password/generate  makes a password, hands it back, and mails
+     *                                 it to the owner address. The credential is
+     *                                 written nowhere and no session is touched, so
+     *                                 the previous password still works - a tab that
+     *                                 closes or a walk away from the keyboard loses
+     *                                 nothing. It records the moment, in
      *                                 `password_generated_at` and one row of
      *                                 `owner_password_events`, so a deployment can
      *                                 tell an untouched account from one where a
      *                                 password was generated and never kept.
      *   POST /owner-password/save      stores the password, from the body. This is
      *                                 the moment the old one stops working, every
-     *                                 session is revoked, and a confirmation that
-     *                                 carries no password is queued for the owner.
+     *                                 session is revoked, and the stored password is
+     *                                 mailed to the owner address.
      *
      * Gated on the role rather than on the address, and always checked here even
      * though the caller has a session: a session proves who somebody is, not what
@@ -1527,9 +1524,10 @@ async function listPages() {
      * which includes the caller's, so that response is the last thing this session
      * sees.
      *
-     * The generated value is the one secret this project now returns over HTTP,
-     * and it is returned to the one account allowed to have it. It is never
-     * logged, never written to the outbox, and never emailed.
+     * The generated value is returned over HTTP to the one account allowed to have
+     * it, and it is also mailed to the owner address on both steps. Neither can
+     * redirect it: the recipient is the owner account's own address and never a
+     * value from the request. The value is never logged.
      */
     if (resource === 'owner-password') {
       if (user.role !== superAdminRole) {
@@ -1552,7 +1550,7 @@ async function listPages() {
             saved: true,
             email: result.email,
             sessionsRevoked: result.sessionsRevoked,
-            message: `Your ${superAdminRole} password was saved and a confirmation was sent to ${result.email}.`,
+            message: `Your ${superAdminRole} password was saved and sent to ${result.email}.`,
           },
         };
       }
@@ -1569,6 +1567,10 @@ async function listPages() {
         if (isMissingSchema(cause)) return schemaNotMigrated(cause);
         throw cause;
       }
+      // Mailed to the owner address as soon as it is generated, before it is saved,
+      // so the tab closing does not cost the owner the value. The recipient is the
+      // owner's own address, never a value from the request.
+      await emailGeneratedOwnerPassword(database, password, user.role);
       return {
         status: 200,
         body: {

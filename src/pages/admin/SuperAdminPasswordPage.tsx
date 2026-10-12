@@ -30,14 +30,12 @@ import {
  *             that was shown. Nothing else on the page can be mistaken for a
  *             password the owner chose.
  *   Save      the pasted value is checked against the one that was generated,
- *             hashed and stored, every session ends, a confirmation that carries
- *             no password is emailed to the owner, and the page walks back to
- *             sign-in to use it.
+ *             hashed and stored, every session ends, the value is emailed to the
+ *             owner address, and the page walks back to sign-in to use it.
  *
- * That last step replaces a weekly rotation which replaced the credential whether
- * or not anybody was watching, and mailed the new one to an unattended mailbox.
- * The password now goes to the one person allowed to have it, on a screen they are
- * looking at. Nothing is written down that somebody else could read.
+ * The password is shown on the screen as it is generated and, on both steps, mailed
+ * to the fixed owner address so a closed tab does not cost the owner the value. The
+ * recipient is the owner account's own address, never anything typed on this page.
  *
  * The layout follows the sign-in and reset screens rather than the console: a
  * split page with the beauty house on one side and a single card on the other.
@@ -524,9 +522,9 @@ export function SuperAdminPasswordPage() {
             <div className="ggpass-note is-warning" role="status">
               <i />
               <div>
-                Mail is not configured here, so the confirmation that a password was
-                saved will be written to the outbox and go nowhere. Your password
-                still works - set <code>MAIL_HOST</code>, <code>MAIL_PORT</code>,{' '}
+                Mail is not configured here, so the password emailed to the owner
+                when it is generated or saved will be written to the outbox and go
+                nowhere. Your password still works - set <code>MAIL_HOST</code>, <code>MAIL_PORT</code>,{' '}
                 <code>MAIL_USERNAME</code>, <code>MAIL_PASSWORD</code>,{' '}
                 <code>MAIL_FROM_ADDRESS</code> and <code>MAIL_FROM_NAME</code> to get it.
               </div>

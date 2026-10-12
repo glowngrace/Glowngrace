@@ -18,33 +18,27 @@ import { auditPage } from './support/audit';
  *
  *   1. the owner can sign in with the credential the last run left behind
  *   2. the screen offers the control, and reaches it by typing the URL
- *   3. pressing it generates on the press, with no dialog in front of it, and
- *      nothing at all is written - only the record that somebody generated one
+ *   3. pressing it generates on the press, with no dialog in front of it, and the
+ *      stored credential is untouched - the generation is recorded and the value
+ *      is mailed to the owner address
  *   4. the password is in the notification with a copy button beside it
  *   5. a copy opens the save field, and the value the field holds is what the
  *      save request carries - read off the request itself, against the real
  *      server, because that is the one thing a stub cannot prove
  *   6. the stored hash verifies against exactly that value
- *   7. the confirmation was relayed, which is `sent_at` on the outbox row, and it
- *      carries no password
+ *   7. the generated mail and the saved mail were both relayed, which is `sent_at`
+ *      on their outbox rows, and each carries the password
  *   8. the old password no longer works and the new one does
  *   9. every session went, the caller's included, and the screen walks to sign-in
  *
- * One thing this file can no longer do, and it is worth being explicit about: the
- * previous version read each new password back off the request by typing a
- * different one into an editable field, and before that it read the password back
- * out of the outbox, because the password used to be mailed and never rendered. Now
- * it is the other way round. The password exists on the screen and in the mailbox
- * only as a confirmation that a password changed, so the value is read from the
- * notification and kept in memory for the length of the run.
+ * The password is both rendered on the screen and mailed to the owner address, on
+ * the generate step and again on the save, so this file reads the value from the
+ * notification - the screen is the first place it appears - and then checks the
+ * mailbox it was also sent to.
  *
- * That has a consequence an operator should know about, not just a test: once a
- * password is saved from this screen, there is no server-side record of it
- * anywhere. A run that follows therefore has to be told the current value with
- * `E2E_OWNER_PASSWORD=...`, and if neither it nor the seed credential opens the
- * account the file skips with an explanation instead of failing on a timeout. The
- * practical mitigation is the same one the screen gives the owner: keep the value
- * somewhere you can read it again.
+ * Because the saved mail carries the credential, the outbox holds a working copy
+ * after a save. A run can therefore recover the current value from the newest
+ * saved mail; `E2E_OWNER_PASSWORD=...` still wins when it is set.
  *
  * Why it is not part of the ordinary suite: it needs a database, it needs the relay
  * credentials, it mails a real inbox, and it changes the owner password. It skips
@@ -98,15 +92,21 @@ async function latestOutboxRow(kind: string): Promise<OutboxRow> {
 }
 
 /**
- * The password the seed wrote, which is the only credential on record before this
- * run starts. Absent on a database that was seeded before the outbox existed, or on
- * one whose owner has since saved a password from the screen - in which case it no
- * longer matches and the probe below is what decides whether this run can happen.
+ * The password the deployment last put on record, newest kind first.
+ *
+ * Both the saved-password mail and the seed credential carry the value in their
+ * body now, so after a save the outbox holds the working password. The saved mail
+ * is checked before the seed row because it supersedes it; a generated mail that
+ * was never saved is deliberately not read, because it is not the credential that
+ * works. The probe below is still what decides whether either opens the account.
  */
-async function seedPasswordFromOutbox(): Promise<string> {
-  const row = await latestOutboxRow('owner-credentials').catch(() => null);
-  const password = row ? /Password: (.+)/.exec(row.body)?.[1]?.trim() : undefined;
-  return password ?? '';
+async function passwordFromOutbox(): Promise<string> {
+  for (const kind of ['owner-password-saved', 'owner-credentials']) {
+    const row = await latestOutboxRow(kind).catch(() => null);
+    const password = row ? /Password: (.+)/.exec(row.body)?.[1]?.trim() : undefined;
+    if (password) return password;
+  }
+  return '';
 }
 
 /**
@@ -131,17 +131,16 @@ async function passwordWorks(candidate: string): Promise<boolean> {
 /**
  * Which password, if any, opens the owner account right now.
  *
- * Tried in order: the one named in the environment, then the seed credential still
- * sitting in the outbox. Both can be absent. Once a password has been saved from
- * `/superadmin/ggpass` the seed row no longer matches, and nothing server-side
- * holds the one that does - which is the promise the screen makes to the owner and
- * the reason this file asks to be told rather than guessing.
+ * Tried in order: the one named in the environment, then the newest credential on
+ * record in the outbox - the saved mail if there is one, otherwise the seed row.
+ * Both can be absent on an unseeded database. Each candidate is probed against the
+ * real API, so a stale row is skipped rather than trusted.
  */
 async function resolvePassword(): Promise<string> {
   const named = process.env.E2E_OWNER_PASSWORD;
   if (named && await passwordWorks(named)) return named;
-  const seeded = await seedPasswordFromOutbox();
-  if (seeded && await passwordWorks(seeded)) return seeded;
+  const recorded = await passwordFromOutbox();
+  if (recorded && await passwordWorks(recorded)) return recorded;
   return '';
 }
 
@@ -253,7 +252,7 @@ test.describe('the real owner password round trip', () => {
     await auditPage(page, '/superadmin/ggpass (real)');
   });
 
-  test('generates on the press, and generating writes nothing', async ({ page }) => {
+  test('generates on the press without touching the stored credential, and mails the value', async ({ page }) => {
     test.skip(!usable, 'the owner could not sign in');
     await signInAsOwner(page, currentPassword);
     const before = await pool.query(
@@ -272,11 +271,19 @@ test.describe('the real owner password round trip', () => {
     await page.getByRole('button', { name: 'Generate password' }).click();
 
     // No dialog in front of it. The design's own answer to "are you sure" is that
-    // nothing is written until the save, and the value below is the proof of that
-    // rather than the absence of a confirmation.
+    // the stored credential is not replaced until the save, and the unchanged hash
+    // below is the proof of that rather than the absence of a confirmation.
     await expect(page.getByRole('dialog')).toHaveCount(0);
     await expect(page.locator('.ggpass-toast-code')).toHaveText(/.{8}/, { timeout: 15_000 });
     await expect(page.getByRole('button', { name: 'Regenerate password' })).toBeEnabled();
+    const shown = (await page.locator('.ggpass-toast-code').textContent() ?? '').trim();
+
+    // The value on the screen is also mailed to the owner address at the moment it
+    // is generated. A null `sent_at` is the silent failure this file exists for.
+    const mailed = await latestOutboxRow('owner-password-generated');
+    expect(mailed.recipient, 'the generated mail goes to the owner address').toBe(ownerEmail);
+    expect(mailed.body, 'the generated mail carries the value on the screen').toContain(shown);
+    expect(mailed.sent_at, 'the relay accepted the generated mail').not.toBeNull();
 
     const after = await pool.query(
       'SELECT password_hash, updated_at, password_generated_at, password_changed_at FROM admin_users WHERE email = $1',
@@ -338,7 +345,7 @@ test.describe('the real owner password round trip', () => {
     await auditPage(page, '/superadmin/ggpass (real, generated)');
   });
 
-  test('saves the value in the field, stores that hash, and mails a confirmation with no password in it', async ({ page }) => {
+  test('saves the value in the field, stores that hash, and mails the password', async ({ page }) => {
     test.skip(!usable, 'the owner could not sign in');
     await signInAsOwner(page, currentPassword);
 
@@ -383,18 +390,17 @@ test.describe('the real owner password round trip', () => {
     );
     expect((events.rows[0] as { kind: string }).kind).toBe('saved');
 
-    // The relay took the confirmation. A null `sent_at` here is the silent failure
-    // this whole file exists to catch: the save succeeded, the row was written, and
-    // nothing was ever sent because the settings were named in a shape the code
-    // does not read.
+    // The relay took the saved-password mail. A null `sent_at` here is the silent
+    // failure this whole file exists to catch: the save succeeded, the row was
+    // written, and nothing was ever sent because the settings were named in a shape
+    // the code does not read.
     const after = await latestOutboxRow('owner-password-saved');
-    expect(after.id, 'a confirmation was queued').not.toBe(before?.id);
+    expect(after.id, 'a saved-password mail was queued').not.toBe(before?.id);
     expect(after.recipient).toBe(ownerEmail);
-    expect(after.sent_at, 'the relay accepted the confirmation').not.toBeNull();
-    // And it carries no credential. This is the one mail in the project that can be
-    // forwarded without handing over the account.
-    expect(after.body).not.toMatch(/Password:\s*\S/);
-    expect(after.body).not.toContain(shown);
+    expect(after.sent_at, 'the relay accepted the saved-password mail').not.toBeNull();
+    // And it carries the credential, so the owner keeps a copy after the tab closes.
+    expect(after.body).toMatch(/Password:\s*\S/);
+    expect(after.body).toContain(shown);
 
     // The session went with the password, and the page is on its way to sign-in.
     expect(await page.evaluate(() => localStorage.getItem('glow-grace-admin-token'))).toBeNull();

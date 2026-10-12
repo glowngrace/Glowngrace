@@ -2046,7 +2046,12 @@ describe('the two owner password endpoints', () => {
       // second look costs nobody their access.
       expect(query.mock.calls.some(([text]) => String(text).includes('SET password_hash'))).toBe(false);
       expect(query.mock.calls.some(([text]) => String(text).includes('DELETE FROM admin_sessions'))).toBe(false);
-      expect(query.mock.calls.some(([text]) => String(text).includes('INSERT INTO email_outbox'))).toBe(false);
+      // The generated value is mailed to the owner address, but the stored
+      // credential is untouched.
+      const mail = query.mock.calls.find(([text]) => String(text).includes('INSERT INTO email_outbox'));
+      expect(mail).toBeDefined();
+      expect(String(mail![0])).toContain("'owner-password-generated'");
+      expect((mail![1] as unknown[])[0]).toBe(superAdminEmail);
     });
 
     it('records the moment, so an untouched account can be told from an abandoned one', async () => {
@@ -2163,10 +2168,9 @@ describe('the two owner password endpoints', () => {
       expect((mail![1] as unknown[])[0]).toBe(superAdminEmail);
     });
 
-    it('confirms to the owner address without carrying the password', async () => {
-      // The one mail in the project with no working credential in it. This is what
-      // makes it safe to say out loud that the password was changed, and it is why
-      // the page can drop the value once the save is through.
+    it('mails the stored password to the owner address', async () => {
+      // The saved value is sent so the owner keeps a copy once the tab closes and
+      // the page has dropped it.
       const { admin, query } = consoleFor(ownerRow);
       await admin.handle({ method: 'POST', segments: ['owner-password', 'save'], body: { password: 'Mango9Tr' }, token });
 
@@ -2176,8 +2180,8 @@ describe('the two owner password endpoints', () => {
       expect(String(mail![0])).toContain("'owner-password-saved'");
       expect(recipient).toBe(superAdminEmail);
       expect(String(subject)).toContain('saved');
-      expect(String(body)).not.toContain('Mango');
-      expect(String(body)).not.toMatch(/Password:\s*\S/);
+      expect(String(body)).toContain('Mango9Tr');
+      expect(String(body)).toMatch(/Password:\s*\S/);
     });
 
     it('accepts any value on the owner policy, because the screen is what checks it', async () => {

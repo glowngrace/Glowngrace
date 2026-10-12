@@ -3,25 +3,26 @@ import { superAdminEmail } from '../auth/roles.js';
 import type { Database } from './handlers.js';
 
 /**
- * The two kinds of message this module will send.
+ * The kinds of message this module will send.
  *
  * Every other row in the outbox is either a notification with no secret in it or a
- * reset link that a person asked for on an address they already control. These two
- * are the exceptions, and they are exceptions for opposite reasons:
+ * reset link that a person asked for on an address they already control. These
+ * three are the exceptions, and each carries the owner credential:
  *
- *   owner-credentials  the body is a password that works right now. Written only by
- *                      the seed, which runs with nobody at the keyboard and has no
- *                      other way to hand over a working credential.
- *   owner-password-saved  a confirmation that a password was changed. Carries no
- *                      password at all, so it is safe to keep, forward and read
- *                      years later - which is the point of an audit record.
+ *   owner-credentials        the body is a password that works right now. Written
+ *                            only by the seed, which runs with nobody at the
+ *                            keyboard and has no other way to hand over a working
+ *                            credential.
+ *   owner-password-generated the password generated on `/superadmin/ggpass`, mailed
+ *                            as soon as it is generated and before it is saved.
+ *   owner-password-saved     the password that was just stored, which doubles as the
+ *                            audit line that a credential changed.
  *
  * A list rather than a single name, enforced here rather than at the call sites, so
- * a future caller cannot widen it by accident. Note what is *not* in it: the
- * password generated on `/superadmin/ggpass` never reaches the outbox at all,
- * because that password is shown on a screen and saved by hand.
+ * a future caller cannot widen it by accident. Every kind here carries a working
+ * credential to the owner address and must be treated as a secret.
  */
-export const deliverableKinds = ['owner-credentials', 'owner-password-saved'] as const;
+export const deliverableKinds = ['owner-credentials', 'owner-password-generated', 'owner-password-saved'] as const;
 
 export type MailConfig = {
   host: string;

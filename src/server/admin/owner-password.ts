@@ -7,18 +7,17 @@ import type { Database } from '../handlers.js';
  * The owner account's password, generated on screen and saved by hand.
  *
  * There is no schedule and no automatic replacement. The password that is saved is
- * the password that keeps working until somebody saves another one, which is what
- * makes the flow on `/superadmin/ggpass` honest: the person who can see the new
- * password is the person who typed it in, and nobody else ever receives it.
+ * the password that keeps working until somebody saves another one. The screen on
+ * `/superadmin/ggpass` shows the new password and, by request, it is also mailed to
+ * the owner address `glowngracebiz@gmail.com` on both steps: once when it is
+ * generated and once when it is saved. The address is fixed - it is the owner
+ * account's own - so a generated password always goes to the same mailbox, and
+ * nothing from a request can redirect it.
  *
- * That is a deliberate change from the rotation this replaced. A weekly rotation
- * had no operator watching when it happened, so it had to deliver the new
- * password by mail to an unattended mailbox - a live credential written to a
- * table, sent over SMTP, and regenerated whether or not anybody was there to
- * receive it. Sending it to the screen instead puts it in the hands of the one
- * person allowed to have it and takes the credential out of the mail path
- * entirely. The confirmation that follows is not a credential: it says a password
- * was saved and when, which is audit information, not a secret.
+ * The screen stays the first place the value appears, so a closed tab or a refresh
+ * costs nobody their access, while the mail leaves the owner a durable copy that
+ * survives losing the tab. The saved-password mail doubles as the audit line: it
+ * records that the credential changed and when.
  */
 
 export type SavedOwnerPassword = {
@@ -29,15 +28,15 @@ export type SavedOwnerPassword = {
 };
 
 /**
- * The message that confirms a saved password.
+ * The message that carries a saved password to the owner address.
  *
- * Carries no password, on purpose. This is the one mail in the project that is
- * safe to leave lying around in a mailbox for years: it records that the owner
- * credential changed and when, and it cannot be replayed to sign in. The old
- * design put the live password in the same slot, which meant a forwarded
- * confirmation mail was a working login.
+ * It includes the value that was just stored, so the owner keeps a copy that
+ * survives closing the tab. It is also the audit line: it records that the owner
+ * credential changed and when. Because it carries a working credential, it must be
+ * treated the same way as any other password mail - the mailbox it lands in is
+ * part of the way into the console.
  */
-export function ownerPasswordSavedMessage(input: { role: string; now: Date }) {
+export function ownerPasswordSavedMessage(input: { role: string; password: string; now: Date }) {
   return {
     subject: 'Your Glow & Grace owner password was saved',
     body: [
@@ -45,12 +44,61 @@ export function ownerPasswordSavedMessage(input: { role: string; now: Date }) {
       '',
       `A new password for the ${input.role} account was saved on ${input.now.toISOString()}.`,
       '',
-      `Sign in at /login as ${superAdminEmail} using the password you generated and saved on this screen.`,
+      `Sign in at /login as ${superAdminEmail}`,
+      `Password: ${input.password}`,
+      '',
       'Every session signed in with the previous password was ended, including the one that saved the new one.',
       '',
       'If you did not do this, treat it as a warning: the address is the way into the console, so check who holds access to the mailbox.',
     ].join('\n'),
   };
+}
+
+/**
+ * The message that carries a freshly generated password to the owner address.
+ *
+ * Generated on the screen before anything is saved, so the value is mailed while
+ * the previous password is still the one that works. Included unconditionally, so
+ * the owner has a copy even if the tab that showed it is closed before the save.
+ */
+export function ownerPasswordGeneratedMessage(input: { role: string; password: string; now: Date }) {
+  return {
+    subject: 'Your Glow & Grace owner password was generated',
+    body: [
+      'Hello,',
+      '',
+      `A new password for the ${input.role} account was generated on ${input.now.toISOString()}.`,
+      'It is not active until it is saved on the password screen; the previous password keeps working until then.',
+      '',
+      `Sign in at /login as ${superAdminEmail}`,
+      `Password: ${input.password}`,
+      '',
+      'If you did not generate this, ignore it and change the owner password from the console.',
+    ].join('\n'),
+  };
+}
+
+/**
+ * Queues the generated password for the owner address and attempts delivery.
+ *
+ * The recipient is the owner address and never a value from a request, so nothing
+ * a caller sends can redirect a credential to another mailbox. A failed send is
+ * left in the outbox and retried by the delivery pass, exactly like the save
+ * message.
+ */
+export async function emailGeneratedOwnerPassword(
+  database: Database,
+  password: string,
+  role: string,
+  now: Date = new Date(),
+) {
+  const message = ownerPasswordGeneratedMessage({ role, password, now });
+  await database.query(
+    `INSERT INTO email_outbox (kind, recipient, subject, body)
+     VALUES ('owner-password-generated', $1, $2, $3)`,
+    [superAdminEmail, message.subject, message.body],
+  );
+  await tryDeliverPendingMail(database);
 }
 
 /**
@@ -158,7 +206,7 @@ export async function saveOwnerPassword(database: Database, password: string, no
   const revoked = await database.query('DELETE FROM admin_sessions WHERE user_id = $1', [account.id]);
   await recordOwnerPasswordEvent(database, account.id, 'saved', now);
 
-  const message = ownerPasswordSavedMessage({ role: account.role, now });
+  const message = ownerPasswordSavedMessage({ role: account.role, password, now });
   await database.query(
     `INSERT INTO email_outbox (kind, recipient, subject, body)
      VALUES ('owner-password-saved', $1, $2, $3)`,
@@ -167,8 +215,8 @@ export async function saveOwnerPassword(database: Database, password: string, no
   // The outbox row is the record; this is the attempt to put it in the owner's
   // mailbox. A failure here is reported and left to the delivery pass, because the
   // hash has already been replaced and there is no second chance to send this
-  // particular confirmation - though unlike a credential, losing it costs an audit
-  // line rather than an account.
+  // particular message. The row carries the credential, so leaving it queued
+  // matters: it is the owner's only durable copy.
   await tryDeliverPendingMail(database);
 
   return {

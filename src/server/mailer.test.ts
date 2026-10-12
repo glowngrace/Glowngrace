@@ -183,10 +183,12 @@ describe('what may be emailed', () => {
     expect(isDeliverable({ ...ownerMessage, recipient: superAdminEmail.toUpperCase() })).toBe(true);
   });
 
-  it('sends the save confirmation to the owner address too', () => {
-    // It carries no password, so it is allowed out on the same terms as the one
-    // that does - and it still only goes to the one address.
+  it('sends the generated and saved password mails to the owner address too', () => {
+    // Both carry a working password, so they are allowed out on the same terms as
+    // the seed credential - and each still only goes to the one address.
+    expect(isDeliverable({ kind: 'owner-password-generated', recipient: superAdminEmail })).toBe(true);
     expect(isDeliverable({ kind: 'owner-password-saved', recipient: superAdminEmail })).toBe(true);
+    expect(isDeliverable({ ...ownerMessage, kind: 'owner-password-generated', recipient: 'someone.else@example.com' })).toBe(false);
     expect(isDeliverable({ ...ownerMessage, kind: 'owner-password-saved', recipient: 'someone.else@example.com' })).toBe(false);
   });
 
@@ -260,9 +262,10 @@ describe('delivering a message', () => {
 });
 
 describe('the delivery pass', () => {
-  it('picks up the seed credential and the save confirmation, and nothing else', async () => {
+  it('picks up every owner credential kind, and nothing else', async () => {
     const { database, query } = outboxDatabase([
       { id: 'm1', kind: 'owner-credentials', recipient: superAdminEmail, subject: 's', body: 'b' },
+      { id: 'm5', kind: 'owner-password-generated', recipient: superAdminEmail, subject: 's', body: 'b' },
       { id: 'm4', kind: 'owner-password-saved', recipient: superAdminEmail, subject: 's', body: 'b' },
       { id: 'm2', kind: 'signup', recipient: 'reha@example.com', subject: 's', body: 'b' },
       { id: 'm3', kind: 'password-reset', recipient: 'deepak@glowngrace.in', subject: 's', body: 'b' },
@@ -271,13 +274,13 @@ describe('the delivery pass', () => {
 
     const result = await deliverPendingMail(database, { config, transport: { sendMail } });
 
-    // Both kinds the owner is meant to hear about, and nothing addressed anywhere
-    // else. A save confirmation that never went out would leave the owner with no
-    // record that their credential changed.
-    expect(result.attempted).toBe(2);
-    expect(result.delivered).toBe(2);
-    expect(sendMail).toHaveBeenCalledTimes(2);
-    expect(sendMail.mock.calls.map((call) => call[0].to)).toEqual([superAdminEmail, superAdminEmail]);
+    // Every kind the owner is meant to hear about, and nothing addressed anywhere
+    // else. A generated or saved mail that never went out would leave the owner with
+    // no copy of a credential the screen asks them to keep.
+    expect(result.attempted).toBe(3);
+    expect(result.delivered).toBe(3);
+    expect(sendMail).toHaveBeenCalledTimes(3);
+    expect(sendMail.mock.calls.map((call) => call[0].to)).toEqual([superAdminEmail, superAdminEmail, superAdminEmail]);
     // The kinds are a parameter rather than an interpolation, so the query cannot
     // carry one in.
     expect(String(query.mock.calls[0][0])).toContain('$1');
