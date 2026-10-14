@@ -309,6 +309,41 @@ The behaviour is pinned by the `keeps each Product Information section behind it
 own tab` case in `src/App.test.tsx` and the `product information is split into
 tabs a keyboard can reach` case in `e2e/storefront.spec.ts`.
 
+## Product bundles on the storefront
+
+A **curated bundle** is a set of catalogue products sold together at one bundle
+price. The console creates them - each names its member products, a price and an
+optional tag - the shop shows them, and a checkout carries a bundle as a single
+discounted order line rather than as its members.
+
+On `/shop`, the default grid mixes products and bundles: the wide bundle cards
+span two columns among the single-column product cards. Choosing the **Bundles**
+filter narrows the grid to the edits alone and lays them out **two-up** wherever
+there is room, dropping to a single column at 760px so a bundle card is never
+squeezed narrower than its members list can hold.
+
+| Route | What it shows |
+| --- | --- |
+| `/shop` → **Bundles** | Every published bundle: two columns on a wide screen, one on a phone. |
+| `/bundle/:bundleId` | One edit: the member products with their own prices, the bundle price, and the saving. |
+| A retired or unknown id | A named line saying the bundle is gone, and a link back to the shop. |
+
+Adding a bundle to the bag writes **one** cart line keyed by the bundle id, and
+checkout sends `{ bundleId, quantity }` for it. The server stores the bundle's own
+price on the line (`order_items.bundle_id`), so the discount charged survives a
+later change to a member's price. `order_items.product_id` became nullable in the
+same migration, because a line now names either a product or a bundle; checkout
+resolves whichever id the line carries and refuses one that names neither.
+
+The storefront reads `product_bundles` directly, so the table is listed with the
+other storefront-core tables in `requiredTables` and a Neon sync carries it down
+with the catalogue. A database with no bundle rows still renders the bundled
+sample set, the same fallback the catalogue uses before its first product exists.
+
+The behaviour is pinned by `e2e/bundles.spec.ts` - the two-column layout and the
+member-count checks included - and the `product bundle admin routes` cases in
+`src/server/admin.test.ts`.
+
 ## Environment
 
 Nothing is hard-coded and no secret is committed. `.env` is ignored by Git and is
@@ -360,9 +395,9 @@ leave a half-copied database.
 Every table the application reads, plus `email_outbox`:
 
 `contact_requests`, `newsletter_subscribers`, `products`, `product_images`,
-`orders`, `order_items`, `admin_users`, `store_settings`, `site_pages`,
-`job_vacancies`, `candidates`, `partner_salons`, `customers`, `reviews`,
-`demo_datasets`, `email_outbox`.
+`product_bundles`, `orders`, `order_items`, `admin_users`, `store_settings`,
+`site_pages`, `job_vacancies`, `candidates`, `partner_salons`, `customers`,
+`reviews`, `demo_datasets`, `email_outbox`.
 
 ### What does not, and why
 

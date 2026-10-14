@@ -75,6 +75,7 @@ async function stubConsole(page: Page, options: {
     }
     const collections: Record<string, unknown> = {
       products: { products: [] },
+      bundles: { bundles: [], roles: [] },
       orders: { orders: [] },
       // All five of these arrive under `records`, not under their own name.
       jobs: { records: [] },

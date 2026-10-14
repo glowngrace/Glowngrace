@@ -6,7 +6,7 @@
  * template can never drift away from what the import endpoint accepts.
  */
 
-export type BulkDatasetKey = 'products' | 'jobs' | 'candidates' | 'partners' | 'customers' | 'reviews' | 'users';
+export type BulkDatasetKey = 'products' | 'jobs' | 'candidates' | 'partners' | 'customers' | 'reviews' | 'users' | 'bundles';
 
 export type BulkTemplate = {
   dataset: BulkDatasetKey;

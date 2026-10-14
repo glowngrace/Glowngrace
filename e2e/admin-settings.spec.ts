@@ -64,6 +64,7 @@ async function stubConsole(page: Page, options: { onSave?: SaveOverride } = {}) 
   const collections: Record<string, unknown> = {
     me: { user: adminUser },
     products: { products: [] },
+    bundles: { bundles: [], roles: [] },
     orders: { orders: [] },
     jobs: { records: [] },
     candidates: { records: [] },

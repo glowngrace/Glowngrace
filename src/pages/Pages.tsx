@@ -4,8 +4,11 @@ import { categories, jobs, partners, productImageUrl, type Product } from '../da
 import { submitContactRequest } from '../lib/api';
 import { useCart } from '../components/CartContext';
 import { useProductCatalog } from '../components/ProductCatalogContext';
+import { useBundleCatalog } from '../components/BundleCatalogContext';
 import { Loader, PageLoader } from '../components/Loader';
 import { ProductGrid } from '../components/ProductCard';
+import { BundleCard, CatalogueGrid } from '../components/BundleCard';
+import { mixCatalogue } from '../lib/bundle-grid';
 import { RichText } from '../components/RichText';
 
 type PageProps = { favorites: number[]; toggleFavorite: (productId: number) => void };
@@ -24,6 +27,7 @@ function SectionHeading({ eyebrow, title, copy }: { eyebrow: string; title: stri
 
 export function HomePage({ favorites, toggleFavorite }: PageProps) {
   const { products } = useProductCatalog();
+  const { bundles } = useBundleCatalog();
   return (
     <>
       <section className="hero">
@@ -64,10 +68,12 @@ export function HomePage({ favorites, toggleFavorite }: PageProps) {
       <section className="section section-soft">
         <div className="page-container">
           <div className="section-heading heading-with-link">
-            <div><span className="eyebrow">Picked with intention</span><span className="gold-rule" /><h2>The glow-getters</h2><p>Most-loved little luxuries, chosen by you.</p></div>
-            <Link className="underlined-link" to="/shop">See the whole collection <span>↗</span></Link>
+            <div><span className="eyebrow">Picked with intention</span><span className="gold-rule" /><h2>The glow-getters</h2><p>Most-loved little luxuries, chosen by you — and the curated bundles that pair them.</p></div>
+            <Link className="underlined-link" to="/shop?edit=curated">See the whole edit <span>↗</span></Link>
           </div>
-          <ProductGrid items={products.slice(0, 4)} favorites={favorites} toggleFavorite={toggleFavorite} />
+          {bundles.length > 0
+            ? <CatalogueGrid items={mixCatalogue(products.slice(0, 8), bundles.slice(0, 2))} favorites={favorites} toggleFavorite={toggleFavorite} />
+            : <ProductGrid items={products.slice(0, 4)} favorites={favorites} toggleFavorite={toggleFavorite} />}
         </div>
       </section>
 
@@ -155,27 +161,68 @@ export function HomePage({ favorites, toggleFavorite }: PageProps) {
   );
 }
 
+type ShopSort = 'feat' | 'low' | 'high' | 'rate';
+
 export function ShopPage({ favorites, toggleFavorite }: PageProps) {
   const { products, loading } = useProductCatalog();
+  const { bundles } = useBundleCatalog();
   const [searchParams, setSearchParams] = useSearchParams();
-  const selected = searchParams.get('category') ?? 'All';
-  const filters = ['All', ...categories.map((category) => category.name)];
-  const shownProducts = selected === 'All' ? products : products.filter((product) => product.category === selected);
+  const [sort, setSort] = useState<ShopSort>('feat');
+  const selected = searchParams.get('edit') === 'curated' ? 'Bundles' : (searchParams.get('category') ?? 'All');
+  const filters = ['All', ...categories.map((category) => category.name), 'Bundles'];
 
-  function selectCategory(category: string) {
-    if (category === 'All') setSearchParams({});
-    else setSearchParams({ category });
+  function selectFilter(filter: string) {
+    const next = new URLSearchParams();
+    if (filter === 'All') void next;
+    else if (filter === 'Bundles') next.set('edit', 'curated');
+    else next.set('category', filter);
+    setSearchParams(next);
   }
+
+  const shownProducts = selected === 'All' || selected === 'Bundles'
+    ? products
+    : products.filter((product) => product.category === selected);
+  const sortedProducts = [...shownProducts];
+  if (sort === 'low') sortedProducts.sort((a, b) => a.price - b.price);
+  else if (sort === 'high') sortedProducts.sort((a, b) => b.price - a.price);
+  else if (sort === 'rate') sortedProducts.sort((a, b) => b.rating - a.rating);
+
+  const sortedBundles = [...bundles];
+  if (sort === 'low') sortedBundles.sort((a, b) => a.price - b.price);
+  else if (sort === 'high') sortedBundles.sort((a, b) => b.price - a.price);
+  else if (sort === 'rate') sortedBundles.sort((a, b) => b.mrp - a.mrp);
+
+  const relevantBundles = selected === 'All'
+    ? sortedBundles
+    : selected === 'Bundles'
+      ? sortedBundles
+      : sortedBundles.filter((bundle) =>
+          bundle.productIds.some((id) => products.find((product) => product.id === id)?.category === selected),
+        ).slice(0, 1);
 
   return (
     <>
       <PageBanner eyebrow="The beauty house edit" title="The Collection" copy="Authentic beauty, thoughtful formulas and a few little luxuries. Picked for the way we live, here in Lucknow." />
       <section className="section">
         <div className="page-container">
-          <div className="shop-toolbar"><div className="filter-list" aria-label="Filter by category">{filters.map((category) => <button type="button" key={category} aria-pressed={selected === category} className={selected === category ? 'filter-chip selected' : 'filter-chip'} onClick={() => selectCategory(category)}>{category}</button>)}</div><span>{shownProducts.length} considered essentials</span></div>
-          {loading
-            ? <Loader label="Gathering the collection…" />
-            : <ProductGrid items={shownProducts} favorites={favorites} toggleFavorite={toggleFavorite} />}
+          <div className="shop-toolbar">
+            <div className="filter-list" aria-label="Filter the collection">{filters.map((filter, index) => <button type="button" key={`${filter}-${index}`} aria-pressed={selected === filter} className={selected === filter ? 'filter-chip selected' : 'filter-chip'} onClick={() => selectFilter(filter)}>{filter}</button>)}</div>
+            <span className="shop-count">{selected === 'Bundles' ? `${bundles.length} curated bundles` : `${shownProducts.length} ${shownProducts.length === 1 ? 'considered essential' : 'considered essentials'}`}</span>
+            <label className="shop-sort">Sort
+              <select value={sort} onChange={(event) => setSort(event.currentTarget.value as ShopSort)}>
+                <option value="feat">Featured</option>
+                <option value="low">Price: low to high</option>
+                <option value="high">Price: high to low</option>
+                <option value="rate">Top rated</option>
+              </select>
+            </label>
+          </div>
+          {selected === 'Bundles'
+            ? <div className="product-grid is-bundles">{sortedBundles.map((bundle) => <BundleCard key={bundle.id} bundle={bundle} />)}</div>
+            : loading
+              ? <Loader label="Gathering the collection…" />
+              : <CatalogueGrid items={mixCatalogue(sortedProducts, relevantBundles)} favorites={favorites} toggleFavorite={toggleFavorite} />}
+          {selected !== 'Bundles' && sortedProducts.length === 0 && <p className="empty-results">No products in this edit just yet. Try another view.</p>}
         </div>
       </section>
     </>

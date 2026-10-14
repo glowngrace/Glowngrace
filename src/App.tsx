@@ -3,6 +3,7 @@ import { BrowserRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { CartProvider } from './components/Cart';
 import { LoadingProvider } from './components/LoadingProvider';
 import { ProductCatalogProvider } from './components/ProductCatalog';
+import { BundleCatalogProvider } from './components/BundleCatalog';
 import { PageGate, StorefrontPagesProvider } from './components/StorefrontPages';
 import { Footer, Header } from './components/Layout';
 import {
@@ -24,6 +25,7 @@ import {
   WishlistPage,
 } from './pages/PortalPages';
 import { CheckoutPage, OrderConfirmationPage } from './pages/CheckoutPage';
+import { BundlePage } from './pages/BundlePage';
 import { PartnerDetailPage } from './pages/PartnerDetailPage';
 import { SuperAdminPasswordPage } from './pages/admin/SuperAdminPasswordPage';
 
@@ -64,6 +66,7 @@ function AppRoutes() {
           <Route path="/" element={<PageGate path="/"><HomePage {...pageProps} /></PageGate>} />
           <Route path="/shop" element={<PageGate path="/shop"><ShopPage {...pageProps} /></PageGate>} />
           <Route path="/product/:productId" element={<ProductPage {...pageProps} />} />
+          <Route path="/bundle/:bundleId" element={<BundlePage />} />
           <Route path="/checkout" element={<CheckoutPage />} />
           <Route path="/order-confirmation" element={<OrderConfirmationPage />} />
           <Route path="/partners" element={<PageGate path="/partners"><PartnersPage /></PageGate>} />
@@ -98,7 +101,11 @@ export default function App() {
     <BrowserRouter>
       <LoadingProvider>
         <StorefrontPagesProvider>
-          <ProductCatalogProvider><CartProvider><AppRoutes /></CartProvider></ProductCatalogProvider>
+          <ProductCatalogProvider>
+            <BundleCatalogProvider>
+              <CartProvider><AppRoutes /></CartProvider>
+            </BundleCatalogProvider>
+          </ProductCatalogProvider>
         </StorefrontPagesProvider>
       </LoadingProvider>
     </BrowserRouter>

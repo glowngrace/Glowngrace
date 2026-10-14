@@ -42,6 +42,7 @@ app.all('/api/contact', respond(handlers.contact));
 app.all('/api/newsletter', respond(handlers.newsletter));
 app.all('/api/checkout', respond(handlers.checkout));
 app.all('/api/products', respond(handlers.products));
+app.all('/api/bundles', respond(handlers.bundles));
 app.get('/api/products/:productId/images/:imageIndex', async (request, response) => {
   const result = await handlers.productImage(Number(request.params.productId), Number(request.params.imageIndex));
   if (!result.data || !result.mimeType) return response.status(result.status).end();

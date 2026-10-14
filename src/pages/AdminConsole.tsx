@@ -8,7 +8,7 @@ import {
   sessionEndedEvent,
 } from '../lib/admin-api';
 import { isConsoleRole } from '../auth/roles';
-import { productImageUrl, type Product } from '../data/catalog';
+import { productImageUrl, type Bundle, type Product } from '../data/catalog';
 import { Spinner } from '../components/Loader';
 import {
   jobAreas,
@@ -38,6 +38,8 @@ import {
   Toggle,
 } from './admin/AdminUi';
 import { AdminStoreProvider, useAdminStore, type CollectionKey, type ReviewRecord, type JobRecord } from './admin/AdminStore';
+import { BundleFormPage } from './admin/BundleFormPage';
+import { BundleImport } from './admin/BundleImport';
 import { BulkUpload } from './admin/BulkUpload';
 import { DashboardPage } from './admin/DashboardPage';
 import { ProductFormPage } from './admin/ProductFormPage';
@@ -47,18 +49,20 @@ type NavItem = { id: AdminSection; label: string; icon: IconName; count?: number
 
 type EditState =
   | { kind: 'product'; id: number }
+  | { kind: 'bundle'; id: string }
   | { kind: 'job'; id: string }
   | { kind: 'candidate'; id: string }
   | { kind: 'partner'; id: string }
   | { kind: 'customer'; id: string }
   | { kind: 'review'; id: string }
-  | { kind: 'remove'; collection: CollectionKey | 'products' | 'orders'; id: string; label: string }
+  | { kind: 'remove'; collection: CollectionKey | 'products' | 'bundles' | 'orders'; id: string; label: string }
   | null;
 
 const primaryNav: NavItem[] = [
   { id: 'dashboard', label: 'Dashboard', icon: 'dash' },
   { id: 'orders', label: 'Orders', icon: 'cart' },
   { id: 'products', label: 'Products', icon: 'box' },
+  { id: 'bundles', label: 'Bundles', icon: 'gift' },
   { id: 'jobs', label: 'Job vacancies', icon: 'case' },
   { id: 'candidates', label: 'Candidates', icon: 'users' },
   { id: 'partners', label: 'Partner salons', icon: 'shop' },
@@ -68,6 +72,7 @@ const primaryNav: NavItem[] = [
 
 const createNav: NavItem[] = [
   { id: 'add-product', label: 'Add product', icon: 'plus' },
+  { id: 'add-bundle', label: 'Curate a bundle', icon: 'gift' },
   { id: 'add-job', label: 'Post a vacancy', icon: 'plus' },
   { id: 'add-review', label: 'Add a review', icon: 'plus' },
 ];
@@ -80,8 +85,11 @@ const sectionLabels: Record<AdminSection, string> = {
   dashboard: 'Dashboard',
   orders: 'Orders',
   products: 'Products',
+  bundles: 'Bundles',
   'add-product': 'Add product',
   'edit-product': 'Edit product',
+  'add-bundle': 'Curate a bundle',
+  'edit-bundle': 'Edit bundle',
   jobs: 'Job vacancies',
   'add-job': 'Post a vacancy',
   candidates: 'Candidates',
@@ -140,6 +148,11 @@ function AdminConsole() {
   const {
     account: signedIn,
     products,
+    bundles,
+    canManageBundles,
+    saveBundle,
+    setBundlePublished,
+    removeBundle,
     orders,
     jobs,
     candidates,
@@ -252,12 +265,13 @@ function AdminConsole() {
     ...item,
     count: item.id === 'orders' ? orders.length
       : item.id === 'products' ? products.length
-        : item.id === 'jobs' ? jobs.filter((job) => job.status === 'Open').length
-          : item.id === 'candidates' ? candidates.length
-            : item.id === 'partners' ? partners.length
-              : item.id === 'customers' ? customers.length
-                : item.id === 'reviews' ? reviews.length
-                  : undefined,
+        : item.id === 'bundles' ? bundles.length
+          : item.id === 'jobs' ? jobs.filter((job) => job.status === 'Open').length
+            : item.id === 'candidates' ? candidates.length
+              : item.id === 'partners' ? partners.length
+                : item.id === 'customers' ? customers.length
+                  : item.id === 'reviews' ? reviews.length
+                    : undefined,
   }));
 
   function renderOrderDetail(orderId: string) {
@@ -597,6 +611,84 @@ function AdminConsole() {
       );
     }
 
+    if (section === 'bundles') {
+      const membersOf = (bundle: Bundle) => bundle.productIds
+        .map((id) => products.find((product) => product.id === id))
+        .filter((product): product is Product => Boolean(product));
+      const matched = bundles.filter((bundle) => matches(`${bundle.id} ${bundle.name} ${bundle.tag ?? ''}`));
+      const statusOf = (bundle: Bundle) => (bundle.published ? 'Active' : 'Hidden');
+      return (
+        <>
+          <PageHead
+            crumb="Bundles"
+            title="Bundles"
+            sub={`${bundles.length} curated bundles · sold at their own bundle price.`}
+            actions={
+              <>
+                {canManageBundles && <BundleImport />}
+                {canManageBundles && <button className="admin-btn admin-btn-dark" type="button" onClick={() => { setEditing(null); go('add-bundle'); }}><Icon name="gift" />Curate a bundle</button>}
+              </>
+            }
+          />
+          {!canManageBundles && (
+            <p className="admin-note" role="status">Your role can view bundles. Only {store.bundleRoles.join(', ')} can create or change them.</p>
+          )}
+          <FilterBar
+            options={['All', 'Active', 'Hidden']}
+            value={filter}
+            onChange={setFilter}
+            search={search}
+            onSearch={setSearch}
+            placeholder="Search a bundle"
+          />
+          <Panel>
+            {matched.length === 0
+              ? <Empty message="No bundles match this filter." action={<button className="admin-btn admin-btn-light" type="button" onClick={() => { setFilter('All'); setSearch(''); }}>Clear filters</button>} />
+              : <DataTable head={['Bundle', 'Members', 'Price', 'You save', 'Status', '']} minWidth={980}>
+                {matched.map((bundle) => {
+                  const members = membersOf(bundle);
+                  const save = bundle.mrp - bundle.price;
+                  return (
+                    <tr key={bundle.id}>
+                      <td>
+                        <span className="admin-product-cell">
+                          <span className="admin-bundle-thumbs">
+                            {members.slice(0, 3).map((product) => <img key={product.id} src={productImageUrl(product.image)} alt="" loading="lazy" />)}
+                          </span>
+                          <span><strong>{bundle.name}</strong><small>{bundle.id}{bundle.tag ? ` · ${bundle.tag}` : ''}</small></span>
+                        </span>
+                      </td>
+                      <td>
+                        <span className="admin-bundle-members">
+                          {members.slice(0, 3).map((product) => <span key={product.id}>{product.name}</span>)}
+                          {members.length > 3 && <small>+{members.length - 3} more</small>}
+                        </span>
+                      </td>
+                      <td><strong>{money(bundle.price)}</strong><small className="admin-cell-sub">MRP {money(bundle.mrp)}</small></td>
+                      <td><span className="admin-save-amount">{save > 0 ? money(save) : '—'}</span></td>
+                      <td><Pill label={statusOf(bundle)} /></td>
+                      <td className="admin-row-actions">
+                        <IconButton label={`Edit ${bundle.name}`} icon="pen" onClick={() => { setEditing({ kind: 'bundle', id: bundle.id }); go('edit-bundle'); }} />
+                        {canManageBundles && (
+                          <IconButton
+                            label={`${bundle.published ? 'Hide' : 'Show'} ${bundle.name}`}
+                            icon={bundle.published ? 'hide' : 'check'}
+                            onClick={() => void setBundlePublished(bundle, !bundle.published)}
+                          />
+                        )}
+                        {canManageBundles && (
+                          <IconButton label={`Remove ${bundle.name}`} icon="trash" danger onClick={() => setEditing({ kind: 'remove', collection: 'bundles', id: bundle.id, label: bundle.name })} />
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </DataTable>}
+          </Panel>
+        </>
+      );
+    }
+
     if (section === 'add-product' || section === 'edit-product') {
       const editingProduct = editing?.kind === 'product' ? products.find((product) => product.id === editing.id) : undefined;
       if (section === 'edit-product' && !editingProduct) {
@@ -615,6 +707,30 @@ function AdminConsole() {
             await saveProduct(payload, editingProduct?.id);
             setEditing(null);
             go('products');
+            return true;
+          }}
+        />
+      );
+    }
+
+    if (section === 'add-bundle' || section === 'edit-bundle') {
+      if (!canManageBundles) {
+        return <div className="admin-card"><p className="admin-muted">Only {store.bundleRoles.join(', ')} can create or change bundles.</p></div>;
+      }
+      const editingBundle = editing?.kind === 'bundle' ? bundles.find((bundle) => bundle.id === editing.id) : undefined;
+      if (section === 'edit-bundle' && !editingBundle) {
+        return <div className="admin-card"><p className="admin-muted">That bundle no longer exists.</p></div>;
+      }
+      return (
+        <BundleFormPage
+          key={editingBundle?.id ?? 'new'}
+          products={products}
+          editing={editingBundle}
+          onCancel={() => { setEditing(null); go('bundles'); }}
+          onSave={async (payload) => {
+            await saveBundle(payload, editingBundle?.id);
+            setEditing(null);
+            go('bundles');
             return true;
           }}
         />
@@ -922,9 +1038,12 @@ function AdminConsole() {
     );
   }
 
+  // The "Curate a bundle" actions belong to a catalogue role, so they only
+  // appear for people the server would let use them.
+  const visibleCreateNav = canManageBundles ? createNav : createNav.filter((item) => item.id !== 'add-bundle');
   const navGroups: Array<{ title?: string; items: NavItem[] }> = [
     { items: navWithCounts(primaryNav) },
-    { title: 'Create', items: navWithCounts(createNav) },
+    { title: 'Create', items: navWithCounts(visibleCreateNav) },
     { title: 'System', items: navWithCounts(systemNav) },
   ];
 
@@ -1031,7 +1150,7 @@ function AdminConsole() {
               </button>
               {quickOpen && (
                 <ul className="admin-quick-menu">
-                  {createNav.map((item) => (
+                  {visibleCreateNav.map((item) => (
                     <li key={item.id}>
                       <button type="button" onClick={() => go(item.id)}><Icon name={item.icon} />{item.label}</button>
                     </li>
@@ -1076,6 +1195,7 @@ function AdminConsole() {
                 const target = editing;
                 setEditing(null);
                 if (target.collection === 'products') void removeProduct(products.find((product) => String(product.id) === target.id) ?? { id: Number(target.id), name: target.label } as Product);
+                else if (target.collection === 'bundles') void removeBundle(bundles.find((bundle) => bundle.id === target.id) ?? { id: target.id, name: target.label } as Bundle);
                 else if (target.collection === 'orders') void removeOrder(target.id);
                 else void removeRecord(target.collection, target.id);
               }}

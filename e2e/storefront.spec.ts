@@ -19,7 +19,7 @@ test('home navigation and category filters lead to the right product edit', asyn
 test('product page, wishlist, and bag interactions work end to end', async ({ page }) => {
   await stubBundledCatalogue(page);
   await page.goto('/shop');
-  await page.getByRole('link', { name: 'View Glow Ritual Vitamin C Face Serum' }).click();
+  await page.getByRole('link', { name: 'Glow Ritual Vitamin C Face Serum', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Glow Ritual Vitamin C Face Serum' })).toBeVisible();
   await page.getByRole('button', { name: 'Add to bag · ₹849' }).click();
   const bag = page.getByRole('dialog', { name: /your bag/i });

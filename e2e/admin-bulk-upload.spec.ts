@@ -56,6 +56,7 @@ async function stubConsole(page: Page, bulk: (rows: Array<Record<string, string>
   const collections: Record<string, unknown> = {
     me: { user: owner },
     products: { products: state.products },
+    bundles: { bundles: [], roles: [] },
     orders: { orders: [] },
     jobs: { records: [] },
     candidates: { records: [] },

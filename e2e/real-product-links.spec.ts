@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 
 /**
  * Product deep links, against the database rather than a stub.
@@ -18,6 +18,13 @@ import { expect, test } from '@playwright/test';
  * would be wrong again by the next seed.
  */
 test.describe('deep links into real, seeded products', () => {
+  // Every request here is a real query over the shared local pool
+  // (`DATABASE_POOL_MAX=1`) while the rest of the suite hammers the same API in
+  // parallel, so a seeded page load is measured in whole seconds, not the
+  // framework default.
+  const heading = (page: Page, name: string) =>
+    expect(page.getByRole('heading', { name, exact: true }), 'the seeded product heading').toBeVisible({ timeout: 30_000 });
+
   test('a product id from the database opens that product', async ({ page, request }) => {
     const response = await request.get('/api/products');
     expect(response.ok()).toBe(true);
@@ -34,7 +41,7 @@ test.describe('deep links into real, seeded products', () => {
     // The heading is the assertion that matters: the right id resolved to the
     // right product. The document title is deliberately not asserted - a seeded
     // row has no `meta_title`, so the site default is the correct answer.
-    await expect(page.getByRole('heading', { name: product.name, exact: true })).toBeVisible();
+    await heading(page, product.name);
   });
 
   test('every seeded product opens, not just the first', async ({ page, request }) => {
@@ -50,7 +57,7 @@ test.describe('deep links into real, seeded products', () => {
 
     for (const product of body.products) {
       await page.goto(`/product/${product.id}`);
-      await expect(page.getByRole('heading', { name: product.name, exact: true })).toBeVisible();
+      await heading(page, product.name);
     }
   });
 

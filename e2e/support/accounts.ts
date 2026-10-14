@@ -99,16 +99,22 @@ export async function stubBundledCatalogue(page: Page) {
   await page.route('**/api/products', (route) => route.fulfill({
     json: { catalogueManaged: false, products: [] },
   }));
+  // The storefront also reads curated bundles. `bundlesManaged: false` is the
+  // same honest "never stocked" value as above, so the browser keeps the
+  // bundled sample edits and the assertions below answer to stable fixtures.
+  await page.route('**/api/bundles', (route) => route.fulfill({
+    json: { bundlesManaged: false, bundles: [] },
+  }));
 }
 
 /**
  * Answers every console read with an empty collection.
  *
- * The console loads thirteen endpoints before it will show a section, and one
+ * The console loads fourteen endpoints before it will show a section, and one
  * refused read is enough to leave it on the loader. The response key has to be
  * the one the console destructures, or it crashes on `undefined.filter`: the
- * product and order reads are named collections, while placements, candidates,
- * partners, customers and reviews all arrive as `records`.
+ * product, bundle and order reads are named collections, while placements,
+ * candidates, partners, customers and reviews all arrive as `records`.
  *
  * Tests that care about a collection register their own route afterwards to
  * override this one.
@@ -129,6 +135,7 @@ export async function stubEmptyConsoleReads(page: Page) {
     const path = route.request().url().replace(/^.*\/api\/admin\//, '').split('?')[0].replace(/\/$/, '');
     if (route.request().method() !== 'GET') return route.continue();
     if (path === 'me') return route.fulfill({ json: { user: consoleAccount } });
+    if (path === 'bundles') return route.fulfill({ json: { bundles: [], roles: [] } });
     if (path === 'users') return route.fulfill({ json: { users: [], roles: [] } });
     if (path === 'pages') return route.fulfill({ json: { pages: [] } });
     if (path === 'datasets' || path === 'demo-data') return route.fulfill({ json: { datasets: [] } });

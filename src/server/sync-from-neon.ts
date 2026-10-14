@@ -72,6 +72,7 @@ export const syncTables: SyncTable[] = [
   { name: 'site_pages', key: 'slug', marker: 'updated_at' },
   { name: 'products', key: 'id', marker: 'updated_at' },
   { name: 'product_images', key: 'id', marker: 'created_at', parent: true },
+  { name: 'product_bundles', key: 'id', marker: 'updated_at' },
   { name: 'orders', key: 'id', marker: 'created_at' },
   { name: 'order_items', key: 'id', marker: 'created_at', parent: true },
   { name: 'admin_users', key: 'id', marker: 'updated_at' },

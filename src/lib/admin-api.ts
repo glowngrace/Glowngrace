@@ -1,4 +1,4 @@
-import type { Product } from '../data/catalog';
+import type { Bundle, Product } from '../data/catalog';
 import type { StorefrontPage } from './api';
 import type { BulkDatasetKey } from './bulk-templates';
 import type { StoreSettings } from '../server/admin/settings';
@@ -74,6 +74,7 @@ export type AdminSummary = {
   partners: number;
   customers: number;
   reviews: number;
+  bundles: number;
   pages: string[];
   hiddenDatasets: string[];
 };
@@ -346,6 +347,18 @@ export const adminApi = {
   createProduct: (product: unknown) => post<{ product: Product; message: string }>('products', product),
   updateProduct: (id: number, product: unknown) => patch<{ product: Product; message: string }>(`products/${id}`, product),
   deleteProduct: (id: number) => remove<{ message: string }>(`products/${id}`),
+
+  /**
+   * Product bundles.
+   *
+   * The list is open to every console role; only a catalogue role may change
+   * one, which the server enforces and the console mirrors by hiding the
+   * controls. `roles` comes back so the interface never hard-codes the list.
+   */
+  bundles: () => get<{ bundles: Bundle[]; roles: string[] }>('bundles'),
+  createBundle: (bundle: unknown) => post<{ bundle: Bundle; message: string }>('bundles', bundle),
+  updateBundle: (id: string, bundle: unknown) => patch<{ bundle: Bundle; message: string }>(`bundles/${encodeURIComponent(id)}`, bundle),
+  deleteBundle: (id: string) => remove<{ message: string }>(`bundles/${encodeURIComponent(id)}`),
 
   orders: () => get<{ orders: AdminOrder[] }>('orders').then((result) => result.orders),
   updateOrder: (id: string, order: unknown) => patch<{ order: AdminOrder; message: string }>(`orders/${encodeURIComponent(id)}`, order),

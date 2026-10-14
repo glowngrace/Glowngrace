@@ -31,6 +31,7 @@ async function stubAdminReads(page: import('@playwright/test').Page) {
   const reads: Record<string, unknown> = {
     me: { user: e2eAdmin },
     products: { products: [] },
+    bundles: { bundles: [], roles: [] },
     orders: { orders: [] },
     jobs: { records: [] },
     candidates: { records: [] },

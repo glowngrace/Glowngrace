@@ -60,6 +60,20 @@ export const superAdminEmail = 'glowngracebiz@gmail.com';
  */
 export const retiredSuperAdminEmail = 'glownglancebiz@gmail.com';
 
+/**
+ * The roles trusted to build and change product bundles.
+ *
+ * Viewing bundles is open to the whole console; creating, editing, deleting and
+ * bulk-importing them is not. These are the roles whose remit covers the
+ * catalogue, so a content or placement account cannot quietly reshape what the
+ * shop sells together.
+ */
+export const bundleRoles = ['Super Admin', 'Store Administrator', 'Store Manager', 'Inventory Manager'] as const;
+
+export function canManageBundles(role: string | null | undefined) {
+  return typeof role === 'string' && (bundleRoles as readonly string[]).includes(role);
+}
+
 /** One line of help per role, so the form explains itself instead of a list. */
 export const roleDescriptions: Record<ConsoleRole | PortalRole, string> = {
   'Super Admin': 'Everything, including the owner account',

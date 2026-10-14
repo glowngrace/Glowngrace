@@ -29,6 +29,25 @@ export type Product = {
   itemDetails?: string;
 };
 
+/**
+ * A curated set of published products sold together at a bundle price.
+ *
+ * Members are stored as product ids rather than copied rows, so a price change
+ * on a member product flows through every bundle that names it. `mrp` is the sum
+ * of those member prices and is always derived, never stored.
+ */
+export type Bundle = {
+  id: string;
+  name: string;
+  description: string;
+  price: number;
+  mrp: number;
+  tag?: string;
+  productIds: number[];
+  published: boolean;
+  featured: boolean;
+};
+
 export const products: Product[] = [
   {
     id: 1,
@@ -129,6 +148,63 @@ export const products: Product[] = [
 export function productImageUrl(image: string) {
   return image.startsWith('/') ? image : `/images/${image}`;
 }
+
+/** The sum of the member products' prices — what the bundle would cost apart. */
+export function bundleMrp(productIds: number[], catalogue: Array<{ id: number; price: number }> = products) {
+  return productIds.reduce((sum, id) => sum + (catalogue.find((product) => product.id === id)?.price ?? 0), 0);
+}
+
+/**
+ * The sample bundles, shown while the store is empty and restored by the seed.
+ *
+ * `mrp` is derived rather than written down here, so the two can never disagree.
+ */
+const seedBundles: Array<Omit<Bundle, 'mrp'>> = [
+  {
+    id: 'BND-1',
+    name: 'The Bridal Glow Edit',
+    description: 'Everything for the wedding season — long-wear matte lip, a champagne glow and our signature rose parfum.',
+    price: 1799,
+    tag: 'Bestseller',
+    productIds: [1, 6, 7],
+    published: true,
+    featured: true,
+  },
+  {
+    id: 'BND-2',
+    name: 'Everyday Radiance Ritual',
+    description: 'Brightening vitamin C by night, hyaluronic hydration by day and an everyday nude to finish.',
+    price: 1749,
+    tag: 'New',
+    productIds: [4, 5, 3],
+    published: true,
+    featured: false,
+  },
+  {
+    id: 'BND-3',
+    name: 'Matte Lip Trio',
+    description: 'Rosewood, Berry Noir and Nude Silk — three long-wear mattes for day, evening and everything between.',
+    price: 1349,
+    productIds: [1, 2, 3],
+    published: true,
+    featured: false,
+  },
+  {
+    id: 'BND-4',
+    name: 'Fragrance Discovery Duo',
+    description: 'Two signature florals — soft Damask rose and our Radiance Ritual — in a ribbon-tied gift box.',
+    price: 1849,
+    tag: 'Gift ready',
+    productIds: [7, 8],
+    published: true,
+    featured: false,
+  },
+];
+
+export const bundles: Bundle[] = seedBundles.map((bundle) => ({
+  ...bundle,
+  mrp: bundleMrp(bundle.productIds),
+}));
 
 export const categories = [
   { name: 'Makeup', image: 'cat_makeup.jpg', note: 'Colour, confidence & a little radiance' },

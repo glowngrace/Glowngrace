@@ -52,6 +52,19 @@ CREATE TABLE IF NOT EXISTS product_images (
   UNIQUE (product_id, position)
 );
 
+CREATE TABLE IF NOT EXISTS product_bundles (
+  id VARCHAR(24) PRIMARY KEY,
+  name VARCHAR(180) NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  price INTEGER NOT NULL CHECK (price > 0),
+  tag VARCHAR(40),
+  product_ids TEXT NOT NULL DEFAULT '',
+  published BOOLEAN NOT NULL DEFAULT TRUE,
+  featured BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS orders (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   order_number VARCHAR(20) NOT NULL UNIQUE,
@@ -80,7 +93,8 @@ CREATE INDEX IF NOT EXISTS orders_email_created_at_idx ON orders (email, created
 CREATE TABLE IF NOT EXISTS order_items (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   order_id UUID NOT NULL REFERENCES orders (id) ON DELETE CASCADE,
-  product_id INTEGER NOT NULL,
+  product_id INTEGER,
+  bundle_id VARCHAR(24),
   product_name VARCHAR(180) NOT NULL,
   unit_price_paise BIGINT NOT NULL CHECK (unit_price_paise > 0),
   quantity INTEGER NOT NULL CHECK (quantity BETWEEN 1 AND 99),
