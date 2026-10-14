@@ -4,6 +4,8 @@ import { useCart } from '../components/CartContext';
 import { deliveryOptions, checkoutTaxRate, formatRupees } from '../data/checkout';
 import { productImageUrl } from '../data/catalog';
 import { useProductCatalog } from '../components/ProductCatalogContext';
+import { useBundleCatalog } from '../components/BundleCatalogContext';
+import { bundleMembers } from '../lib/bundle-grid';
 import { placeCheckoutOrder } from '../lib/api';
 
 type OrderConfirmation = {
@@ -34,28 +36,41 @@ function CheckoutSummary({
   itemCount: number;
   total: number;
 }) {
-  const cart = useCart();
+  const { lines } = useCart();
   const { products } = useProductCatalog();
-  const orderLines = products.filter((product) => cart.lines.some((line) => line.productId === product.id));
+  const { bundles } = useBundleCatalog();
   return (
     <aside className="checkout-summary">
       <span className="eyebrow">A little beauty, on its way</span>
       <h2>Your order</h2>
       <div className="checkout-summary-items">
-        {orderLines.map((product) => {
-          const line = cart.lines.find((item) => item.productId === product.id);
+        {lines.map((line) => {
+          if ('bundleId' in line) {
+            const bundle = bundles.find((item) => item.id === line.bundleId);
+            if (!bundle) return null;
+            const members = bundleMembers(bundle, products);
+            return (
+              <div className="checkout-summary-item" key={bundle.id}>
+                {members[0] ? <img src={productImageUrl(members[0].image)} alt="" /> : <span className="checkout-summary-thumb" />}
+                <span><strong>{bundle.name}</strong><small>Bundle · {members.length} products · Qty {line.quantity}</small></span>
+                <b>{formatRupees(bundle.price * line.quantity)}</b>
+              </div>
+            );
+          }
+          const product = products.find((item) => item.id === line.productId);
+          if (!product) return null;
           return (
             <div className="checkout-summary-item" key={product.id}>
               <img src={productImageUrl(product.image)} alt="" />
-              <span><strong>{product.name}</strong><small>Qty {line?.quantity}</small></span>
-              <b>{formatRupees(product.price * (line?.quantity ?? 0))}</b>
+              <span><strong>{product.name}</strong><small>Qty {line.quantity}</small></span>
+              <b>{formatRupees(product.price * line.quantity)}</b>
             </div>
           );
         })}
       </div>
       <div className="checkout-total-row"><span>Subtotal <small>({itemCount} {itemCount === 1 ? 'item' : 'items'})</small></span><strong>{formatRupees(subtotal)}</strong></div>
       <div className="checkout-total-row"><span>Delivery</span><strong>{shipping === 0 ? 'Complimentary' : formatRupees(shipping)}</strong></div>
-      <div className="checkout-total-row"><span>GST <small>(5%)</small></span><strong>{formatRupees(tax)}</strong></div>
+      <div className="checkout-total-row"><span>GST</span><strong>{formatRupees(tax)}</strong></div>
       <div className="checkout-total-row checkout-total-final"><span>Total</span><strong>{formatRupees(total)}</strong></div>
       <p className="checkout-secure-note"><span aria-hidden="true">✦</span> No payment details required for cash on delivery.</p>
     </aside>
@@ -65,8 +80,13 @@ function CheckoutSummary({
 export function CheckoutPage() {
   const { lines, clear } = useCart();
   const { products } = useProductCatalog();
+  const { bundles } = useBundleCatalog();
   const navigate = useNavigate();
   const subtotal = lines.reduce((sum, line) => {
+    if ('bundleId' in line) {
+      const bundle = bundles.find((item) => item.id === line.bundleId);
+      return sum + (bundle?.price ?? 0) * line.quantity;
+    }
     const product = products.find((item) => item.id === line.productId);
     return sum + (product?.price ?? 0) * line.quantity;
   }, 0);
@@ -99,7 +119,7 @@ export function CheckoutPage() {
         landmark: String(values.get('landmark') ?? ''),
         deliveryMethod: delivery,
         paymentMethod: 'cod',
-        items: lines.map(({ productId, quantity }) => ({ productId, quantity })),
+        items: lines.map((line) => ('bundleId' in line ? { bundleId: line.bundleId, quantity: line.quantity } : { productId: line.productId, quantity: line.quantity })),
       });
       if (!result.orderNumber || result.total === undefined) {
         throw new Error('Your order response could not be verified. Your bag is safe—please try again.');

@@ -75,6 +75,12 @@ export const tables: TableDefinition[] = [
     timestamps: ['created_at'],
   },
   {
+    name: 'product_bundles',
+    columns: ['id', 'name', 'description', 'price', 'tag', 'product_ids', 'published', 'featured', 'created_at', 'updated_at'],
+    unique: [['id']],
+    timestamps: ['created_at', 'updated_at'],
+  },
+  {
     name: 'orders',
     columns: [
       'id', 'order_number', 'customer_name', 'email', 'phone', 'street_address',
@@ -88,7 +94,7 @@ export const tables: TableDefinition[] = [
   },
   {
     name: 'order_items',
-    columns: ['id', 'order_id', 'product_id', 'product_name', 'unit_price_paise', 'quantity', 'created_at'],
+    columns: ['id', 'order_id', 'product_id', 'bundle_id', 'product_name', 'unit_price_paise', 'quantity', 'created_at'],
     generated: { id: 'uuid' },
     timestamps: ['created_at'],
   },

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
-import { products, type Product } from '../data/catalog.js';
+import { bundles as seedBundles, bundleMrp, products, type Bundle, type Product } from '../data/catalog.js';
 import { checkoutTaxRate, deliveryOptions } from '../data/checkout.js';
 import { sanitizeRichText } from '../lib/rich-text.js';
 import { baseSelect, detailSelect, publishingSelect } from './catalogue.js';
@@ -11,8 +11,24 @@ export type Database = {
 };
 export type ApiResult = {
   status: number;
-  body: { message?: string; error?: string; orderNumber?: string; total?: number; products?: Product[]; product?: Product; catalogueManaged?: boolean };
+  body: { message?: string; error?: string; orderNumber?: string; total?: number; products?: Product[]; product?: Product; bundles?: Bundle[]; bundlesManaged?: boolean; catalogueManaged?: boolean };
 };
+
+/**
+ * A checkout line names either a catalogue product or a curated bundle. The
+ * bundle is its own line so the bundle price — not the sum of its members — is
+ * what the customer is charged, and the line keeps the discount.
+ */
+const checkoutItemSchema = z.union([
+  z.object({
+    productId: z.coerce.number().int().positive(),
+    quantity: z.number().int().min(1).max(99),
+  }),
+  z.object({
+    bundleId: z.string().trim().min(1).max(24),
+    quantity: z.number().int().min(1).max(99),
+  }),
+]);
 
 const checkoutSchema = z.object({
   firstName: z.string().trim().min(1).max(80),
@@ -27,10 +43,7 @@ const checkoutSchema = z.object({
   landmark: z.string().trim().max(120).optional().default(''),
   deliveryMethod: z.enum(['standard', 'express', 'same_day']),
   paymentMethod: z.literal('cod'),
-  items: z.array(z.object({
-    productId: z.number().int().positive(),
-    quantity: z.number().int().min(1).max(99),
-  })).min(1).max(50),
+  items: z.array(checkoutItemSchema).min(1).max(50),
 });
 
 const contactSchema = z.object({
@@ -148,6 +161,39 @@ export function mapProduct(row: Record<string, unknown>): Product {
   };
 }
 
+/** Member product ids are stored as one comma-separated string, like product tags. */
+export function joinBundleProductIds(ids: number[]) {
+  return ids.join(',');
+}
+
+export function splitBundleProductIds(value: unknown): number[] {
+  return String(value ?? '')
+    .split(',')
+    .map((part) => Number(part.trim()))
+    .filter((id) => Number.isSafeInteger(id) && id > 0);
+}
+
+/**
+ * Turns a stored bundle row into the storefront shape.
+ *
+ * `mrp` is derived from the member prices handed in rather than stored, so a
+ * member product's price change is reflected the next time the bundle is read.
+ */
+export function mapBundle(row: Record<string, unknown>, catalogue: Array<{ id: number; price: number }>): Bundle {
+  const productIds = splitBundleProductIds(row.product_ids);
+  return {
+    id: String(row.id),
+    name: String(row.name),
+    description: row.description === null || row.description === undefined ? '' : String(row.description),
+    price: Number(row.price),
+    mrp: bundleMrp(productIds, catalogue),
+    tag: row.tag ? String(row.tag) : undefined,
+    productIds,
+    published: row.published === undefined ? true : Boolean(row.published),
+    featured: Boolean(row.featured),
+  };
+}
+
 export type ParsedProductImage = {
   filename: string;
   mimeType: 'image/jpeg' | 'image/png' | 'image/webp';
@@ -240,6 +286,8 @@ export function createHandlers(database: Database) {
                 '[]'::json
               ) AS images`;
 
+  const bundleSelect = 'id, name, description, price, tag, product_ids, published, featured';
+
   async function listProducts(): Promise<ApiResult> {
     const result = await database.query(
       `SELECT ${baseSelect()},
@@ -257,6 +305,22 @@ export function createHandlers(database: Database) {
       status: 200,
       body: { products: result.rows.map(mapProduct), catalogueManaged: managed.rows[0]?.managed === true },
     };
+  }
+
+  async function listBundles(): Promise<ApiResult> {
+    const result = await database.query(
+      `SELECT ${bundleSelect} FROM product_bundles WHERE published ORDER BY created_at, id`,
+      [],
+    );
+    // Before the first bundle row exists the storefront shows the bundled sample
+    // set, the same fallback the catalogue uses for products.
+    const managed = await database.query('SELECT count(*) > 0 AS managed FROM product_bundles', []);
+    if (managed.rows[0]?.managed !== true) {
+      return { status: 200, body: { bundles: seedBundles.filter((bundle) => bundle.published), bundlesManaged: false } };
+    }
+    const catalogue = await database.query('SELECT id, price FROM products', []);
+    const prices = catalogue.rows.map((row) => ({ id: Number(row.id), price: Number(row.price) }));
+    return { status: 200, body: { bundles: result.rows.map((row) => mapBundle(row, prices)), bundlesManaged: true } };
   }
 
   /**
@@ -367,6 +431,18 @@ export function createHandlers(database: Database) {
         return { status: 500, body: { error: 'server_error', message: 'The product could not be saved. Please try again shortly.' } };
       }
     },
+    async bundles(method: string | undefined): Promise<ApiResult> {
+      if (method !== 'GET') return { status: 405, body: { error: 'method_not_allowed' } };
+      try {
+        return await listBundles();
+      } catch (error) {
+        console.error('Unable to load catalogue bundles', error);
+        return {
+          status: 500,
+          body: { error: 'server_error', message: 'The bundles could not be loaded. Please try again shortly.' },
+        };
+      }
+    },
     async productImage(productId: number, imageIndex: number): Promise<ProductImageResult> {
       if (!Number.isSafeInteger(productId) || productId < 1 || !Number.isSafeInteger(imageIndex) || imageIndex < 0 || imageIndex > 9) {
         return { status: 404 };
@@ -425,50 +501,69 @@ export function createHandlers(database: Database) {
       }
 
       const requestedItems = parsed.data.items;
-      if (new Set(requestedItems.map((item) => item.productId)).size !== requestedItems.length) {
+      const lineKey = (item: (typeof requestedItems)[number]) => ('productId' in item ? `p:${item.productId}` : `b:${item.bundleId}`);
+      if (new Set(requestedItems.map(lineKey)).size !== requestedItems.length) {
         return { status: 400, body: { error: 'duplicate_items', message: 'Please remove duplicate products from your bag and try again.' } };
       }
-      const staticOrderItems = requestedItems.map((item) => {
-        const product = products.find((candidate) => candidate.id === item.productId);
-        return product ? {
-          productId: product.id,
-          name: product.name,
-          unitPricePaise: product.price * 100,
-          quantity: item.quantity,
-        } : null;
-      });
-      const missingProductIds = requestedItems
-        .filter((_item, index) => staticOrderItems[index] === null)
-        .map((item) => item.productId);
-      let savedProducts = new Map<number, { name: string; price: number }>();
+
+      // Products and bundles from the bundled sample sets resolve without a query;
+      // anything else is looked up in the database, which is what lets an
+      // operator's own catalogue and bundles be bought from.
+      const resolvedProducts = new Map<number, { name: string; price: number }>(
+        products.map((product) => [product.id, { name: product.name, price: product.price }]),
+      );
+      const resolvedBundles = new Map<string, { name: string; price: number }>(
+        seedBundles.filter((bundle) => bundle.published).map((bundle) => [bundle.id, { name: bundle.name, price: bundle.price }]),
+      );
+
+      const productIds = new Set<number>();
+      const bundleIds = new Set<string>();
+      for (const item of requestedItems) {
+        if ('productId' in item) productIds.add(item.productId);
+        else bundleIds.add(item.bundleId);
+      }
+
+      const missingProductIds = [...productIds].filter((productId) => !resolvedProducts.has(productId));
       if (missingProductIds.length) {
         try {
           const result = await database.query(
             'SELECT id, name, price FROM products WHERE id = ANY($1::integer[])',
             [missingProductIds],
           );
-          savedProducts = new Map(result.rows.map((row) => [Number(row.id), { name: String(row.name), price: Number(row.price) }]));
+          for (const row of result.rows) resolvedProducts.set(Number(row.id), { name: String(row.name), price: Number(row.price) });
         } catch (error) {
           console.error('Unable to verify catalogue products for checkout', error);
           return { status: 500, body: { error: 'server_error', message: 'We could not verify your bag right now. Please try again shortly.' } };
         }
       }
-      const orderItems = requestedItems.map((item, index) => {
-        const staticItem = staticOrderItems[index];
-        if (staticItem) return staticItem;
-        const product = savedProducts.get(item.productId);
-        return product ? {
-          productId: item.productId,
-          name: product.name,
-          unitPricePaise: product.price * 100,
-          quantity: item.quantity,
-        } : null;
-      });
-      if (orderItems.some((item) => !item)) {
+      const missingBundleIds = [...bundleIds].filter((bundleId) => !resolvedBundles.has(bundleId));
+      if (missingBundleIds.length) {
+        try {
+          const result = await database.query(
+            'SELECT id, name, price FROM product_bundles WHERE id = ANY($1::text[]) AND published',
+            [missingBundleIds],
+          );
+          for (const row of result.rows) resolvedBundles.set(String(row.id), { name: String(row.name), price: Number(row.price) });
+        } catch (error) {
+          console.error('Unable to verify catalogue bundles for checkout', error);
+          return { status: 500, body: { error: 'server_error', message: 'We could not verify your bag right now. Please try again shortly.' } };
+        }
+      }
+      if ([...productIds].some((productId) => !resolvedProducts.has(productId))) {
         return { status: 400, body: { error: 'unknown_product', message: 'One of the products in your bag is no longer available.' } };
       }
+      if ([...bundleIds].some((bundleId) => !resolvedBundles.has(bundleId))) {
+        return { status: 400, body: { error: 'unknown_bundle', message: 'One of the bundles in your bag is no longer available.' } };
+      }
 
-      const items = orderItems.filter((item): item is NonNullable<typeof item> => item !== null);
+      const items = requestedItems.map((item) => {
+        if ('productId' in item) {
+          const product = resolvedProducts.get(item.productId)!;
+          return { productId: item.productId as number | null, bundleId: null as string | null, name: product.name, unitPricePaise: product.price * 100, quantity: item.quantity };
+        }
+        const bundle = resolvedBundles.get(item.bundleId)!;
+        return { productId: null as number | null, bundleId: item.bundleId as string | null, name: bundle.name, unitPricePaise: bundle.price * 100, quantity: item.quantity };
+      });
       const deliveryFee = deliveryOptions.find((option) => option.id === parsed.data.deliveryMethod)?.fee;
       if (deliveryFee === undefined) {
         return { status: 400, body: { error: 'invalid_delivery', message: 'Please choose an available delivery method.' } };
@@ -516,9 +611,9 @@ export function createHandlers(database: Database) {
         if (!orderId) throw new Error('The checkout order could not be confirmed after saving.');
         for (const item of items) {
           await database.query(
-            `INSERT INTO order_items (order_id, product_id, product_name, unit_price_paise, quantity)
-             VALUES ($1, $2, $3, $4, $5)`,
-            [orderId, item.productId, item.name, item.unitPricePaise, item.quantity],
+            `INSERT INTO order_items (order_id, product_id, bundle_id, product_name, unit_price_paise, quantity)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [orderId, item.productId, item.bundleId, item.name, item.unitPricePaise, item.quantity],
           );
         }
         const counted = await database.query(

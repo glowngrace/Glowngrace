@@ -60,6 +60,7 @@ async function stubConsoleFor(page: Page, account: typeof ownerAccount) {
   const reads: Record<string, unknown> = {
     me: { user: account },
     products: { products: [] },
+    bundles: { bundles: [], roles: [] },
     orders: { orders: [] },
     jobs: { records: [] },
     candidates: { records: [] },

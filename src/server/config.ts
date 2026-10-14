@@ -27,6 +27,7 @@ export const requiredTables = [
   'newsletter_subscribers',
   'products',
   'product_images',
+  'product_bundles',
   'orders',
   'order_items',
 ] as const;

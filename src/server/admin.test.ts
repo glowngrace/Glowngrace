@@ -2290,3 +2290,197 @@ describe('the two owner password endpoints', () => {
     expect(query.mock.calls.some(([text]) => String(text).includes('SET password_hash'))).toBe(false);
   });
 });
+
+describe('product bundle admin routes', () => {
+  /** The member catalogue the derived `mrp` is summed from. */
+  const members = [
+    { id: 1, price: 1000 },
+    { id: 2, price: 500 },
+  ];
+
+  /**
+   * A console session with a chosen role and an in-memory `product_bundles`
+   * table, so a test can watch a bundle move through create, read, update,
+   * delete and bulk import the same way a real one would. `mrp` is derived on
+   * read from the member prices rather than stored, which is the behaviour the
+   * stores and the storefront both rely on.
+   */
+  function bundleConsole(role = 'Store Administrator') {
+    const rows: Array<Record<string, unknown>> = [];
+    const { database } = makeDatabase(async (text, values = []) => {
+      if (text.includes('FROM admin_sessions')) {
+        return { rows: [{ ...activeAdminRow, role }], rowCount: 1 };
+      }
+      if (text.includes('SELECT id, price FROM products')) return { rows: members, rowCount: members.length };
+      if (text.includes('DELETE FROM product_bundles')) {
+        const index = rows.findIndex((row) => row.id === values[0]);
+        const removed = index >= 0 ? rows.splice(index, 1) : [];
+        return { rows: removed.map((row) => ({ id: row.id })), rowCount: removed.length };
+      }
+      if (text.includes('UPDATE product_bundles SET')) {
+        const target = rows.find((row) => row.id === values[0]);
+        const set = text.slice(text.indexOf('SET ') + 4, text.indexOf(' WHERE '));
+        const columns = Array.from(set.matchAll(/(\w+) = \$\d+/g)).map((match) => match[1]);
+        for (const [index, column] of columns.entries()) if (target) target[column] = values[index + 1];
+        return { rows: [], rowCount: target ? 1 : 0 };
+      }
+      if (text.includes('INSERT INTO product_bundles')) {
+        rows.push({
+          id: values[0], name: values[1], description: values[2], price: values[3], tag: values[4],
+          product_ids: values[5], published: values[6], featured: values[7],
+        });
+        return { rows: [], rowCount: 0 };
+      }
+      if (text.includes('FROM product_bundles WHERE id = $1')) {
+        const found = rows.filter((row) => row.id === values[0]);
+        return { rows: found, rowCount: found.length };
+      }
+      if (text.includes('FROM product_bundles WHERE id LIKE')) {
+        return { rows: rows.map((row) => ({ id: row.id })), rowCount: rows.length };
+      }
+      if (text.includes('FROM product_bundles')) return { rows: [...rows], rowCount: rows.length };
+      return { rows: [], rowCount: 0 };
+    });
+    return createAdminHandlers(database);
+  }
+
+  it('lists bundles, and the roles that may change them, for every console role', async () => {
+    const admin = bundleConsole('Content & Reviews');
+    const result = await admin.handle({ method: 'GET', segments: ['bundles'], token });
+
+    expect(result.status).toBe(200);
+    expect(result.body.bundles).toEqual([]);
+    expect(result.body.roles).toEqual(['Super Admin', 'Store Administrator', 'Store Manager', 'Inventory Manager']);
+  });
+
+  it('creates a bundle with the next reference and a derived mrp', async () => {
+    const admin = bundleConsole();
+    const result = await admin.handle({
+      method: 'POST', segments: ['bundles'], token,
+      body: { name: 'The Bridal Glow Edit', price: 1799, productIds: [1, 2] },
+    });
+
+    expect(result.status).toBe(201);
+    const bundle = result.body.bundle as { id: string; name: string; mrp: number; tag?: string };
+    expect(bundle).toMatchObject({
+      id: 'BND-1', name: 'The Bridal Glow Edit', description: '', price: 1799, mrp: 1500,
+      productIds: [1, 2], published: true, featured: false,
+    });
+    expect(bundle.tag).toBeUndefined();
+  });
+
+  it('refuses a bundle with fewer than two members or a blank name', async () => {
+    const admin = bundleConsole();
+    const oneMember = await admin.handle({
+      method: 'POST', segments: ['bundles'], token,
+      body: { name: 'Solo', price: 900, productIds: [1] },
+    });
+    expect(oneMember.status).toBe(400);
+    expect((oneMember.body as { error?: string }).error).toBe('invalid_bundle');
+
+    const blankName = await admin.handle({
+      method: 'POST', segments: ['bundles'], token,
+      body: { name: ' ', price: 900, productIds: [1, 2] },
+    });
+    expect(blankName.status).toBe(400);
+  });
+
+  it('gates every bundle writer to the catalogue roles', async () => {
+    const admin = bundleConsole('Content & Reviews');
+    const result = await admin.handle({
+      method: 'POST', segments: ['bundles'], token,
+      body: { name: 'Blocked Edit', price: 900, productIds: [1, 2] },
+    });
+
+    expect(result.status).toBe(403);
+    expect((result.body as { message?: string }).message)
+      .toMatch(/Only Super Admin, Store Administrator, Store Manager, Inventory Manager can change bundles/);
+  });
+
+  it('keeps the same gate on bulk imports, which are bundle writers too', async () => {
+    const admin = bundleConsole('Store Manager');
+    const allowed = await admin.handle({
+      method: 'POST', segments: ['bundles', 'bulk'], token,
+      body: { rows: [{ productId: 1, bundleName: 'Allowed Duo', bundlePrice: 999 }] },
+    });
+    expect(allowed.status).toBe(201);
+
+    const blocked = bundleConsole('Content & Reviews');
+    const refused = await blocked.handle({
+      method: 'POST', segments: ['bundles', 'bulk'], token,
+      body: { rows: [{ productId: 1, bundleName: 'Blocked Duo', bundlePrice: 999 }] },
+    });
+    expect(refused.status).toBe(403);
+  });
+
+  it('updates only the fields a writer names', async () => {
+    const admin = bundleConsole('Inventory Manager');
+    const created = await admin.handle({
+      method: 'POST', segments: ['bundles'], token,
+      body: { name: 'Everyday Ritual', price: 1749, productIds: [1, 2] },
+    });
+    const id = (created.body.bundle as { id: string }).id;
+
+    const saved = await admin.handle({ method: 'PATCH', segments: ['bundles', id], token, body: { price: 1899, published: false } });
+
+    expect(saved.status).toBe(200);
+    expect(saved.body.bundle).toMatchObject({ id, name: 'Everyday Ritual', price: 1899, mrp: 1500, published: false });
+    expect((saved.body.bundle as { productIds: number[] }).productIds).toEqual([1, 2]);
+  });
+
+  it('refuses an update that would leave fewer than two members', async () => {
+    const admin = bundleConsole();
+    const created = await admin.handle({
+      method: 'POST', segments: ['bundles'], token,
+      body: { name: 'Triple Edit', price: 1200, productIds: [1, 2] },
+    });
+    const id = (created.body.bundle as { id: string }).id;
+
+    const result = await admin.handle({ method: 'PATCH', segments: ['bundles', id], token, body: { productIds: [1] } });
+
+    expect(result.status).toBe(400);
+    expect((result.body as { error?: string }).error).toBe('invalid_bundle');
+  });
+
+  it('deletes a bundle once, and reports a second delete as missing', async () => {
+    const admin = bundleConsole();
+    const created = await admin.handle({
+      method: 'POST', segments: ['bundles'], token,
+      body: { name: 'Short-lived Duo', price: 999, productIds: [1, 2] },
+    });
+    const id = (created.body.bundle as { id: string }).id;
+
+    const first = await admin.handle({ method: 'DELETE', segments: ['bundles', id], token });
+    expect(first.status).toBe(200);
+    expect((first.body as { message?: string }).message).toBe('Bundle deleted.');
+
+    const second = await admin.handle({ method: 'DELETE', segments: ['bundles', id], token });
+    expect(second.status).toBe(404);
+  });
+
+  it('groups the bundle bulk sheet by bundle name and skips standalone rows', async () => {
+    const admin = bundleConsole();
+    const result = await admin.handle({
+      method: 'POST', segments: ['bundles', 'bulk'], token,
+      body: { rows: [
+        { productId: 1, bundleName: 'Bridal Duo', bundlePrice: 1799, bundleDescription: 'Two wedding essentials.' },
+        { productId: 2, bundleName: 'Bridal Duo' },
+        { productId: 7, bundleName: 'Loose Product', type: 'Standalone' },
+        { productId: 8, bundleName: '' },
+      ] },
+    });
+
+    expect(result.status).toBe(201);
+    expect(result.body.created).toEqual(['BND-1']);
+    expect(result.body.errors).toEqual([]);
+    expect((result.body as { message?: string }).message).toBe('1 bundles imported.');
+
+    // The grouped sheet became one stored bundle with both members and the
+    // price the sheet named on its first row.
+    const listed = await admin.handle({ method: 'GET', segments: ['bundles'], token });
+    expect(listed.body.bundles).toEqual([{
+      id: 'BND-1', name: 'Bridal Duo', description: 'Two wedding essentials.', price: 1799,
+      mrp: 1500, tag: undefined, productIds: [1, 2], published: true, featured: false,
+    }]);
+  });
+});

@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { Product } from '../../data/catalog';
+import type { Bundle, Product } from '../../data/catalog';
+import { canManageBundles } from '../../auth/roles';
 import {
   adminApi,
   AdminApiError,
@@ -84,6 +85,8 @@ export type CollectionKey = 'jobs' | 'candidates' | 'partners' | 'customers' | '
 type AdminData = {
   account: AdminUser | null;
   products: Product[];
+  bundles: Bundle[];
+  bundleRoles: string[];
   orders: AdminOrder[];
   jobs: JobRecord[];
   candidates: CandidateRecord[];
@@ -101,6 +104,8 @@ type AdminData = {
 
 const emptyData: AdminData = {  account: null,
   products: [],
+  bundles: [],
+  bundleRoles: [],
   orders: [],
   jobs: [],
   candidates: [],
@@ -136,6 +141,11 @@ type AdminStore = AdminData & {
   saveProduct: (product: unknown, productId?: number) => Promise<Product>;
   setProductPublished: (product: Product, published: boolean) => Promise<void>;
   removeProduct: (product: Product) => Promise<void>;
+  /** Whether the signed-in role may create, edit or delete bundles. */
+  canManageBundles: boolean;
+  saveBundle: (bundle: unknown, bundleId?: string) => Promise<Bundle>;
+  setBundlePublished: (bundle: Bundle, published: boolean) => Promise<void>;
+  removeBundle: (bundle: Bundle) => Promise<void>;
   saveOrder: (id: string, order: unknown) => Promise<void>;
   removeOrder: (id: string) => Promise<void>;
   saveUser: (user: unknown, id?: string) => Promise<void>;
@@ -232,10 +242,11 @@ export function AdminStoreProvider({ children }: { children: ReactNode }) {
         setError('Sign in to the console to load your data.');
         return;
       }
-      const [account, products, orders, jobs, candidates, partners, customers, reviews, team, pages, datasets, settingsResponse, summary] = await Promise.all([
+      const [account, products, orderRows, bundleResponse, jobs, candidates, partners, customers, reviews, team, pages, datasets, settingsResponse, summary] = await Promise.all([
         adminApi.me(),
         adminApi.products(),
         adminApi.orders(),
+        adminApi.bundles(),
         adminApi.records<JobRecord>('jobs'),
         adminApi.records<CandidateRecord>('candidates'),
         adminApi.records<PartnerRecord>('partners'),
@@ -250,7 +261,9 @@ export function AdminStoreProvider({ children }: { children: ReactNode }) {
       setData({
         account,
         products,
-        orders,
+        bundles: Array.isArray(bundleResponse?.bundles) ? bundleResponse.bundles : [],
+        bundleRoles: Array.isArray(bundleResponse?.roles) ? bundleResponse.roles : [],
+        orders: orderRows,
         jobs,
         candidates,
         partners,
@@ -324,6 +337,50 @@ export function AdminStoreProvider({ children }: { children: ReactNode }) {
       try {
         const result = await adminApi.deleteProduct(product.id);
         setData((current) => ({ ...current, products: current.products.filter((entry) => entry.id !== product.id) }));
+        announce(result.message);
+      } catch (cause) {
+        abort(cause);
+      }
+    },
+
+    canManageBundles: canManageBundles(data.account?.role),
+
+    async saveBundle(bundle, bundleId) {
+      try {
+        const result = bundleId === undefined
+          ? await adminApi.createBundle(bundle)
+          : await adminApi.updateBundle(bundleId, bundle);
+        if (!result?.bundle) throw new Error('The saved bundle could not be verified. Please refresh and try again.');
+        setData((current) => ({
+          ...current,
+          bundles: current.bundles.some((entry) => entry.id === result.bundle.id)
+            ? current.bundles.map((entry) => (entry.id === result.bundle.id ? result.bundle : entry))
+            : [...current.bundles, result.bundle],
+        }));
+        announce(result.message);
+        return result.bundle;
+      } catch (cause) {
+        return abort(cause);
+      }
+    },
+
+    async setBundlePublished(bundle, published) {
+      try {
+        const result = await adminApi.updateBundle(bundle.id, { published });
+        setData((current) => ({
+          ...current,
+          bundles: current.bundles.map((entry) => (entry.id === bundle.id ? result.bundle : entry)),
+        }));
+        announce(published ? `${bundle.name} is live in the store.` : `${bundle.name} is hidden from shoppers.`);
+      } catch (cause) {
+        abort(cause);
+      }
+    },
+
+    async removeBundle(bundle) {
+      try {
+        const result = await adminApi.deleteBundle(bundle.id);
+        setData((current) => ({ ...current, bundles: current.bundles.filter((entry) => entry.id !== bundle.id) }));
         announce(result.message);
       } catch (cause) {
         abort(cause);

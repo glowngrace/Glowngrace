@@ -1,6 +1,6 @@
 import { z } from 'zod';
-import type { Product } from '../data/catalog.js';
-import { joinProductTags, mapProduct, parseProductImages, productRichTextSchema, productSlugSchema, productTagsSchema, type ParsedProductImage } from './handlers.js';
+import type { Bundle, Product } from '../data/catalog.js';
+import { joinBundleProductIds, joinProductTags, mapBundle, mapProduct, parseProductImages, productRichTextSchema, productSlugSchema, productTagsSchema, type ParsedProductImage } from './handlers.js';
 import { baseSelect, detailSelect, publishingSelect } from './catalogue.js';
 import { sanitizeRichText } from '../lib/rich-text.js';
 import {
@@ -11,7 +11,7 @@ import {
   type Row,
 } from './admin/collections.js';
 import { hashPassword, generateStrongPassword, generateOwnerPassword, newSessionToken, newResetToken, ownerPasswordPolicyError, passwordPolicy, passwordPolicyError, removedDemoPassword, resetTokenExpiry, resetTokenLookup, sessionExpiry, verifyPassword, hashResetToken } from './admin/passwords.js';
-import { consoleRoles, signupRoles, superAdminEmail, superAdminRole } from '../auth/roles.js';
+import { bundleRoles, canManageBundles, consoleRoles, signupRoles, superAdminEmail, superAdminRole } from '../auth/roles.js';
 import { emailGeneratedOwnerPassword, ownerCredentialsMessage, recordOwnerPasswordGenerated, saveOwnerPassword } from './admin/owner-password.js';
 import { isMissingSchema, schemaNotMigrated } from './schema.js';
 import { tryDeliverPendingMail } from './mailer.js';
@@ -289,6 +289,30 @@ export const productCreateSchema = z.object({
   itemDetails: productRichTextSchema.optional().default(''),
 });
 
+/**
+ * A bundle is sold at its own price, so `mrp` is never accepted from a client:
+ * it is the sum of the member prices and is derived when the bundle is read.
+ */
+export const bundleCreateSchema = z.object({
+  name: z.string().trim().min(2).max(180),
+  description: z.string().trim().max(2000).optional().default(''),
+  price: z.coerce.number().int().positive().max(99999999),
+  tag: z.string().trim().max(40).optional().default(''),
+  productIds: z.array(z.coerce.number().int().positive()).min(2, 'A bundle needs at least two products.').max(20),
+  published: flag.default(true),
+  featured: flag.default(false),
+});
+
+const bundleUpdateSchema = z.object({
+  name: z.string().trim().min(2).max(180).optional(),
+  description: z.string().trim().max(2000).optional(),
+  price: z.coerce.number().int().positive().max(99999999).optional(),
+  tag: z.string().trim().max(40).optional(),
+  productIds: z.array(z.coerce.number().int().positive()).min(2, 'A bundle needs at least two products.').max(20).optional(),
+  published: flag.optional(),
+  featured: flag.optional(),
+});
+
 const orderUpdateSchema = z.object({
   status: z.enum(['Placed', 'Processing', 'Packed', 'Shipped', 'Delivered', 'Returned', 'Cancelled']).optional(),
   customer: z.string().trim().min(2).max(160).optional(),
@@ -303,7 +327,7 @@ const orderUpdateSchema = z.object({
 });
 
 const bulkSchema = z.object({
-  dataset: z.enum(['products', 'jobs', 'candidates', 'partners', 'customers', 'reviews', 'users']),
+  dataset: z.enum(['products', 'bundles', 'jobs', 'candidates', 'partners', 'customers', 'reviews', 'users']),
   rows: z.array(z.record(z.union([z.string(), z.number(), z.boolean()]))).min(1).max(500),
 });
 
@@ -909,6 +933,53 @@ export function createAdminHandlers(database: Database) {
     return result.rows[0] ? mapProduct(result.rows[0]) : null;
   }
 
+  const bundleColumns = 'id, name, description, price, tag, product_ids, published, featured';
+
+  /** The member prices every bundle's derived `mrp` is summed from. */
+  async function bundleCatalogue() {
+    const result = await database.query('SELECT id, price FROM products', []);
+    return result.rows.map((row) => ({ id: Number(row.id), price: Number(row.price) }));
+  }
+
+  async function listBundles(): Promise<Bundle[]> {
+    const [rows, catalogue] = await Promise.all([
+      database.query(`SELECT ${bundleColumns} FROM product_bundles ORDER BY created_at, id`, []),
+      bundleCatalogue(),
+    ]);
+    return rows.rows.map((row) => mapBundle(row, catalogue));
+  }
+
+  async function readBundle(bundleId: string): Promise<Bundle | null> {
+    const result = await database.query(`SELECT ${bundleColumns} FROM product_bundles WHERE id = $1`, [bundleId]);
+    if (!result.rows[0]) return null;
+    return mapBundle(result.rows[0], await bundleCatalogue());
+  }
+
+  /**
+   * The next bundle reference, computed in JavaScript rather than by a database
+   * sort: `BND-10` sorts before `BND-9` as text, and the in-memory store has no
+   * integer cast to sort on.
+   */
+  async function nextBundleId() {
+    const result = await database.query('SELECT id FROM product_bundles WHERE id LIKE $1', ['BND-%']);
+    let highest = 0;
+    for (const row of result.rows) {
+      const numeric = Number(String(row.id).split('-')[1]);
+      if (Number.isFinite(numeric) && numeric > highest) highest = numeric;
+    }
+    return `BND-${highest + 1}`;
+  }
+
+  async function insertBundle(bundle: z.infer<typeof bundleCreateSchema>): Promise<Bundle | null> {
+    const bundleId = await nextBundleId();
+    await database.query(
+      `INSERT INTO product_bundles (id, name, description, price, tag, product_ids, published, featured)
+       VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6, $7, $8)`,
+      [bundleId, bundle.name, bundle.description, bundle.price, bundle.tag, joinBundleProductIds(bundle.productIds), bundle.published, bundle.featured],
+    );
+    return readBundle(bundleId);
+  }
+
   async function insertProductImages(productId: number, images: ParsedProductImage[]) {
     for (const image of images) {
       await database.query(
@@ -1351,6 +1422,51 @@ async function listPages() {
       return { created, errors };
     }
 
+    if (dataset === 'bundles') {
+      // The bundle sheet is one row per product: rows that share a bundle name
+      // are the members of one bundle, and a blank name or "Standalone" type is
+      // a product that is simply not in a bundle. That is what lets the template
+      // list the whole catalogue without every row becoming its own record.
+      const groups = new Map<string, { price: number; tag: string; description: string; productIds: Set<number>; row: number }>();
+      for (const [index, row] of rows.entries()) {
+        const type = String(row.type ?? '').trim().toLowerCase();
+        const name = String(row.bundleName ?? row.bundle_name ?? '').trim();
+        const productId = Number(row.productId ?? row.product_id);
+        if (!name || type === 'standalone' || type === 'product') continue;
+        const group = groups.get(name) ?? {
+          price: Number(row.bundlePrice ?? row.bundle_price ?? 0),
+          tag: String(row.bundleTag ?? row.bundle_tag ?? ''),
+          description: String(row.bundleDescription ?? row.bundle_description ?? ''),
+          productIds: new Set<number>(),
+          row: index + 2,
+        };
+        if (Number.isSafeInteger(productId) && productId > 0) group.productIds.add(productId);
+        if (!(group.price > 0)) {
+          const price = Number(row.bundlePrice ?? row.bundle_price ?? 0);
+          if (Number.isFinite(price) && price > 0) group.price = price;
+        }
+        groups.set(name, group);
+      }
+      for (const [name, group] of groups) {
+        const parsed = bundleCreateSchema.safeParse({
+          name,
+          description: group.description,
+          price: group.price,
+          tag: group.tag,
+          productIds: [...group.productIds],
+          published: true,
+          featured: false,
+        });
+        if (!parsed.success) {
+          errors.push({ row: group.row, message: `Check the bundle columns for "${name}".`, errors: fieldErrors(parsed.error) });
+          continue;
+        }
+        const createdBundle = await insertBundle(parsed.data);
+        if (createdBundle) created.push(createdBundle.id);
+      }
+      return { created, errors };
+    }
+
     const collection = collectionByKey.get(dataset);
     if (!collection) return { created, errors };
     for (const [index, row] of rows.entries()) {
@@ -1585,9 +1701,10 @@ async function listPages() {
 
     if (resource === 'summary') {
       if (method !== 'GET') return fail(405, 'method_not_allowed', 'The console summary is read-only.');
-      const [orders, products, jobs, candidates, partners, customers, reviews, pages, datasets] = await Promise.all([
+      const [orders, products, bundleRows, jobs, candidates, partners, customers, reviews, pages, datasets] = await Promise.all([
         database.query('SELECT count(*)::int AS total FROM orders'),
         database.query('SELECT count(*)::int AS total FROM products'),
+        database.query('SELECT count(*)::int AS total FROM product_bundles'),
         database.query('SELECT count(*)::int AS total FROM job_vacancies WHERE status = \'Open\''),
         database.query('SELECT count(*)::int AS total FROM candidates'),
         database.query('SELECT count(*)::int AS total FROM partner_salons'),
@@ -1601,6 +1718,7 @@ async function listPages() {
         body: {
           orders: Number(orders.rows[0]?.total ?? 0),
           products: Number(products.rows[0]?.total ?? 0),
+          bundles: Number(bundleRows.rows[0]?.total ?? 0),
           jobs: Number(jobs.rows[0]?.total ?? 0),
           candidates: Number(candidates.rows[0]?.total ?? 0),
           partners: Number(partners.rows[0]?.total ?? 0),
@@ -1712,6 +1830,68 @@ async function listPages() {
         return { status: 200, body: { deleted: productId, message: 'Product deleted from the catalogue.' } };
       }
       return fail(405, 'method_not_allowed', 'Products support list, create, update and delete.');
+    }
+
+    /**
+     * Product bundles. Listing is open to every console role; everything that
+     * changes one is gated to the catalogue roles, because a bundle is what the
+     * shop sells and its price is the shop's promise, not editorial.
+     */
+    if (resource === 'bundles') {
+      if (method === 'GET') return { status: 200, body: { bundles: await listBundles(), roles: bundleRoles } };
+      if (!canManageBundles(user.role)) {
+        return fail(403, 'forbidden', `Only ${bundleRoles.join(', ')} can change bundles.`);
+      }
+      if (rest[0] === 'bulk' && method === 'POST') {
+        const body = typeof request.body === 'object' && request.body !== null ? request.body as Record<string, unknown> : {};
+        const parsed = bulkSchema.safeParse({ ...body, dataset: 'bundles' });
+        if (!parsed.success) return fail(400, 'invalid_bulk', 'Check the spreadsheet and try again.');
+        const outcome = await bulkImport('bundles', parsed.data.rows);
+        return {
+          status: 201,
+          body: {
+            ...outcome,
+            message: outcome.errors.length === 0
+              ? `${outcome.created.length} bundles imported.`
+              : `${outcome.created.length} bundles imported, ${outcome.errors.length} skipped.`,
+          },
+        };
+      }
+      if (method === 'POST') {
+        const parsed = bundleCreateSchema.safeParse(request.body);
+        if (!parsed.success) return fail(400, 'invalid_bundle', 'Check the bundle details and try again.', { errors: fieldErrors(parsed.error) });
+        const created = await insertBundle(parsed.data);
+        return { status: 201, body: { bundle: created, message: 'Bundle added.' } };
+      }
+      if (id && (method === 'PATCH' || method === 'PUT')) {
+        const parsed = bundleUpdateSchema.safeParse(request.body);
+        if (!parsed.success) return fail(400, 'invalid_bundle', 'Check the bundle details and try again.', { errors: fieldErrors(parsed.error) });
+        const existing = await readBundle(id);
+        if (!existing) return fail(404, 'not_found', 'That bundle no longer exists.');
+        const update = parsed.data;
+        const columns: Record<string, unknown> = {};
+        if (update.name !== undefined) columns.name = update.name;
+        if (update.description !== undefined) columns.description = update.description;
+        if (update.price !== undefined) columns.price = update.price;
+        if (update.tag !== undefined) columns.tag = update.tag || null;
+        if (update.productIds !== undefined) columns.product_ids = joinBundleProductIds(update.productIds);
+        if (update.published !== undefined) columns.published = update.published;
+        if (update.featured !== undefined) columns.featured = update.featured;
+        if (Object.keys(columns).length === 0) return fail(400, 'empty_update', 'Change at least one detail before saving.');
+        const names = Object.keys(columns);
+        await database.query(
+          `UPDATE product_bundles SET ${names.map((name, position) => `${name} = $${position + 2}`).join(', ')}, updated_at = NOW() WHERE id = $1`,
+          [id, ...names.map((name) => columns[name])],
+        );
+        const saved = await readBundle(id);
+        return { status: 200, body: { bundle: saved, message: 'Bundle updated.' } };
+      }
+      if (id && method === 'DELETE') {
+        const result = await database.query('DELETE FROM product_bundles WHERE id = $1 RETURNING id', [id]);
+        if (result.rows.length === 0) return fail(404, 'not_found', 'That bundle no longer exists.');
+        return { status: 200, body: { deleted: id, message: 'Bundle deleted.' } };
+      }
+      return fail(405, 'method_not_allowed', 'Bundles support list, create, update and delete.');
     }
 
     if (resource === 'orders') {

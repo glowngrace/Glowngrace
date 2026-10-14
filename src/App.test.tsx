@@ -58,7 +58,8 @@ function stubAdminApi() {
             : url.endsWith('/admin/pages') ? { pages: [] }
               : url.endsWith('/admin/demo-data') ? { datasets: [] }
                 : url.endsWith('/admin/orders') ? { orders: [] }
-                  : { products: [], records: [] };
+                  : url.endsWith('/admin/bundles') ? { bundles: [], roles: ['Super Admin', 'Store Administrator', 'Store Manager', 'Inventory Manager'] }
+                    : { products: [], records: [] };
     return { ok: true, json: async () => payload } as Response;
   });
   vi.stubGlobal('fetch', fetchMock);

@@ -2,8 +2,11 @@ export type AdminSection =
   | 'dashboard'
   | 'orders'
   | 'products'
+  | 'bundles'
   | 'add-product'
   | 'edit-product'
+  | 'add-bundle'
+  | 'edit-bundle'
   | 'jobs'
   | 'add-job'
   | 'candidates'
@@ -38,7 +41,8 @@ export type IconName =
   | 'arrow'
   | 'home'
   | 'warn'
-  | 'spark';
+  | 'spark'
+  | 'gift';
 
 export const iconPaths: Record<IconName, string> = {  dash: 'M3.5 12.2 12 4.2l8.5 8-8.5 7.6z',
   box: 'M3.6 8.1 12 3.4l8.4 4.7v7.8L12 20.6l-8.4-4.7z M3.6 8.1 12 12.9l8.4-4.8 M12 12.9v7.7',
@@ -65,6 +69,7 @@ export const iconPaths: Record<IconName, string> = {  dash: 'M3.5 12.2 12 4.2l8.
   home: 'M3.6 10.4 12 3.6l8.4 6.8v9.6H3.6z M9.4 20v-6.6h5.2V20',
   warn: 'M12 4.4 21 19.6H3z M12 10.2v4.2 M12 16.8h.01',
   spark: 'M12 3.4l1.7 5.1 5.1 1.7-5.1 1.7-1.7 5.1-1.7-5.1-5.1-1.7 5.1-1.7z',
+  gift: 'M3.6 8.6h16.8v3.2H3.6z M5 11.8v8.6h14v-8.6 M12 8.6v11.8 M12 8.6c-1.6 0-4.4-.5-4.4-2.6A2 2 0 0 1 9.6 4c1.6 0 2.4 2 2.4 4.6 M12 8.6c1.6 0 4.4-.5 4.4-2.6A2 2 0 0 0 14.4 4c-1.6 0-2.4 2-2.4 4.6',
 };
 
 export const avatarImages = [

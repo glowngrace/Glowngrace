@@ -48,6 +48,7 @@ async function stubConsole(page: Page) {
   const collections: Record<string, unknown> = {
     me: { user: owner },
     products: { products: [] },
+    bundles: { bundles: [], roles: [] },
     orders: { orders: [] },
     jobs: { records: [] },
     candidates: { records: [] },

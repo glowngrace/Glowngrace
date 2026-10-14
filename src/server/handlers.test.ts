@@ -49,7 +49,7 @@ describe('checkout handler', () => {
     expect(written[0].text).toContain('INSERT INTO orders');
     expect(written[0].values).toEqual(expect.arrayContaining([169800, 4900, 8490, 183190]));
     expect(written[2].text).toContain('INSERT INTO order_items');
-    expect(written[2].values).toEqual(['order-uuid', 4, 'Glow Ritual Vitamin C Face Serum', 84900, 2]);
+    expect(written[2].values).toEqual(['order-uuid', 4, null, 'Glow Ritual Vitamin C Face Serum', 84900, 2]);
   });
 
   it('rejects invalid, unknown, duplicated and non-COD orders without writing', async () => {
@@ -98,7 +98,7 @@ describe('checkout handler', () => {
     // The price lookup, then the same four statements as the catalogue order.
     expect(query).toHaveBeenCalledTimes(5);
     const savedItems = statements(query).find((statement) => statement.text.includes('INSERT INTO order_items'));
-    expect(savedItems?.values).toEqual(['order-uuid', 9, 'New catalogue serum', 50000, 2]);
+    expect(savedItems?.values).toEqual(['order-uuid', 9, null, 'New catalogue serum', 50000, 2]);
   });
 });
 
